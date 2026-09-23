@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f8f5ec">
+<meta name="description" content="The latest measured Flower benchmark, its workload, and how to reproduce and profile it.">
+<meta property="og:title" content="Benchmarks · Flower">
+<meta property="og:description" content="The latest measured Flower benchmark, its workload, and how to reproduce and profile it.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://flower.js.org/operate/benchmarks.html">
+<link rel="canonical" href="https://flower.js.org/operate/benchmarks.html">
+<title>Benchmarks · Flower</title>
+<link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
+<link rel="stylesheet" href="../site.css?v=eb05c8aa5c04">
+<script src="../site.js?v=3184f0662fa5" defer></script>
+</head>
+<body class="doc-page">
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/">Guide</a><a href="../operate/" aria-current="page">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/flower-js-org/runtime">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
+<div class="documentation">
+<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/methods.html"><span>04</span>Methods & retries</a></li><li><a href="../guide/reads.html"><span>05</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>06</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>07</span>Leases & expiry</a></li><li><a href="../guide/workers.html"><span>08</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>09</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>10</span>Crypto & tokens</a></li><li><a href="../guide/deployments.html"><span>11</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li class="current"><a href="#top" aria-current="page"><span>03</span>Benchmarks</a><ol id="section-nav" aria-label="On this page"><li><a href="#latest-benchmark">A busy day in the garden</a></li><li><a href="#run-the-benchmark">Run it yourself</a></li><li><a href="#pizza-dashboard">Watch the live dashboard</a></li><li><a href="#compare-http-transports">Compare HTTP/1.1 and HTTP/2</a></li><li><a href="#profile-before-tuning">Profile before tuning</a></li><li><a href="#run-the-checks">Run the checks</a></li></ol></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/definitions.html"><span>03</span>Contexts & definitions</a></li><li><a href="../reference/client.html"><span>04</span>Client & transports</a></li><li><a href="../reference/time.html"><span>05</span>Expiry, leases & timers</a></li><li><a href="../reference/crypto.html"><span>06</span>NaCl & JWT</a></li><li><a href="../reference/keys.html"><span>07</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>08</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>09</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>10</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>11</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>12</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Three nodes.<br>One failure tolerated.<br>Honest limits.</p></div></aside>
+<main id="main" tabindex="-1">
+<header class="page-intro" id="top"><p class="eyebrow">Operate · 03</p><h1>How fast is it?</h1><p class="lead">The latest measured run, what it measures, and how to run it yourself.</p></header>
+<div class="page-content">
+<!-- content:start -->
+<p>The benchmark runs <a href="https://github.com/flower-js-org/runtime/blob/main/examples/goblin-pizza.ts"><code>examples/goblin-pizza.ts</code></a>, which uses methods, derived stats, timers, worker leases, retries and fencing. It starts its own fresh local cluster and never touches an existing one.</p>
+<!-- latest-benchmark:start -->
+<section class="benchmark-latest" id="latest-benchmark" aria-labelledby="latest-benchmark-title">
+<div class="benchmark-heading"><div><p class="eyebrow">LATEST MEASURED RUN · <time datetime="2026-09-25T00:21:27.487Z">2026-09-25</time></p><h2 id="latest-benchmark-title">A busy day in the garden.</h2></div><img src="../assets/flower.svg" width="36" height="36" alt="" aria-hidden="true"></div>
+<dl class="benchmark-stats"><div><dt>Global customer calls&nbsp;/&nbsp;s</dt><dd>56,155</dd></div><div><dt>Read p99</dt><dd>12.9 <small>ms</small></dd></div><div><dt>Write p99</dt><dd>228.3 <small>ms</small></dd></div><div><dt>Independent Raft groups</dt><dd>8 <small>× 3 replicas</small></dd></div></dl>
+<p class="benchmark-policy"><strong>Replica-local reads: lag is allowed.</strong> 70% reads / 30% mutations · HTTP/2 · 60.1 measured seconds.</p>
+<p><strong>Run passed. 8/8 group audits passed.</strong> 8 injected leader failures; quorum recovery 613–733 ms.</p>
+<p class="benchmark-context">Apple M5 Pro; all replicas and load generators share one machine. Completed customer calls use the union measurement window; retries, worker traffic, and explicit replays do not inflate throughput. Reads may be stale; mutations and audits retain fresh checks.</p>
+<p class="benchmark-links"><a href="../bench/latest.html">Charts &amp; every group →</a><a href="../bench/latest.json">Raw measurements ↓</a></p>
+</section>
+<!-- latest-benchmark:end -->
+<section id="run-the-benchmark">
+<h2>Run it yourself</h2>
+<div class="code-block"><div class="code-head"><span>Run and stress</span><button type="button" class="copy-button" aria-label="Copy Run and stress">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">npm</span> ci
+<span class="kw">npm</span> run build
+<span class="kw">cargo</span> build <span class="var">--release</span> <span class="var">--bin</span> flower
+<span class="kw">npm</span> run bench
+<span class="kw">cargo</span> build <span class="var">--release</span> <span class="var">--bin</span> flower <span class="var">--bin</span> flower<span class="var">-bench-driver</span>
+<span class="kw">npm</span> run bench:stress
+
+<span class="comment"># Customize the base command, with one copy of each flag:</span>
+<span class="kw">npm</span> run bench -- <span class="var">--duration</span> <span class="num">30</span> <span class="var">--concurrency</span> <span class="num">16</span> <span class="var">--workers</span> <span class="num">4</span> \
+  <span class="var">--max-orders</span> <span class="num">64</span> <span class="var">--drain</span> <span class="num">180</span> <span class="var">--json</span> bench/results/custom.json
+<span class="kw">npm</span> run bench -- <span class="var">--help</span></code></pre></div>
+<ul>
+<li><strong>What counts:</strong> successful customer calls (shop reads, orders, tips). A retried call counts once. Worker polls, deliveries, replays, setup and the audit don't count.</li>
+<li><strong>The workload</strong> is closed-loop: each customer waits for one call before starting the next. The mix is 30% orders, 40% reads and 30% tips until the order cap, then orders turn into reads.</li>
+<li><strong>Everything runs on one machine</strong>, servers and load generator together. Your production numbers depend on your workload and hardware.</li>
+<li><strong>The run fails</strong> on unexpected errors, an unfinished drain, bad fencing or replays, or a failed business check.</li>
+<li><strong>Reports</strong> go to <code>bench/results/</code> as JSON and HTML, with the settings and binary used.</li>
+</ul>
+<p>The base command starts one three-node group. <code>bench:stress</code> runs eight independent groups, each with its own customers, workers and leader crash. Its preset sets 256 customers per group, serial writer preparation and a 1,024-request writer queue, overriding the normal defaults. Environment variables override the preset. See the <a href="https://github.com/flower-js-org/runtime/blob/main/bench/README.md">benchmark guide</a> for all options, and the <a href="https://github.com/flower-js-org/runtime/blob/main/bench/READS.md">measurement analysis</a> and <a href="https://github.com/flower-js-org/runtime/blob/main/bench/CPU.md">CPU investigation</a> for past results.</p>
+<p>To publish a new result to this page, run inside <code>nix develop</code>, build first and leave profiling off:</p><div class="code-block"><div class="code-head"><span>Measure independent Raft groups</span><button type="button" class="copy-button" aria-label="Copy Measure independent Raft groups">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">npm</span> ci
+<span class="kw">cargo</span> build <span class="var">--release</span> <span class="var">--locked</span> <span class="var">--bin</span> flower <span class="var">--bin</span> flower<span class="var">-bench-driver</span>
+<span class="kw">npm</span> run bench:stress
+<span class="kw">node</span> scripts/publish<span class="var">-bench-results</span>.mjs bench/results/latest.json
+<span class="kw">node</span> scripts/publish<span class="var">-bench-results</span>.mjs <span class="var">--check</span></code></pre></div>
+</section>
+<section id="pizza-dashboard">
+<h2>Watch the live dashboard</h2>
+<p>The <a href="https://github.com/flower-js-org/runtime/tree/main/examples/pizza-dashboard">dashboard</a> shows one tenant's stores, orders, oven timers, drone leases and rankings from a single watched <code>pizza.dashboard({tenant})</code> value.</p><div class="code-block"><div class="code-head"><span>Run the live kitchen board</span><button type="button" class="copy-button" aria-label="Copy Run the live kitchen board">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">cargo</span> build <span class="var">--release</span> <span class="var">--bin</span> flower
+<span class="kw">npm</span> run demo:pizza
+<span class="comment"># Optional: fixed port, paused arrivals, stop automatically after two minutes</span>
+<span class="kw">npm</span> run demo:pizza -- <span class="var">--port</span> <span class="num">3030</span> <span class="var">--paused</span> <span class="var">--duration</span> <span class="num">120</span></code></pre></div>
+<p>Open the printed URL. It starts a fresh three-node cluster with three tenants. Place orders, tip goblins, pause arrivals or crash the leader. Ctrl+C stops everything and deletes its data.</p>
+<div class="note"><span class="note-mark" aria-hidden="true">↳</span><p><strong>The dashboard reads replica-local data.</strong> It can lag with no bound, and a reconnect may show an older revision. The benchmark's shop reads use <code>pizza.shop.local</code> the same way; pass <code>--read-consistency fresh</code> to measure fresh reads instead.</p></div>
+</section>
+<section id="compare-http-transports">
+<h2>Compare HTTP/1.1 and HTTP/2</h2>
+<p>Method calls use HTTP/1.1 by default. Add <code>--http2</code> to use pooled HTTP/2. Node-to-node traffic always uses HTTP/2.</p><div class="code-block"><div class="code-head"><span>HTTP/2 methods with leader failover</span><button type="button" class="copy-button" aria-label="Copy HTTP/2 methods with leader failover">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">npm</span> run bench -- <span class="var">--http2</span> <span class="var">--duration</span> <span class="num">30</span> <span class="var">--concurrency</span> <span class="num">32</span> <span class="var">--workers</span> <span class="num">4</span> \
+  <span class="var">--max-orders</span> <span class="num">96</span> <span class="var">--chaos</span> <span class="var">--json</span> bench/results/http<span class="num">2</span>.json</code></pre></div><p>Keep the workload and binary the same when you compare. The benchmark reuses request IDs when it retries; the HTTP/2 client itself doesn't retry uncertain calls.</p>
+</section>
+<section id="profile-before-tuning">
+<h2>Profile before tuning</h2>
+<p>Profile under the same mixed load before changing settings. Skip the leader crash for a first comparison.</p><div class="code-block"><div class="code-head"><span>macOS · native stack profile</span><button type="button" class="copy-button" aria-label="Copy macOS · native stack profile">Copy</button></div><pre tabindex="0"><code class="language-sh">CARGO_PROFILE_RELEASE_DEBUG=<span class="num">1</span> <span class="kw">cargo</span> build <span class="var">--release</span> <span class="var">--bin</span> flower
+<span class="kw">npm</span> run bench -- <span class="var">--duration</span> <span class="num">30</span> <span class="var">--concurrency</span> <span class="num">32</span> <span class="var">--workers</span> <span class="num">4</span> \
+  <span class="var">--max-orders</span> <span class="num">96</span> <span class="var">--drain</span> <span class="num">180</span> \
+  <span class="var">--cpu-profile</span> bench/results/profile<span class="var">-mixed</span>.sample.txt \
+  <span class="var">--json</span> bench/results/profile<span class="var">-mixed</span>.json
+
+<span class="comment"># Batch timing for the same mixed workload (one group).</span>
+FLOWER_PROFILE_STORAGE=<span class="num">1</span> FLOWER_PROFILE_EVALUATOR=<span class="num">1</span> \
+<span class="kw">node</span> bench/profile<span class="var">-mixed</span>.mjs <span class="var">--http2</span> <span class="var">--duration</span> <span class="num">30</span> <span class="var">--concurrency</span> <span class="num">128</span> \
+  <span class="var">--workers</span> <span class="num">4</span> <span class="var">--max-orders</span> <span class="num">96</span> <span class="var">--json</span> /tmp/flower<span class="var">-mixed-profile</span>.json</code></pre></div>
+<ul>
+<li>The first command samples native stacks on the initial leader with macOS <code>/usr/bin/sample</code>. It shows where threads spend time, not CPU percentages or TypeScript lines.</li>
+<li>The second writes an extra <code>*-groups.json</code> with per-batch timings. Phases overlap, so don't add them up as wall time.</li>
+<li><code>node bench/profile-otel.mjs</code> takes the same flags and writes an HTML report of request, writer, storage and Raft timing. See the <a href="https://github.com/flower-js-org/runtime/blob/main/TELEMETRY.md">OpenTelemetry guide</a>.</li>
+<li>Profiling slows things down. Rerun without it before quoting throughput.</li>
+</ul>
+<p>More options are in the <a href="https://github.com/flower-js-org/runtime/blob/main/bench/README.md#profiling">profiling commands</a>.</p>
+</section>
+<section id="run-the-checks">
+<h2>Run the checks</h2>
+<p>Run the test suite from the checkout:</p>
+<div class="code-block"><div class="code-head"><span>Validation from the checkout</span><button type="button" class="copy-button" aria-label="Copy Validation from the checkout">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">npm</span> run check
+<span class="kw">cargo</span> test
+<span class="kw">cargo</span> build
+<span class="kw">node</span> tests/e<span class="num">2</span>e.mjs
+<span class="kw">node</span> tests/e<span class="num">2</span>e<span class="var">-http2</span>.mjs
+<span class="kw">node</span> tests/e<span class="num">2</span>e<span class="var">-watch</span>.mjs</code></pre></div>
+<p>Benchmarks clean up their temporary data when they stop; pass <code>--keep-data</code> to keep it for inspection.</p>
+</section>
+<!-- content:end -->
+</div>
+<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../operate/capacity.html"><small>Previous · Operate</small>Capacity & budgets</a><a rel="next" href="../operate/boundaries.html"><small>Next · Operate</small>Current boundaries</a></nav>
+</main>
+</div>
+<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/flower-js-org/runtime">Source ↗</a></div></div></div>
+<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
+</body>
+</html>

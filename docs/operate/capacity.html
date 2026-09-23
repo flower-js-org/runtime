@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f8f5ec">
+<meta name="description" content="Configure Flower's capacity, execution and transport budgets for your machine.">
+<meta property="og:title" content="Capacity &amp; budgets · Flower">
+<meta property="og:description" content="Configure Flower's capacity, execution and transport budgets for your machine.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://flower.js.org/operate/capacity.html">
+<link rel="canonical" href="https://flower.js.org/operate/capacity.html">
+<title>Capacity &amp; budgets · Flower</title>
+<link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
+<link rel="stylesheet" href="../site.css?v=eb05c8aa5c04">
+<script src="../site.js?v=3184f0662fa5" defer></script>
+</head>
+<body class="doc-page">
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/">Guide</a><a href="../operate/" aria-current="page">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/flower-js-org/runtime">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
+<div class="documentation">
+<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/methods.html"><span>04</span>Methods & retries</a></li><li><a href="../guide/reads.html"><span>05</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>06</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>07</span>Leases & expiry</a></li><li><a href="../guide/workers.html"><span>08</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>09</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>10</span>Crypto & tokens</a></li><li><a href="../guide/deployments.html"><span>11</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li class="current"><a href="#top" aria-current="page"><span>02</span>Capacity & budgets</a><ol id="section-nav" aria-label="On this page"><li><a href="#capacity">Workers and queues</a></li><li><a href="#budgets">Per-request limits</a></li></ol></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/definitions.html"><span>03</span>Contexts & definitions</a></li><li><a href="../reference/client.html"><span>04</span>Client & transports</a></li><li><a href="../reference/time.html"><span>05</span>Expiry, leases & timers</a></li><li><a href="../reference/crypto.html"><span>06</span>NaCl & JWT</a></li><li><a href="../reference/keys.html"><span>07</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>08</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>09</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>10</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>11</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>12</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Three nodes.<br>One failure tolerated.<br>Honest limits.</p></div></aside>
+<main id="main" tabindex="-1">
+<header class="page-intro" id="top"><p class="eyebrow">Operate · 02</p><h1>Size it for your machine.</h1><p class="lead">The settings that control how much work each node accepts, and how long each call may run.</p></header>
+<div class="page-content">
+<!-- content:start -->
+<p>All settings are environment variables, read once at startup. Set them the same on every node, then restart to apply. The <a href="https://github.com/flower-js-org/runtime/blob/main/bench/LIMITS.md">full settings reference</a> lists every option and its validation rules.</p>
+<section id="capacity">
+<h2>Workers and queues</h2>
+<p>Match these to your CPUs and memory. Bigger queues hold more waiting work; they don't add CPU. When a queue is full, requests get a 503.</p>
+<div class="table-wrap"><table><caption class="sr-only">Worker and queue settings</caption><thead><tr><th>Setting</th><th>Default</th><th>What it does</th></tr></thead><tbody>
+<tr><td><code>FLOWER_QUERY_WORKERS</code></td><td>CPU count</td><td>Slots for cache lookups and authorization callbacks.</td></tr>
+<tr><td><code>FLOWER_PREPARATION_WORKERS</code></td><td><code>FLOWER_QUERY_WORKERS</code></td><td>Shared slots per node for queries, writes, authorization and watch updates.</td></tr>
+<tr><td><code>FLOWER_WRITER_PREPARATION_WORKERS</code></td><td><code>FLOWER_PREPARATION_WORKERS</code></td><td>How many writes can be prepared in parallel before being committed in order. Set <code>1</code> for workloads where most writes conflict.</td></tr>
+<tr><td><code>FLOWER_PREPARATION_MEMORY_BYTES</code></td><td>workers × (guest + Rust memory)</td><td>Total memory reserved for running evaluations.</td></tr>
+<tr><td><code>FLOWER_QUEUED_INPUT_BYTES</code></td><td>64 MiB</td><td>Memory for waiting requests, cached responses in flight and connected watches' current values. Slow clients hold on to this memory.</td></tr>
+<tr><td><code>FLOWER_READ_QUEUE_CAPACITY</code></td><td>64 × CPUs</td><td>Fresh reads waiting for a quorum check.</td></tr>
+<tr><td><code>FLOWER_READ_TIMEOUT_MS</code></td><td>10,000 ms</td><td>Deadline for a fresh read, including queueing.</td></tr>
+<tr><td><code>FLOWER_WRITER_QUEUE_CAPACITY</code></td><td>128 × CPUs; 2 × batch size if set; 128 in fixed mode</td><td>Mutations waiting to be written.</td></tr>
+<tr><td><code>FLOWER_WRITER_BATCH_MODE</code></td><td>adaptive</td><td>Adaptive sizes write batches from measured cost. Set <code>fixed</code> for count-based batches.</td></tr>
+<tr><td><code>FLOWER_WRITER_BATCH_SIZE</code></td><td>unset (64 in fixed mode)</td><td>Optional cap on mutations per batch.</td></tr>
+<tr><td><code>FLOWER_HTTP2_MAX_STREAMS</code></td><td>unset (no limit)</td><td>Concurrent HTTP/2 streams per connection.</td></tr>
+</tbody></table></div>
+<p>Watches have no fixed count limit. Connections, memory and CPU set the real limit, so measure with your own queries and update rate.</p>
+</section>
+<section id="budgets">
+<h2>Per-request limits</h2>
+<p>These cap each evaluation and request. Raising one costs memory or waiting time; it never weakens isolation, quorum or durability.</p>
+<div class="table-wrap"><table><caption class="sr-only">Evaluation and size limits</caption><thead><tr><th>Setting</th><th>Default</th><th>What it does</th></tr></thead><tbody>
+<tr><td><code>FLOWER_EVALUATION_TIMEOUT_MS</code></td><td>5,000 ms</td><td>Deadline for one evaluation, including nested callbacks.</td></tr>
+<tr><td><code>FLOWER_BUNDLE_MAX_BYTES</code></td><td>2 MiB</td><td>Size of deployed application code.</td></tr>
+<tr><td><code>FLOWER_RESULT_MAX_BYTES</code></td><td>16 MiB</td><td>Size of a value returned by an evaluation.</td></tr>
+<tr><td><code>FLOWER_GUEST_MEMORY_BYTES</code></td><td>128 MiB</td><td>JavaScript memory for one evaluation.</td></tr>
+<tr><td><code>FLOWER_RUST_MEMORY_BYTES</code></td><td>128 MiB</td><td>Host memory for one evaluation's pending changes.</td></tr>
+<tr><td><code>FLOWER_INDEX_MEMORY_BYTES</code></td><td>16 MiB</td><td>Cache for lookups on undeclared indexes. Declared indexes are stored and don't use it.</td></tr>
+<tr><td><code>FLOWER_WASM_POOL_SLOTS</code></td><td>256</td><td>Sandbox instances per process. Nested callbacks each need one.</td></tr>
+<tr><td><code>FLOWER_WASM_RECYCLE_BYTES</code></td><td>96 MiB</td><td>Memory kept for reusing idle sandboxes. <code>0</code> keeps none.</td></tr>
+<tr><td><code>FLOWER_HTTP_MAX_BODY_BYTES</code></td><td>8 MiB</td><td>Incoming HTTP request body.</td></tr>
+<tr><td><code>FLOWER_TRANSACTION_MAX_BYTES</code></td><td>32 MiB</td><td>One replicated command.</td></tr>
+<tr><td><code>FLOWER_RPC_MAX_BYTES</code></td><td>64 MiB</td><td>One node-to-node message.</td></tr>
+</tbody></table></div>
+<p>To accept bigger payloads, raise the HTTP body, result, transaction, RPC and client limits together. HTTP headers have their own limits: <code>FLOWER_HTTP1_MAX_HEADERS</code> (100), <code>FLOWER_HTTP1_MAX_BUFFER_BYTES</code> (408 KiB) and <code>FLOWER_HTTP2_MAX_HEADER_LIST_BYTES</code> (16 KiB).</p>
+<div class="table-wrap"><table><caption class="sr-only">Timing and watch settings</caption><thead><tr><th>Setting</th><th>Default</th><th>What it does</th></tr></thead><tbody>
+<tr><td><code>FLOWER_WRITER_BATCH_MS</code></td><td>50 ms</td><td>Longest time spent filling a write batch. Adaptive mode often uses less.</td></tr>
+<tr><td><code>FLOWER_WRITER_WINDOW_MS</code></td><td>250 ms</td><td>How often writes pause so deployments and maintenance can run.</td></tr>
+<tr><td><code>FLOWER_DEPLOYMENT_PAGE_MS</code></td><td>200 ms</td><td>Target time per page of a staged rebuild. Lower means shorter write stalls; higher means faster rebuilds.</td></tr>
+<tr><td><code>FLOWER_MAINTENANCE_INTERVAL_MS</code></td><td>250 ms</td><td>How often timers and other maintenance are checked.</td></tr>
+<tr><td><code>FLOWER_MAINTENANCE_BURST_MS</code></td><td>50 ms</td><td>Time allowed per maintenance catch-up round.</td></tr>
+<tr><td><code>FLOWER_WATCH_REFRESH_MS</code></td><td>250 ms</td><td>How often idle watches are re-evaluated and fresh watches rechecked.</td></tr>
+<tr><td><code>FLOWER_WATCH_KEEPALIVE_MS</code></td><td>15,000 ms</td><td>Interval between watch-stream keepalives.</td></tr>
+<tr><td><code>FLOWER_WATCH_SEND_TIMEOUT_MS</code></td><td>5,000 ms</td><td>How long a slow watch client can fall behind before it is disconnected.</td></tr>
+</tbody></table></div>
+<details><summary>Memory use and sandbox reuse</summary><div class="details-body"><p>These limits are not a cap on process memory. Stored data, compiled code, caches and thread stacks cost extra. On 64-bit hosts each sandbox reserves 4 GiB of virtual address space; that isn't physical RAM.</p><p>Sandboxes are reset and reused between calls to save setup time. Every call still starts from clean state. <code>FLOWER_WASM_RECYCLE=0</code> turns reuse off; <code>FLOWER_WASM_DIRTY_PAGES=0</code> copies all memory on reset instead of only changed pages. See the <a href="https://github.com/flower-js-org/runtime/blob/main/bench/LIMITS.md">limits reference</a> for platform details.</p></div></details>
+</section>
+<!-- content:end -->
+</div>
+<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../operate/"><small>Previous · Operate</small>Run a cluster</a><a rel="next" href="../operate/benchmarks.html"><small>Next · Operate</small>Benchmarks</a></nav>
+</main>
+</div>
+<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/flower-js-org/runtime">Source ↗</a></div></div></div>
+<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
+</body>
+</html>

@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f8f5ec">
+<meta name="description" content="Start and operate a three-node Flower cluster: acknowledgements, operator routines and partition resizing.">
+<meta property="og:title" content="Run a cluster · Flower">
+<meta property="og:description" content="Start and operate a three-node Flower cluster: acknowledgements, operator routines and partition resizing.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://flower.js.org/operate/">
+<link rel="canonical" href="https://flower.js.org/operate/">
+<title>Run a cluster · Flower</title>
+<link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
+<link rel="stylesheet" href="../site.css?v=eb05c8aa5c04">
+<script src="../site.js?v=3184f0662fa5" defer></script>
+</head>
+<body class="doc-page">
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/">Guide</a><a href="../operate/" aria-current="page">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/flower-js-org/runtime">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
+<div class="documentation">
+<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/methods.html"><span>04</span>Methods & retries</a></li><li><a href="../guide/reads.html"><span>05</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>06</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>07</span>Leases & expiry</a></li><li><a href="../guide/workers.html"><span>08</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>09</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>10</span>Crypto & tokens</a></li><li><a href="../guide/deployments.html"><span>11</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li class="current"><a href="#top" aria-current="page"><span>01</span>Run a cluster</a><ol id="section-nav" aria-label="On this page"><li><a href="#start-three-distinct-nodes">Start three nodes</a></li><li><a href="#know-what-an-acknowledgement-means">What an acknowledged write means</a></li><li><a href="#a-practical-operator-loop">Day-to-day operations</a></li><li><a href="#resizing">Move partitions between groups</a></li></ol></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/definitions.html"><span>03</span>Contexts & definitions</a></li><li><a href="../reference/client.html"><span>04</span>Client & transports</a></li><li><a href="../reference/time.html"><span>05</span>Expiry, leases & timers</a></li><li><a href="../reference/crypto.html"><span>06</span>NaCl & JWT</a></li><li><a href="../reference/keys.html"><span>07</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>08</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>09</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>10</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>11</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>12</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Three nodes.<br>One failure tolerated.<br>Honest limits.</p></div></aside>
+<main id="main" tabindex="-1">
+<header class="page-intro" id="top"><p class="eyebrow">Operate · 01</p><h1>Run a three-node cluster.</h1><p class="lead">Three nodes survive one failure. The leader runs writes, a majority confirms them, and any node can answer reads.</p></header>
+<div class="page-content">
+<!-- content:start -->
+<div class="raft-diagram" role="img" aria-label="One Raft leader replicates committed changes to two followers. A majority of two can continue after one failure."><div><span class="node-light"></span><strong>Leader</strong><small>Evaluate + replicate</small></div><span class="raft-line" aria-hidden="true"></span><div><span class="node-light"></span><strong>Follower</strong><small>Apply + read</small></div><span class="raft-line" aria-hidden="true"></span><div><span class="node-light"></span><strong>Follower</strong><small>Apply + read</small></div><p>3 members · 2 for quorum · 1 failure tolerated</p></div>
+<section id="start-three-distinct-nodes">
+<h2>Start three nodes</h2>
+<p>Stop any single-node server first, since it holds port 7101. Run each server in its own terminal with the same operator token. Each node needs its own ID, address and data directory.</p><div class="code-block"><div class="code-head"><span>Each server terminal · same token</span><button type="button" class="copy-button" aria-label="Copy Each server terminal · same token">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">export</span> FLOWER_ADMIN_TOKEN=<span class="str">'replace-with-a-shared-operator-secret'</span>
+<span class="comment"># Run one of these commands per terminal:</span>
+./target/release/flower <span class="var">--id</span> <span class="num">1</span> <span class="var">--listen</span> <span class="num">127</span>.<span class="num">0</span>.<span class="num">0</span>.<span class="num">1</span>:<span class="num">7101</span> <span class="var">--data</span> .flower/cluster/node<span class="num">1</span>
+./target/release/flower <span class="var">--id</span> <span class="num">2</span> <span class="var">--listen</span> <span class="num">127</span>.<span class="num">0</span>.<span class="num">0</span>.<span class="num">1</span>:<span class="num">7102</span> <span class="var">--data</span> .flower/cluster/node<span class="num">2</span>
+./target/release/flower <span class="var">--id</span> <span class="num">3</span> <span class="var">--listen</span> <span class="num">127</span>.<span class="num">0</span>.<span class="num">0</span>.<span class="num">1</span>:<span class="num">7103</span> <span class="var">--data</span> .flower/cluster/node<span class="num">3</span></code></pre></div><div class="code-block"><div class="code-head"><span>Operator terminal · bootstrap once</span><button type="button" class="copy-button" aria-label="Copy Operator terminal · bootstrap once">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">export</span> FLOWER_ADMIN_TOKEN=<span class="str">'replace-with-a-shared-operator-secret'</span>
+<span class="kw">node</span> sdk/cli.ts init \
+  <span class="var">--members</span> <span class="num">1</span>=<span class="num">127</span>.<span class="num">0</span>.<span class="num">0</span>.<span class="num">1</span>:<span class="num">7101</span>,<span class="num">2</span>=<span class="num">127</span>.<span class="num">0</span>.<span class="num">0</span>.<span class="num">1</span>:<span class="num">7102</span>,<span class="num">3</span>=<span class="num">127</span>.<span class="num">0</span>.<span class="num">0</span>.<span class="num">1</span>:<span class="num">7103</span>
+
+<span class="kw">curl</span> <span class="var">-fsS</span> <span class="var">-H</span> <span class="str">"Authorization: Bearer $FLOWER_ADMIN_TOKEN"</span> \
+  http://<span class="num">127</span>.<span class="num">0</span>.<span class="num">0</span>.<span class="num">1</span>:<span class="num">7101</span>/raft/metrics</code></pre></div>
+<p>Point clients at any node. Writes and deployments go to the leader for you; queries and watches run on the node you called.</p><div class="code-block"><div class="code-head"><span>Select any reachable member</span><button type="button" class="copy-button" aria-label="Copy Select any reachable member">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">export</span> FLOWER_URL=<span class="str">'http://127.0.0.1:7102'</span>
+<span class="kw">node</span> sdk/cli.ts deploy examples/orders.ts
+<span class="comment"># Or pass --url http://127.0.0.1:7102 on an individual command.</span></code></pre></div>
+<ul>
+<li><strong>Separate hosts:</strong> use addresses the other nodes can reach. <code>--listen</code> is the socket to bind; <code>--advertise HOST:PORT</code> is the address peers use, if different. Member addresses have no <code>http://</code>.</li>
+<li><strong>If your entry node dies,</strong> switch clients to another node. Retrying calls and reconnecting watches is up to your application.</li>
+<li><strong>Failover</strong> usually starts within about 0.5 s (50 ms heartbeat, 150–300 ms election timeout, 300 ms leader lease). On slow networks or disks, raise <code>FLOWER_RAFT_HEARTBEAT_MS</code>, <code>FLOWER_RAFT_ELECTION_MIN_MS</code> and <code>FLOWER_RAFT_ELECTION_MAX_MS</code>. Use the same integer milliseconds on every node, with heartbeat &lt; min &lt; max. Values that are too short cause needless elections under load.</li>
+<li><strong>Node-to-node traffic</strong> uses HTTP/2 on the same ports. It is not encrypted unless you enable TLS (see below).</li>
+</ul>
+</section>
+<section id="know-what-an-acknowledgement-means">
+<h2>What an acknowledged write means</h2>
+<p>A mutation reply means a quorum stored the change durably and the node you called applied it. Crashes after that don't lose it.</p>
+<ul>
+<li><strong>One node can fail.</strong> Without a quorum, writes and fresh reads stop. Replica-local reads keep serving local data, which can be stale with no bound.</li>
+<li><strong>A timed-out mutation may still have committed.</strong> Retry with the same request ID.</li>
+<li><strong>Restart a stopped node with the same ID and data directory.</strong> It catches up on its own. Never run <code>init</code> on it again or reuse its directory under another ID. While it catches up, even its replica-local reads can be unavailable.</li>
+<li><strong>Live data is held in memory.</strong> Redb application tables hold the durable state for recovery. Raft checkpoints write metadata only; full images are encoded when a replica needs a snapshot transfer. Snapshot status is in <code>GET /admin/resources</code>; see the <a href="https://github.com/flower-js-org/runtime/blob/main/bench/LIMITS.md">snapshot settings</a> to tune when they run.</li>
+</ul>
+<div class="note"><span class="note-mark" aria-hidden="true">↳</span><p><strong>Flower is unreleased.</strong> APIs and storage and wire formats can change with no migration path. You can't downgrade a data directory, and some upgrades can't be rolled one node at a time: old and new builds refuse to talk, so upgrade all nodes together.</p></div>
+</section>
+<section id="a-practical-operator-loop">
+<h2>Day-to-day operations</h2>
+<ol class="steps"><li><strong>Check the process.</strong> <code>GET /health</code> only says the process is up. It doesn't prove quorum.</li><li><strong>Check consensus.</strong> <code>GET /raft/metrics</code> (operator token) shows the leader, members and replication progress. Read server logs during elections or storage errors.</li><li><strong>Check load.</strong> <code>GET /admin/resources</code> (operator token) shows worker pools, memory budgets and snapshots. Tune them with the <a href="capacity.html#capacity">capacity settings</a>.</li><li><strong>Deploy deliberately.</strong> A deployment switches code and recomputed values in one step; a rejected one leaves the old version running. For large rebuilds, use <a href="../guide/deployments.html#staged-deployment">staged deployment</a> and <a href="../guide/deployments.html#deployment-tuning">page tuning</a>. <a href="../guide/deployments.html#data-migrations">Data migrations</a> are explicit.</li><li><strong>Keep node data safe.</strong> Give each node its own persistent directory. Add nodes, remove nodes and upgrade with the <a href="https://github.com/flower-js-org/runtime/blob/main/MEMBERSHIP.md">membership API and rolling-upgrade procedure</a>, one node at a time.</li></ol>
+<div class="note"><span class="note-mark" aria-hidden="true">↳</span><p><strong>Before production:</strong> enable TLS with the three <code>FLOWER_TLS_*_FILE</code> settings, and set a separate <code>FLOWER_PEER_TOKEN</code> for node-to-node traffic (it falls back to <code>FLOWER_ADMIN_TOKEN</code> otherwise). Only trusted operators and nodes should reach admin endpoints. Flower has no identity provider; your authorize hooks decide who callers are. A compromised node compromises the cluster. See the <a href="https://github.com/flower-js-org/runtime/blob/main/TLS.md">TLS and token rotation guide</a>.</p></div>
+</section>
+<section id="resizing">
+<h2>Move partitions between groups</h2>
+<p>To spread load, move named partitions to other Raft groups. A partition's data, code, timers, leases and retry history move with it.</p>
+<ul>
+<li>Create and register the new groups first, then call <code>client.resize(groupIds)</code>. Flower moves one partition at a time.</li>
+<li>A partition keeps serving while it's copied and pauses only for the final cutover.</li>
+<li>Groups still share the machine's resources. Balancing is by partition count.</li>
+<li>A failed move resumes when its groups recover.</li>
+<li>Existing composite tenant keys are not movable partitions.</li>
+</ul>
+<p>See the <a href="../reference/partitions.html#partitions">partition API</a> for the details.</p>
+</section>
+<!-- content:end -->
+</div>
+<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../guide/deployments.html"><small>Previous · Guide</small>Deploy changes</a><a rel="next" href="../operate/capacity.html"><small>Next · Operate</small>Capacity & budgets</a></nav>
+</main>
+</div>
+<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/flower-js-org/runtime">Source ↗</a></div></div></div>
+<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
+</body>
+</html>

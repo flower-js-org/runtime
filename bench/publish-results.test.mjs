@@ -1,0 +1,130 @@
+import assert from "node:assert/strict";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { Stats } from "./metrics.mjs";
+import { summarizeGroups } from "./multi-group.mjs";
+import { childPath, publishBenchResults, renderPublishedSummary, replaceSummary } from "../scripts/publish-bench-results.mjs";
+
+function fixture() {
+  const stats = new Stats();
+  for (let i = 0; i < 100; i++) stats.recordOperation(i < 70 ? "pizza.shop.local" : "pizza.tip", { latencyMs: i < 70 ? 5 : 12.34, ok: true });
+  const options = { groups: 1, nodes: 3, readConsistency: "replica-local", http2: true };
+  const child = {
+    schemaVersion: 1, passed: true, correctnessPassed: true,
+    loadStartedAt: "2026-09-24T01:00:00.000Z", loadEndedAt: "2026-09-24T01:00:00.100Z",
+    options: { ...options, tenantIds: ["tenant-0"] },
+    binary: { sha256: "measured-binary" }, bundleHash: "measured-bundle",
+    environment: { cpu: "Test & CPU" },
+    phases: { load: stats.snapshot(100) }, audit: { passed: true }, chaos: [{ quorumRecoveryMs: 456.7 }],
+  };
+  const report = summarizeGroups([child], options);
+  report.groups[0].json = "input-groups/group-0.json";
+  return { report, child };
+}
+
+test("public summary preserves measured scope, consistency, audits and failure recovery", () => {
+  const { report: input } = fixture();
+  // Make the aggregate visibly different so neither split can borrow it.
+  input.latencyMs.all.p99 = 99.99;
+  const html = renderPublishedSummary(input);
+  assert.match(html, /1,000/);
+  assert.match(html, /<dt>Read p99<\/dt><dd>5 <small>ms/);
+  assert.match(html, /<dt>Write p99<\/dt><dd>12\.3 <small>ms/);
+  assert.doesNotMatch(html, /Customer p99|100 <small>ms/);
+  assert.match(html, /Replica-local reads: lag is allowed/);
+  assert.match(html, /70% reads \/ 30% mutations/);
+  assert.match(html, /1\/1 group audits passed/);
+  assert.match(html, /quorum recovery 457–457 ms/);
+  assert.match(html, /union measurement window/);
+  assert.match(html, /Test &amp; CPU/);
+  assert.doesNotMatch(html, /target|attainment/i);
+  input.correctnessPassed = false; input.passed = false; input.groups[0].audit.passed = false;
+  input.groups[0].chaos[0].quorumRecoveryMs = null;
+  assert.match(renderPublishedSummary(input), /Run failed/);
+  assert.match(renderPublishedSummary(input), /0\/1 injected failures have a recorded quorum recovery/);
+  input.latencyMs.all.p99 = null;
+  assert.throws(() => renderPublishedSummary(input), /incomplete or invalid/);
+});
+
+test("public summary leaves missing or empty split latencies unmeasured instead of using the aggregate", () => {
+  const { report: input } = fixture();
+  delete input.latencyMs.read;
+  input.latencyMs.mutation = { samples: 0, p99: 0 };
+  let html = renderPublishedSummary(input);
+  assert.match(html, /<dt>Read p99<\/dt><dd>—<\/dd>/);
+  assert.match(html, /<dt>Write p99<\/dt><dd>—<\/dd>/);
+  assert.doesNotMatch(html, /Customer p99|<small>ms<\/small>/);
+  input.latencyMs.read = { samples: 1, p99: 0 };
+  input.latencyMs.mutation = { samples: 1, p99: null };
+  html = renderPublishedSummary(input);
+  assert.match(html, /<dt>Read p99<\/dt><dd>0 <small>ms/);
+  assert.match(html, /<dt>Write p99<\/dt><dd>—<\/dd>/);
+});
+
+test("publication requires explicit markers and only reads child JSON within its source directory", () => {
+  const source = join(tmpdir(), "flower-results", "latest.json");
+  for (const path of ["../secret.json", "https://example.com/x.json", "/tmp/secret.json", "group.log", "groups\\secret.json"]) {
+    assert.throws(() => childPath(source, path), /relative JSON/);
+  }
+  assert.equal(childPath(source, "groups/0.json"), join(tmpdir(), "flower-results", "groups/0.json"));
+  const page = "before<!-- latest-benchmark:start -->old<!-- latest-benchmark:end -->after";
+  assert.equal(replaceSummary(page, "new"), "before<!-- latest-benchmark:start -->\nnew\n<!-- latest-benchmark:end -->after");
+  assert.throws(() => replaceSummary(page + page, "new"), /exactly one/);
+  assert.throws(() => replaceSummary("missing", "new"), /exactly one/);
+});
+
+test("publication is deterministic, checks child identity, and excludes unrelated logs and binaries", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "flower-publication-"));
+  try {
+    const site = join(directory, "docs"), input = join(directory, "results"), source = join(input, "latest.json");
+    await mkdir(join(input, "input-groups"), { recursive: true });
+    await mkdir(join(site, "operate"), { recursive: true });
+    const { report: aggregate, child } = fixture();
+    const splits = ["customerReadLatencyMs", "customerMutationLatencyMs"];
+    const expectedSplits = Object.fromEntries(splits.map((key) => [key, aggregate.groups[0][key]]));
+    // Older parent reports omit these splits but retain the original child buckets.
+    for (const key of splits) delete aggregate.groups[0][key];
+    await writeFile(source, JSON.stringify(aggregate));
+    const childFile = join(input, "input-groups/group-0.json");
+    await writeFile(childFile, JSON.stringify(child));
+    await writeFile(join(input, "private.log"), "do not publish");
+    await writeFile(join(input, "flower"), "do not publish");
+    for (const page of ["index.html", "operate/benchmarks.html"]) {
+      await writeFile(join(site, page), "<html><!-- latest-benchmark:start --><!-- latest-benchmark:end --></html>");
+    }
+    const result = await publishBenchResults({ source, site });
+    assert.equal(result.files, 6);
+    const publicSource = join(site, "bench/latest.json");
+    const snapshot = await readFile(publicSource, "utf8");
+    for (const key of splits) assert.deepEqual(JSON.parse(snapshot).groups[0][key], expectedSplits[key]);
+    assert.deepEqual(await publishBenchResults({ source: publicSource, site, check: true }), result);
+    await publishBenchResults({ source, site });
+    assert.equal(await readFile(publicSource, "utf8"), snapshot);
+    assert.deepEqual((await readdir(join(site, "bench"))).sort(), ["latest-groups", "latest.html", "latest.json"]);
+    assert.match(await readFile(join(site, "bench/latest-groups/group-0.html"), "utf8"), /href="\.\.\/latest.html">All groups/);
+    assert.match(await readFile(join(site, "bench/latest.html"), "utf8"), /href="latest-groups\/group-0.html"/);
+    assert.match(await readFile(join(site, "bench/latest.html"), "utf8"), /class="site-header"[\s\S]*href="\.\.\/reference\/"/);
+    assert.match(await readFile(join(site, "operate/benchmarks.html"), "utf8"), /href="\.\.\/bench\/latest.html"/);
+    aggregate.goodputRps *= 2;
+    await writeFile(source, JSON.stringify(aggregate));
+    await assert.rejects(publishBenchResults({ source, site }), /throughput must match/);
+    aggregate.goodputRps /= 2;
+    aggregate.latencyMs.all.p99 *= 2;
+    await writeFile(source, JSON.stringify(aggregate));
+    await assert.rejects(publishBenchResults({ source, site }), /latencyMs does not match/);
+    aggregate.latencyMs.all.p99 /= 2;
+    for (const key of splits) {
+      aggregate.groups[0][key] = { ...expectedSplits[key], p99: 123.45 };
+      await writeFile(source, JSON.stringify(aggregate));
+      await assert.rejects(publishBenchResults({ source, site }), new RegExp(`Group 0 ${key} does not match`));
+      delete aggregate.groups[0][key];
+    }
+    await writeFile(source, JSON.stringify(aggregate));
+    child.binary = { sha256: "wrong-binary" };
+    await writeFile(childFile, JSON.stringify(child));
+    await assert.rejects(publishBenchResults({ source, site }), /does not match/);
+    assert.equal(await readFile(publicSource, "utf8"), snapshot);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

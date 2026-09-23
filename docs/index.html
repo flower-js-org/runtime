@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f8f5ec">
+<meta name="description" content="Flower is a reactive TypeScript database built on Rust, QuickJS, and Raft. Plant a little TypeScript logic and let the reactive values grow.">
+<meta property="og:title" content="Flower — A little logic. A lot of bloom.">
+<meta property="og:description" content="Flower is a reactive TypeScript database built on Rust, QuickJS, and Raft. Plant a little TypeScript logic and let the reactive values grow.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://flower.js.org/">
+<link rel="canonical" href="https://flower.js.org/">
+<title>Flower — A little logic. A lot of bloom.</title>
+<link rel="icon" href="assets/flower.svg" type="image/svg+xml">
+<link rel="stylesheet" href="chrome.css?v=f7d91dd4a411">
+<link rel="stylesheet" href="site.css?v=eb05c8aa5c04">
+<link rel="stylesheet" href="home.css?v=8904251b3fd0">
+<script src="site.js?v=3184f0662fa5" defer></script>
+<script src="redirects.js?v=5f797aa782b9" defer></script>
+</head>
+<body class="home-page">
+<a class="skip-link" href="#main">Skip to the example</a>
+<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="./" aria-label="Flower home"><img src="assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="guide/">Guide</a><a href="operate/">Operate</a><a href="reference/">Reference</a><a class="site-repository" href="https://github.com/flower-js-org/runtime">GitHub ↗</a></div></div></div>
+<div class="wrap">
+<!-- content:start -->
+<section class="hero" aria-labelledby="hero-title"><div class="hero-copy"><p class="eyebrow"><span class="dot" aria-hidden="true"></span>Flower / A reactive TypeScript database</p><h1 id="hero-title">A little logic.<br><em>A lot of bloom.</em></h1><p>Flower is a database you program in TypeScript. You write the methods and the values derived from your data; Flower keeps those values up to date and copies every change to three servers with Raft.</p><div class="hero-actions"><a class="button" href="#recipe">Plant your first function <span aria-hidden="true">↓</span></a></div></div><figure class="hero-art"><img src="assets/garden.svg" width="480" height="310" alt="Pink, golden, and lavender flowers grow from connected green stems."><span class="art-label art-source">source</span><span class="art-label art-derive">derive</span><span class="art-label art-watch">watch</span><figcaption class="art-note">One change. Fresh blooms.</figcaption></figure></section>
+<div class="feature-strip" aria-label="Flower at a glance"><span><b aria-hidden="true">✳</b>Your methods are the API</span><span><b aria-hidden="true">↻</b>Derived values stay current</span><span><b aria-hidden="true">⌁</b>Survives a server failure</span><span><b aria-hidden="true">↗</b>Read from any replica</span></div>
+<main id="main" tabindex="-1">
+<section id="recipe" aria-labelledby="recipe-title"><div class="recipe-title"><div><h2 id="recipe-title">A tiny multiplayer garden.</h2><p>A complete app in about 70 lines: plant seeds, watch them bloom, share the view live.</p></div><a href="terrarium.ts" download="terrarium.ts">Complete app ↓</a></div>
+<article class="step"><div class="step-copy"><span class="number">01</span><h3>Define the data.</h3><p>Each garden has twelve spots. <code>flowers</code> stores the seeds; <code>garden</code> is a derived view that counts blooms and free spots.</p><div class="step-note">Flower recomputes the view whenever a flower in that garden changes.</div></div>
+<div class="code-block"><div class="code-head"><span><span class="file">docs/terrarium.ts</span> · start here</span><button class="copy-button" type="button" aria-label="Copy docs/terrarium.ts, start here">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { canonicalJson, collection, define, derive, mutation, query } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
+<span class="kw">import</span> { scheduler } <span class="kw">from</span> <span class="str">"@flower-js/sdk/scheduler"</span>;
+
+<span class="kw">type</span> Seed = { garden: <span class="kw">string</span>; id: <span class="kw">string</span> };
+<span class="kw">const</span> GARDEN_SIZE = <span class="num">12</span>;
+<span class="kw">const</span> flowers = collection&lt;Seed &amp; { plantedAt: <span class="kw">number</span>; bloomed: <span class="kw">boolean</span> }&gt;(<span class="str">"flowers"</span>)
+  .index(<span class="str">"garden"</span>, [<span class="str">"garden"</span>]);
+
+<span class="kw">const</span> garden = derive(<span class="str">"garden"</span>, (ctx, id: <span class="kw">string</span>) =&gt; {
+  <span class="kw">const</span> rows = ctx.query(flowers.by(<span class="str">"garden"</span>).eq(id));
+  <span class="kw">return</span> {
+    spacesLeft: GARDEN_SIZE - rows.length,
+    blooming: rows.filter(flower =&gt; flower.bloomed).length,
+    flowers: Object.fromEntries(rows.map(flower =&gt;
+      [flower.id, flower.bloomed ? <span class="str">"🌼"</span> : <span class="str">"🌱"</span>])),
+  };
+});
+<span class="kw">const</span> view = query(<span class="str">"view"</span>, (ctx, id: <span class="kw">string</span>) =&gt; ctx.get(garden, id),
+  { consistency: <span class="str">"replica-local"</span> });</code></pre></div>
+</article>
+<article class="step"><div class="step-copy"><span class="number">02</span><h3>Add the methods.</h3><p><code>plant</code> checks there is room, saves the seed and schedules two timers: bloom after 5 seconds, remove after 35.</p><p>Mutations run one at a time, so two gardeners can never overfill a garden.</p><div class="step-note">Only <code>garden.plant</code> and <code>garden.view</code> are public. Timers mean “not before”: an outage can delay them.</div></div>
+<div class="code-block"><div class="code-head"><span><span class="file">docs/terrarium.ts</span> · continue the same file</span><button class="copy-button" type="button" aria-label="Copy docs/terrarium.ts, continue the same file">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">type</span> Season = { key: <span class="kw">string</span>; plantedAt: <span class="kw">number</span> };
+<span class="kw">const</span> bloom = mutation(<span class="str">"internal.bloom"</span>, (ctx, event: Season) =&gt; {
+  <span class="kw">const</span> flower = ctx.get(flowers, event.key);
+  <span class="kw">if</span> (flower?.plantedAt === event.plantedAt) {
+    ctx.set(flowers, event.key, { ...flower, bloomed: <span class="kw">true</span> });
+  }
+  <span class="kw">return</span> <span class="kw">null</span>;
+});
+<span class="kw">const</span> perish = mutation(<span class="str">"internal.perish"</span>, (ctx, event: Season) =&gt; {
+  <span class="kw">if</span> (ctx.get(flowers, event.key)?.plantedAt === event.plantedAt) {
+    ctx.<span class="kw">delete</span>(flowers, event.key);
+  }
+  <span class="kw">return</span> <span class="kw">null</span>;
+});
+<span class="kw">const</span> seasons = scheduler(<span class="str">"seasons"</span>, { bloom, perish });
+
+<span class="kw">const</span> plant = mutation(<span class="str">"plant"</span>, (ctx, seed: Seed) =&gt; {
+  <span class="kw">if</span> (!seed || ![seed.garden, seed.id].every(v =&gt; <span class="kw">typeof</span> v === <span class="str">"string"</span> &amp;&amp; v)) {
+    <span class="kw">throw</span> <span class="kw">new</span> Error(<span class="str">"Give your garden and seed a name."</span>);
+  }
+  <span class="kw">const</span> key = canonicalJson([seed.garden, seed.id]);
+  <span class="kw">if</span> (ctx.get(flowers, key)) <span class="kw">throw</span> <span class="kw">new</span> Error(<span class="str">"That spot is already planted."</span>);
+  <span class="kw">if</span> (ctx.query(flowers.by(<span class="str">"garden"</span>).eq(seed.garden)).length &gt;= GARDEN_SIZE) {
+    <span class="kw">throw</span> <span class="kw">new</span> Error(<span class="str">"Garden full! Wait for a flower to make room."</span>);
+  }
+  <span class="kw">const</span> plantedAt = ctx.now();
+  ctx.set(flowers, key, { garden: seed.garden, id: seed.id, plantedAt, bloomed: <span class="kw">false</span> });
+  <span class="kw">const</span> event = { key, plantedAt }; <span class="comment">// An old timer cannot affect a replacement.</span>
+  seasons.at(ctx, <span class="str">`bloom:${key}`</span>, plantedAt + <span class="num">5_000</span>, <span class="str">"bloom"</span>, event);
+  seasons.at(ctx, <span class="str">`perish:${key}`</span>, plantedAt + <span class="num">35_000</span>, <span class="str">"perish"</span>, event);
+  ctx.materialize(garden, seed.garden);
+  <span class="kw">return</span> { planted: seed.id };
+});
+
+<span class="kw">export</span> <span class="kw">default</span> define({
+  collections: [flowers, seasons.records],
+  definitions: [garden, bloom, perish],
+  maintenance: seasons.maintenance,
+  http: { <span class="str">"garden.plant"</span>: plant, <span class="str">"garden.view"</span>: view },
+});</code></pre></div>
+</article>
+<article class="step"><div class="step-copy"><span class="number">03</span><h3>Call it and watch.</h3><p>Plant a seed, then watch the garden change live. Every viewer sees the same garden.</p><p>This view may lag slightly behind; drop <code>replica-local</code> for always-fresh reads. Anyone can plant here: <a href="guide/methods.html#authorization">add authorization</a> for private gardens.</p><div class="step-note">Watches show the latest state and may skip steps. Reuse the request ID when retrying a write.</div></div>
+<div class="code-block"><div class="code-head"><span><span class="file">docs/terrarium-client.ts</span> · outside the database</span><button class="copy-button" type="button" aria-label="Copy docs/terrarium-client.ts, outside the database">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { FlowerClient } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
+
+<span class="kw">const</span> terrarium = <span class="kw">new</span> FlowerClient(<span class="str">"http://127.0.0.1:7101"</span>);
+<span class="kw">await</span> terrarium.mutate(<span class="str">"garden.plant"</span>, {
+  garden: <span class="str">"moon-garden"</span>, id: <span class="str">"luna"</span>,
+}, { requestId: <span class="str">"plant-moon-garden-luna"</span> }); <span class="comment">// Reuse this ID on retries.</span>
+
+<span class="kw">for</span> <span class="kw">await</span> (<span class="kw">const</span> { value } <span class="kw">of</span> terrarium.watch(<span class="str">"garden.view"</span>, <span class="str">"moon-garden"</span>)) {
+  console.log(value);
+  <span class="comment">// { spacesLeft: 11, blooming: 0, flowers: { luna: "🌱" } }</span>
+  <span class="comment">// After 5s: a bloom. After 35s: an empty spot, ready for another seed.</span>
+}</code></pre></div>
+</article></section>
+<section class="run" aria-labelledby="run-title"><div><h2 id="run-title">Run it yourself.</h2><p><a href="guide/">Start a local Flower node</a>, then run these two commands from the repository.</p><p>Change the seed ID to plant another flower. Change the garden name to start a new garden.</p><a href="terrarium-client.ts" download="terrarium-client.ts">Download the client ↓</a></div>
+<div class="code-block"><div class="code-head"><span><span class="file">Terminal</span> · repository root</span><button class="copy-button" type="button" aria-label="Copy Terminal, repository root">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">node</span> sdk/cli.ts deploy docs/terrarium.ts <span class="var">--initialization</span> static
+<span class="kw">node</span> docs/terrarium<span class="var">-client</span>.ts</code></pre></div>
+</section>
+<!-- latest-benchmark:start -->
+<section class="benchmark-latest" id="latest-benchmark" aria-labelledby="latest-benchmark-title">
+<div class="benchmark-heading"><div><p class="eyebrow">LATEST MEASURED RUN · <time datetime="2026-09-25T00:21:27.487Z">2026-09-25</time></p><h2 id="latest-benchmark-title">A busy day in the garden.</h2></div><img src="assets/flower.svg" width="36" height="36" alt="" aria-hidden="true"></div>
+<dl class="benchmark-stats"><div><dt>Global customer calls&nbsp;/&nbsp;s</dt><dd>56,155</dd></div><div><dt>Read p99</dt><dd>12.9 <small>ms</small></dd></div><div><dt>Write p99</dt><dd>228.3 <small>ms</small></dd></div><div><dt>Independent Raft groups</dt><dd>8 <small>× 3 replicas</small></dd></div></dl>
+<p class="benchmark-policy"><strong>Replica-local reads: lag is allowed.</strong> 70% reads / 30% mutations · HTTP/2 · 60.1 measured seconds.</p>
+<p><strong>Run passed. 8/8 group audits passed.</strong> 8 injected leader failures; quorum recovery 613–733 ms.</p>
+<p class="benchmark-context">Apple M5 Pro; all replicas and load generators share one machine. Completed customer calls use the union measurement window; retries, worker traffic, and explicit replays do not inflate throughput. Reads may be stale; mutations and audits retain fresh checks.</p>
+<p class="benchmark-links"><a href="bench/latest.html">Charts &amp; every group →</a><a href="bench/latest.json">Raw measurements ↓</a><a href="operate/benchmarks.html">Workload &amp; reproduction →</a></p>
+</section>
+<!-- latest-benchmark:end -->
+<section class="more" aria-label="Room to grow"><article><span class="icon" aria-hidden="true"><img src="assets/flower.svg" width="25" height="25" alt=""></span><h3>Do slow work outside.</h3><p>Call APIs, send email or render previews from ordinary worker processes. Flower tracks what needs doing and who is doing it.</p><a href="guide/workers.html">External workers →</a></article><article><span class="icon" aria-hidden="true"><img src="assets/flower.svg" width="25" height="25" alt=""></span><h3>Read from any replica.</h3><p>Spread reads across servers. They are fresh by default; opt into faster, possibly stale reads per query.</p><a href="guide/reads.html">Reads &amp; live queries →</a></article><article><span class="icon" aria-hidden="true"><img src="assets/flower.svg" width="25" height="25" alt=""></span><h3>Survive a failure.</h3><p>Run three servers and lose any one. A write is confirmed only once a majority has saved it to disk.</p><a href="operate/">Run a cluster →</a></article></section>
+</main>
+<!-- content:end -->
+</div>
+<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="./" aria-label="Flower home"><img src="assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="guide/">Guide</a><a href="operate/">Operate</a><a href="reference/">Reference</a><a href="operate/benchmarks.html">Benchmarks</a><a href="https://github.com/flower-js-org/runtime">Source ↗</a></div></div></div>
+<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
+</body>
+</html>

@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f8f5ec">
+<meta name="description" content="Deploy computation changes, stage large rebuilds, tune page sizes, and migrate stored records.">
+<meta property="og:title" content="Deploy changes · Flower">
+<meta property="og:description" content="Deploy computation changes, stage large rebuilds, tune page sizes, and migrate stored records.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://flower.js.org/guide/deployments.html">
+<link rel="canonical" href="https://flower.js.org/guide/deployments.html">
+<title>Deploy changes · Flower</title>
+<link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
+<link rel="stylesheet" href="../site.css?v=eb05c8aa5c04">
+<script src="../site.js?v=3184f0662fa5" defer></script>
+</head>
+<body class="doc-page">
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/" aria-current="page">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/flower-js-org/runtime">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
+<div class="documentation">
+<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/methods.html"><span>04</span>Methods & retries</a></li><li><a href="../guide/reads.html"><span>05</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>06</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>07</span>Leases & expiry</a></li><li><a href="../guide/workers.html"><span>08</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>09</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>10</span>Crypto & tokens</a></li><li class="current"><a href="#top" aria-current="page"><span>11</span>Deploy changes</a><ol id="section-nav" aria-label="On this page"><li><a href="#staged-deployment">Deploy computation changes</a></li><li><a href="#deployment-tuning">Tune rebuild pages</a></li><li><a href="#data-migrations">Migrate stored records</a></li></ol></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/definitions.html"><span>03</span>Contexts & definitions</a></li><li><a href="../reference/client.html"><span>04</span>Client & transports</a></li><li><a href="../reference/time.html"><span>05</span>Expiry, leases & timers</a></li><li><a href="../reference/crypto.html"><span>06</span>NaCl & JWT</a></li><li><a href="../reference/keys.html"><span>07</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>08</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>09</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>10</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>11</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>12</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
+<main id="main" tabindex="-1">
+<header class="page-intro" id="top"><p class="eyebrow">Guide · 11</p><h1>Ship new code.</h1><p class="lead">Deploying new code recomputes derived values. Large apps can prepare the new version in the background, then switch over. Stored records change only when your own code migrates them.</p></header>
+<div class="page-content">
+<!-- content:start -->
+<section id="staged-deployment">
+<h2>Deploy computation changes</h2>
+<p>A change to a <code>derive</code> or aggregate does nothing until you build and deploy the bundle. You have two options:</p>
+<ul>
+<li><strong>Direct deploy</strong> recomputes stored derived values in one step, then switches code and results together. Fine for small apps.</li>
+<li><strong>Staged deploy</strong> rebuilds in pages while the current version keeps serving, then switches when you activate it. Use it for large rebuilds.</li>
+</ul>
+<ol class="steps"><li><strong>Stage.</strong> <code>stageDeployment(bundle, {requestId})</code> records the new bundle and any new indexes.</li><li><strong>Advance.</strong> Each <code>advance</code> call backfills new indexes, then rebuilds a page of derived values in the background. Requests keep using the current code.</li><li><strong>Ready.</strong> Once the rebuild is done, ordinary writes keep the new graph up to date until you activate or cancel.</li><li><strong>Activate.</strong> <code>activate</code> switches bundle, aliases, policy, keys, indexes and derived state in one step.</li><li><strong>Collect.</strong> Call <code>collect</code> until the phase is <code>collected</code> to free the old graph. Finish this before the next deployment.</li></ol>
+<ul>
+<li>Use a unique request ID for each deployment and save it with the bundle. Progress survives leader changes, restarts and partition moves.</li>
+<li>Before resuming, check that both the request ID and bundle hash match, rather than staging again.</li>
+<li>Nothing runs on its own: your code calls <code>advance</code> and <code>activate</code>. The progress counters show work done, not a percentage.</li>
+</ul>
+<div class="code-block"><div class="code-head"><span>Start or resume one deployment</span><button type="button" class="copy-button" aria-label="Copy staged deployment">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">const</span> requestId = <span class="str">"application-upgrade-v2"</span>; <span class="comment">// Save and reuse for this bundle.</span>
+<span class="kw">const</span> maxBytes = <span class="num">256</span> * <span class="num">1024</span>;
+<span class="kw">let</span> build = (<span class="kw">await</span> client.stagedDeploymentStatus()).value;
+<span class="kw">if</span> (build === <span class="kw">null</span> || build.phase === <span class="str">"collected"</span>) {
+  build = (<span class="kw">await</span> client.stageDeployment(bundle, {requestId})).value;
+}
+<span class="kw">if</span> (build.requestId !== requestId || build.bundleHash !== bundle.hash) {
+  <span class="kw">throw</span> <span class="kw">new</span> Error(<span class="str">"Existing deployment ID/bundle does not match this intent"</span>);
+}
+<span class="kw">while</span> (build.phase === <span class="str">"backfill"</span> || build.phase === <span class="str">"rebuilding"</span>) {
+  build = (<span class="kw">await</span> client.controlStagedDeployment({
+    operation: <span class="str">"advance"</span>, requestId, maxBytes,
+  })).value;
+}
+<span class="kw">if</span> (build.phase === <span class="str">"failed"</span>) {
+  <span class="kw">throw</span> <span class="kw">new</span> Error(build.error ?? <span class="str">"Cancel and collect the failed target"</span>);
+}
+<span class="kw">if</span> (build.phase === <span class="str">"ready"</span>) {
+  build = (<span class="kw">await</span> client.controlStagedDeployment({
+    operation: <span class="str">"activate"</span>, requestId,
+  })).value;
+}
+<span class="kw">while</span> (build.phase === <span class="str">"active"</span> || build.phase === <span class="str">"canceled"</span>) {
+  build = (<span class="kw">await</span> client.controlStagedDeployment({
+    operation: <span class="str">"collect"</span>, requestId, maxBytes,
+  })).value;
+}</code></pre></div>
+<ul>
+<li><strong>Uncertain response:</strong> read the status and continue with the same request ID. Aborting a request does not undo committed progress.</li>
+<li><strong>Page or activation error:</strong> earlier progress is kept and the active app doesn’t change. Adjust the budget and retry, or cancel and collect.</li>
+<li><strong>Phase <code>failed</code>:</strong> a write hit a fatal error while maintaining the new graph. The job can’t activate; cancel and collect it.</li>
+<li><strong>Canceled:</strong> a canceled deployment can’t be activated. After collecting, stage corrected code with a new request ID.</li>
+<li><strong>No rollback:</strong> after activation, fix forward with another deployment.</li>
+<li>While a cross-group transaction is prepared, deployment controls return <code>TRANSACTION_PREPARED</code>. Status still works.</li>
+</ul>
+</section>
+<section id="deployment-tuning">
+<h2>Tune rebuild pages</h2>
+<p>Each page blocks writes while it prepares and commits; reads continue. Smaller pages mean shorter write stalls and a slower rebuild.</p>
+<ul>
+<li><code>FLOWER_DEPLOYMENT_PAGE_MS</code> sets the target time per page. Default 200 ms, capped by <code>FLOWER_EVALUATION_TIMEOUT_MS</code>. Try 20 ms if write latency matters, and measure.</li>
+<li><code>maxBytes</code> on each request limits page size. It defaults to the transaction byte budget.</li>
+</ul>
+<div class="code-block"><div class="code-head"><span>Each server · independent startup settings</span><button type="button" class="copy-button" aria-label="Copy deployment page tuning">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">export</span> FLOWER_DEPLOYMENT_PAGE_MS=<span class="num">20</span>
+<span class="kw">export</span> FLOWER_WRITER_BATCH_MS=<span class="num">50</span>
+<span class="comment"># Start or restart each Flower node with these settings.</span></code></pre></div>
+<ul>
+<li>These are startup settings. Restart nodes to apply them. Ordinary write batching is unaffected.</li>
+<li>The page target is not a hard deadline. A page can take the target plus a full evaluation timeout.</li>
+<li>One derived value and the new dependencies it pulls in must fit in one evaluation. The whole graph’s metadata must fit in memory.</li>
+<li>Until you activate, every write also maintains the new graph, and the extra graph uses storage until collected.</li>
+</ul>
+<p>The <a href="https://github.com/flower-js-org/runtime/blob/main/bench/STAGED_DEPLOYMENT.md">staged deployment benchmark</a> shows the throughput and latency tradeoff. Those runs used an older shared setting, so treat them as rough.</p>
+</section>
+<section id="data-migrations">
+<h2>Migrate stored records</h2>
+<p>Deploying rebuilds derived values. It does not change stored records. During a staged deployment, old and new code share the same records, so both must read every record shape.</p>
+<ol class="steps"><li><strong>Deploy compatible code.</strong> Read old and new shapes, write only the new shape, and add a mutation that converts one bounded batch.</li><li><strong>Save progress with the data.</strong> In that mutation, read a cursor from a migration record, convert a page, and save the next cursor with the changed rows. Check each row’s version so a retried batch doesn’t convert twice. Reuse the request ID when retrying an uncertain batch.</li><li><strong>Page by key.</strong> Use <code>ctx.scan(rows, {gt: afterKey, limit: 100})</code>, leaving out <code>gt</code> on the first page. An empty page means you’re done. For an indexed subset, use <code>ctx.range</code> on fields the migration doesn’t change. Avoid offsets and unbounded scans.</li><li><strong>Verify, then clean up.</strong> Check that no old rows remain. Then deploy code without the compatibility path and remove old fields with bounded mutations.</li></ol>
+<ul>
+<li>Names are identities. Renaming a collection or derived value, or changing a TypeScript type, doesn’t touch existing data. Copy data explicitly.</li>
+<li>Protect migration mutations with <a href="methods.html#authorization">application authorization</a>. An operator token doesn’t make a public mutation admin-only.</li>
+<li>During a staged deployment, each migration batch also updates the new graph. Size batches for that.</li>
+</ul>
+<p>See the <a href="../reference/data.html#collections">range and cursor rules</a>, <a href="../reference/definitions.html#contexts">mutation context</a> and <a href="../reference/deployments.html">staged deployment API</a>. <a href="../operate/#resizing">Moving a partition</a> between Raft groups keeps data and code as they are; it is not a migration.</p>
+</section>
+<!-- content:end -->
+</div>
+<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../guide/crypto.html"><small>Previous · Guide</small>Crypto & tokens</a><a rel="next" href="../operate/"><small>Next · Operate</small>Run a cluster</a></nav>
+</main>
+</div>
+<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/flower-js-org/runtime">Source ↗</a></div></div></div>
+<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
+</body>
+</html>

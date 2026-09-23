@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f8f5ec">
+<meta name="description" content="Lease work to external workers, fence results, and expire records with ordinary TypeScript.">
+<meta property="og:title" content="Leases &amp; expiry · Flower">
+<meta property="og:description" content="Lease work to external workers, fence results, and expire records with ordinary TypeScript.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://flower.js.org/guide/leases.html">
+<link rel="canonical" href="https://flower.js.org/guide/leases.html">
+<title>Leases &amp; expiry · Flower</title>
+<link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
+<link rel="stylesheet" href="../site.css?v=eb05c8aa5c04">
+<script src="../site.js?v=3184f0662fa5" defer></script>
+</head>
+<body class="doc-page">
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/" aria-current="page">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/flower-js-org/runtime">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
+<div class="documentation">
+<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/methods.html"><span>04</span>Methods & retries</a></li><li><a href="../guide/reads.html"><span>05</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>06</span>Scheduled logic</a></li><li class="current"><a href="#top" aria-current="page"><span>07</span>Leases & expiry</a><ol id="section-nav" aria-label="On this page"><li><a href="#claim-work-complete-or-fail">Claim, work, complete</a></li><li><a href="#expiry-is-a-read-rule">Let records expire</a></li></ol></li><li><a href="../guide/workers.html"><span>08</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>09</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>10</span>Crypto & tokens</a></li><li><a href="../guide/deployments.html"><span>11</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/definitions.html"><span>03</span>Contexts & definitions</a></li><li><a href="../reference/client.html"><span>04</span>Client & transports</a></li><li><a href="../reference/time.html"><span>05</span>Expiry, leases & timers</a></li><li><a href="../reference/crypto.html"><span>06</span>NaCl & JWT</a></li><li><a href="../reference/keys.html"><span>07</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>08</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>09</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>10</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>11</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>12</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
+<main id="main" tabindex="-1">
+<header class="page-intro" id="top"><p class="eyebrow">Guide · 07</p><h1>Hand out work. Let records expire.</h1><p class="lead">Give a job to one worker at a time, and treat old records as gone. Both are plain TypeScript helpers.</p></header>
+<div class="page-content">
+<!-- content:start -->
+<p>A work queue gives each job to one worker at a time. An expiring collection hides records after a set time. For worker design, see <a href="workers.html">External workers</a>.</p>
+<section id="claim-work-complete-or-fail">
+<h2>Claim, work, complete</h2>
+<div class="code-block"><div class="code-head"><span>Inside your application module</span><button type="button" class="copy-button" aria-label="Copy Inside your application module">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { expiringCollection, workQueue } <span class="kw">from</span> <span class="str">"@flower-js/sdk/temporal"</span>;
+
+<span class="kw">const</span> jobs = workQueue(<span class="str">"jobs"</span>, { maxLeaseMs: <span class="num">30_000</span> });
+<span class="kw">const</span> sessions = expiringCollection(<span class="str">"sessions"</span>, {
+  expiration: { afterUpdateMs: <span class="num">60_000</span> },
+});
+<span class="kw">const</span> tokens = expiringCollection(<span class="str">"tokens"</span>, {
+  expiration: { afterCreationMs: <span class="num">10_000</span> },
+});</code></pre></div>
+<ul>
+<li>Add each helper’s <code>records</code> to <code>define({collections})</code>. Jobs are claimed oldest first.</li>
+<li>Separate tenants with <code>workQueue("jobs", {maxLeaseMs: 30_000, scope: tenant})</code>; inspect with <code>queue.scan(ctx)</code>. Scopes are not access control.</li>
+</ul>
+<p><a href="https://github.com/flower-js-org/runtime/blob/main/examples/workers.ts"><code>examples/workers.ts</code></a> wraps <code>enqueue</code>, <code>claim</code>, <code>complete</code>, <code>fail</code> and <code>retry</code> in mutations. Deploy it to a fresh app:</p><div class="code-block"><div class="code-head"><span>Enqueue work using the supplied example</span><button type="button" class="copy-button" aria-label="Copy Enqueue work using the supplied example">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">node</span> sdk/cli.ts deploy examples/workers.ts
+<span class="kw">node</span> sdk/cli.ts call jobs.enqueue \
+  <span class="str">'{"id":"receipt-1","payload":{"invoice":"inv-1"}}'</span> \
+  <span class="var">--request-id</span> enqueue<span class="var">-receipt-1</span></code></pre></div><div class="code-block"><div class="code-head"><span>worker.ts · checkout root</span><button type="button" class="copy-button" aria-label="Copy worker.ts · checkout root">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { FlowerClient } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
+<span class="kw">import</span> <span class="kw">type</span> { Claim } <span class="kw">from</span> <span class="str">"@flower-js/sdk/temporal"</span>;
+
+<span class="kw">const</span> client = <span class="kw">new</span> FlowerClient(<span class="str">"http://127.0.0.1:7101"</span>);
+<span class="kw">const</span> args = { owner: <span class="str">"worker-1"</span>, leaseMs: <span class="num">10_000</span> };
+<span class="kw">const</span> claimId = crypto.randomUUID(); <span class="comment">// Persist this for retries of this call.</span>
+<span class="kw">const</span> { value: lease } = <span class="kw">await</span> client.call&lt;<span class="kw">typeof</span> args, Claim | <span class="kw">null</span>&gt;(
+  <span class="str">"jobs.claim"</span>, args, { requestId: claimId },
+);
+
+<span class="kw">if</span> (lease) {
+  <span class="comment">// Perform external work here, using idempotency or downstream fencing.</span>
+  <span class="comment">// Preserve this completion ID and its exact arguments on uncertain replies.</span>
+  <span class="kw">const</span> completionId = crypto.randomUUID();
+  <span class="kw">await</span> client.call(<span class="str">"jobs.complete"</span>, {
+    id: lease.id, owner: lease.owner, token: lease.token,
+    ...(lease.history ? { history: lease.history } : {}),
+    result: { processed: <span class="kw">true</span> },
+  }, { requestId: completionId });
+}</code></pre></div>
+<ul>
+<li><code>claim</code> returns <code>{id, payload, owner, token, expiresAt, attempt, history?}</code>, or <code>null</code> when there is no work.</li>
+<li><code>complete</code> and <code>fail</code> need the current owner and token before expiry, or fail with <code>LEASE_LOST</code>. Expired work is claimable again at once.</li>
+<li>Failed jobs stay until retried. Leases can’t be renewed.</li>
+<li>Retrying a claim with the same request ID returns the original, possibly expired, lease. Use a new ID for new work.</li>
+</ul>
+<div class="note"><span class="note-mark" aria-hidden="true">↳</span><p><strong>Expiry does not stop the old worker.</strong> The receiving service should take idempotency keys or check fencing tokens.</p></div>
+</section>
+<section id="expiry-is-a-read-rule">
+<h2>Let records expire</h2>
+<p>A record is hidden once <code>ctx.now() &gt;= expiresAt</code>. <code>sweep</code>, called from a mutation or maintenance, deletes it. <code>entry</code> returns the value and its timestamps.</p>
+<div class="table-wrap"><table><caption class="sr-only">Expiration policies</caption><thead><tr><th>Policy passed to <code>set</code></th><th>Meaning</th></tr></thead><tbody><tr><td><code>{ afterCreationMs: 10_000 }</code></td><td>Expires from its original live creation time.</td></tr><tr><td><code>{ afterUpdateMs: 60_000 }</code></td><td>Restarts the lifetime on each update.</td></tr><tr><td><code>{ at: epochMilliseconds }</code></td><td>Uses an absolute deadline chosen by your code.</td></tr><tr><td><code>null</code></td><td>Does not expire.</td></tr></tbody></table></div>
+<ul>
+<li>Updates keep the creation time; writing over an expired record starts fresh.</li>
+<li>Reads never extend a lifetime; rewrite in a mutation to refresh. For logic on expiry, use a <a href="timers.html">timer</a>.</li>
+<li>Keep node clocks in sync. <code>ctx.now()</code> is fixed per evaluation, and commit time counts against leases and lifetimes.</li>
+</ul>
+</section>
+<!-- content:end -->
+</div>
+<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../guide/timers.html"><small>Previous · Guide</small>Scheduled logic</a><a rel="next" href="../guide/workers.html"><small>Next · Guide</small>External workers</a></nav>
+</main>
+</div>
+<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/flower-js-org/runtime">Source ↗</a></div></div></div>
+<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
+</body>
+</html>

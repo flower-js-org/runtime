@@ -1,0 +1,425 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><title>Flower · Across the garden · Passed</title><style>
+:root{color-scheme:light;--ink:#244232;--muted:#63705c;--paper:#f7f5e9;--line:#d8ddc9;--green:#376448;--orange:#a95732;--bad:#a3393b}*{box-sizing:border-box}body{margin:0;color:var(--ink);background:var(--paper);font:14px/1.5 system-ui,-apple-system,sans-serif}a{color:var(--green);text-underline-offset:3px}header{background:#244232;color:#f7f5e9;padding:32px max(22px,calc((100vw - 1180px)/2));position:relative;overflow:hidden}header:after{content:'✿';position:absolute;right:5%;top:-100px;font-size:350px;line-height:1;color:#ffffff09;pointer-events:none}.brand{text-transform:uppercase;letter-spacing:.14em;font-size:11px}.brand b{color:#eeb786;font-size:23px;margin-right:10px}h1{font:clamp(34px,5vw,58px)/1.05 Georgia,serif;font-weight:normal;margin:22px 0 13px}header p{max-width:730px;color:#d4decb;margin:8px 0}.status{display:inline-block;border:1px solid #ffffff50;border-radius:30px;padding:4px 13px;margin-top:12px;font-weight:700}nav{display:flex;gap:24px;overflow:auto;border-bottom:1px solid var(--line);padding:14px max(22px,calc((100vw - 1180px)/2));font-size:12px;white-space:nowrap}main{max-width:1224px;margin:auto;padding:22px}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.metric,section{border:1px solid var(--line);background:#fffef7;border-radius:12px}.metric{padding:18px}.metric span,dt{text-transform:uppercase;letter-spacing:.08em;font-size:10px;color:var(--muted)}.metric strong{display:block;font:35px/1.2 Georgia,serif;margin:8px 0}.metric small{font-size:11px;color:var(--muted)}section{margin-top:18px;padding:23px}h2{font:27px Georgia,serif;margin:0 0 13px}h3{font-size:14px;margin:16px 0 9px}p{margin:10px 0}.notice{border-left:4px solid var(--green);background:#edf2e5;padding:13px 17px;margin:16px 0}.notice.local{border-color:var(--orange);background:#fcf0dc}.notice.bad{border-color:var(--bad);background:#f9e9e2}.muted,figcaption,.note{color:var(--muted)}.note,figcaption{font-size:12px}dl{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:13px 22px;margin:16px 0}dt{margin-bottom:3px}dd{margin:0;overflow-wrap:anywhere}table{border-collapse:collapse;width:100%;text-align:left;font-size:12px;white-space:nowrap}caption{text-align:left;color:var(--muted);font-size:11px;padding:8px 0}th,td{padding:10px 12px;border-bottom:1px solid var(--line)}thead th{background:#f1f3e8;font-size:10px;text-transform:uppercase;letter-spacing:.06em}tbody th{font-weight:600}td small{display:block;color:var(--muted)}.scroll{overflow:auto}.charts{display:grid;grid-template-columns:1fr 1fr;gap:25px}figure{margin:0}svg{display:block;width:100%;font:12px system-ui,sans-serif;fill:var(--ink)}svg .muted{fill:var(--muted)}figcaption{margin-top:8px}.good{color:var(--green);font-weight:700}.bad{color:var(--bad);font-weight:700}code,pre{font:11px/1.5 ui-monospace,SFMono-Regular,monospace;overflow-wrap:anywhere}code{background:#edf0e5;border-radius:4px;padding:2px 5px}pre{white-space:pre-wrap;background:#f3f4eb;padding:15px;border-radius:8px;max-height:400px;overflow:auto}summary{cursor:pointer;font-weight:600;padding:8px 0}.empty{color:var(--muted);padding:22px;background:#f3f4eb;border-radius:8px}footer{display:flex;justify-content:space-between;gap:20px;color:var(--muted);font-size:11px;margin:25px 0 5px}ul{padding-left:20px}.partition{font-weight:600}section:target{outline:2px solid #abc399}.skip{position:absolute;left:-9999px}.skip:focus{left:10px;top:10px;background:white;padding:10px;z-index:2}
+@media(max-width:850px){.metrics{grid-template-columns:repeat(2,1fr)}.charts{grid-template-columns:1fr}dl{grid-template-columns:repeat(2,minmax(0,1fr))}section{padding:18px}}@media(max-width:500px){main{padding:13px}.metric{padding:13px}.metric strong{font-size:29px}dl{grid-template-columns:1fr}footer{display:block}}@media print{nav,.skip{display:none}body{background:white}header{-webkit-print-color-adjust:exact;print-color-adjust:exact}main{max-width:none;padding:15px 0}section,.metric{break-inside:avoid}.scroll{overflow:visible}table{font-size:10px}pre{max-height:none}}
+</style><link rel="stylesheet" href="../chrome.css"></head><body><a class="skip" href="#results">Skip to results</a><div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/">Guide</a><a href="../operate/" aria-current="page">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/flower-js-org/runtime">GitHub ↗</a></div></div></div>
+<header><div class="brand"><b aria-hidden="true">✿</b> Flower / Field notes</div><h1>Across the garden.</h1><p>Independent kitchens. Parallel Raft groups. One measured rush.<br>8 groups × 3 replicas · 16 tenants · 4 stores per tenant.</p><span class="status">Passed</span><p>2026-09-25T00:20:27.346Z → 2026-09-25T00:21:27.487Z</p></header>
+<nav aria-label="Report sections"><a href="latest.json">Raw JSON</a><a href="https://github.com/flower-js-org/runtime/blob/main/bench/CPU.md">CPU investigation</a><a href="#results">Global result</a><a href="#groups">Raft groups</a><a href="#latency">Customer latency</a><a href="#recovery">Recovery &amp; delivery</a><a href="#resources">Resources</a><a href="#methodology">Run details</a></nav>
+<main id="results"><div class="metrics"><article class="metric"><span>Global customer goodput</span><strong>56,154.7 / s</strong><small>Successful customer calls divided by the union load window.</small></article><article class="metric"><span>Read p99</span><strong>12.9 ms</strong><small>Primary customer reads; merged histogram buckets across all groups.</small></article><article class="metric"><span>Write p99</span><strong>228.3 ms</strong><small>Primary customer mutations; merged histogram buckets across all groups.</small></article><article class="metric"><span>Independent audits</span><strong>Passed</strong><small>768 orders · 1,916 pizzas · 101,757 replay checks</small></article></div>
+<div class="notice local"><strong>Replica-local customer reads · lag is allowed.</strong> Each read uses one coherent locally applied committed replica snapshot without a per-read quorum fence. Startup recovery can first require quorum. State, code, and aliases may lag without a bound; requests across replicas can go backward in revision. This policy must not be confused with fresh-read performance. Mutations and the final per-group audit retain their fresh correctness requirements.</div>
+<section><h2>What the total means</h2><p>Successful primary customer logical calls across all groups divided by the union of their synchronized load intervals, including in-flight tails. Excludes retries, explicit replays, workers, errors, warmup and drain. Percentiles merge bucket counts; they are not averages of group percentiles.</p><p class="partition">Static tenant-to-group assignment. Each tenant&#39;s stores, queues and rankings stay within one independent Raft group. No cross-group transaction or global atomic snapshot in this workload.</p><dl><div><dt>Successful customer calls</dt><dd>3,377,202</dd></div><div><dt>Successful reads / writes</dt><dd>2,362,869 / 1,014,333</dd></div><div><dt>Failed customer calls</dt><dd>0</dd></div><div><dt>Measured union window</dt><dd>60.14 s</dd></div><div><dt>Shared overlap</dt><dd>60.06 s</dd></div><div><dt>Start skew</dt><dd>1.0 ms</dd></div><div><dt>Actual successful read / mutation mix</dt><dd>70.0% / 30.0%</dd></div><div><dt>Correctness</dt><dd>Passed</dd></div></dl>
+<figure><svg viewBox="0 0 660 372" role="img" aria-labelledby="goodput-title goodput-description"><title id="goodput-title">Global and individual group goodput</title><desc id="goodput-description">Global uses the union window. Each group uses its own measured interval; adding those rates is not the global measurement. Global: 56,154.7 successful customer calls/s; group-0: 7,030.6 successful customer calls/s; group-1: 7,109.4 successful customer calls/s; group-2: 7,091.5 successful customer calls/s; group-3: 7,104.9 successful customer calls/s; group-4: 7,123.2 successful customer calls/s; group-5: 6,960.7 successful customer calls/s; group-6: 6,850.5 successful customer calls/s; group-7: 6,922.3 successful customer calls/s</desc><text x="126" y="28" text-anchor="end">Global</text><rect x="138" y="12" width="400" height="23" rx="4" fill="#eef0e5"/><rect x="138" y="12" width="400" height="23" rx="4" fill="#376448"/><text x="548" y="28">56,154.7</text><text x="126" y="64" text-anchor="end">group-0</text><rect x="138" y="48" width="400" height="23" rx="4" fill="#eef0e5"/><rect x="138" y="48" width="50.07990890912929" height="23" rx="4" fill="#bc7149"/><text x="548" y="64">7,030.6</text><text x="126" y="100" text-anchor="end">group-1</text><rect x="138" y="84" width="400" height="23" rx="4" fill="#eef0e5"/><rect x="138" y="84" width="50.64153381604209" height="23" rx="4" fill="#866287"/><text x="548" y="100">7,109.4</text><text x="126" y="136" text-anchor="end">group-2</text><rect x="138" y="120" width="400" height="23" rx="4" fill="#eef0e5"/><rect x="138" y="120" width="50.51420819083204" height="23" rx="4" fill="#899545"/><text x="548" y="136">7,091.5</text><text x="126" y="172" text-anchor="end">group-3</text><rect x="138" y="156" width="400" height="23" rx="4" fill="#eef0e5"/><rect x="138" y="156" width="50.609728395637475" height="23" rx="4" fill="#376448"/><text x="548" y="172">7,104.9</text><text x="126" y="208" text-anchor="end">group-4</text><rect x="138" y="192" width="400" height="23" rx="4" fill="#eef0e5"/><rect x="138" y="192" width="50.739460058848785" height="23" rx="4" fill="#bc7149"/><text x="548" y="208">7,123.2</text><text x="126" y="244" text-anchor="end">group-5</text><rect x="138" y="228" width="400" height="23" rx="4" fill="#eef0e5"/><rect x="138" y="228" width="49.58230578235502" height="23" rx="4" fill="#866287"/><text x="548" y="244">6,960.7</text><text x="126" y="280" text-anchor="end">group-6</text><rect x="138" y="264" width="400" height="23" rx="4" fill="#eef0e5"/><rect x="138" y="264" width="48.797522763124384" height="23" rx="4" fill="#899545"/><text x="548" y="280">6,850.5</text><text x="126" y="316" text-anchor="end">group-7</text><rect x="138" y="300" width="400" height="23" rx="4" fill="#eef0e5"/><rect x="138" y="300" width="49.308691513678646" height="23" rx="4" fill="#376448"/><text x="548" y="316">6,922.3</text><text x="138" y="367" class="muted">successful customer calls/s · linear scale</text></svg><figcaption>Global uses the union window. Each group uses its own measured interval; adding those rates is not the global measurement.</figcaption></figure></section>
+<section id="groups"><h2>Every group keeps its own books.</h2><div class="scroll"><table><caption>Group outcomes. Open the child reports for per-node routing, full invariant checks, lifecycle timing, and diagnostics.</caption><thead><tr><th scope="col">Raft group</th><th scope="col">Partition</th><th scope="col">Goodput / s</th><th scope="col">Completed</th><th scope="col">Failed</th><th scope="col">Read p99</th><th scope="col">Write p99</th><th scope="col">Fresh audit</th><th scope="col">Quorum recovery</th><th scope="col">Details</th></tr></thead><tbody><tr><th scope="row"><a href="latest-groups/group-0.html">group-0</a></th><td>2 tenants<small>tenant-0, tenant-1</small></td><td>7,030.6</td><td>422,239</td><td>0</td><td>13.0 ms</td><td>226.0 ms</td><td><span class="good">Passed</span><small>96 / 96 delivered</small></td><td>613.4 ms</td><td><a href="latest-groups/group-0.html">HTML</a> · <a href="latest-groups/group-0.json">JSON</a></td></tr><tr><th scope="row"><a href="latest-groups/group-1.html">group-1</a></th><td>2 tenants<small>tenant-2, tenant-3</small></td><td>7,109.4</td><td>427,190</td><td>0</td><td>13.1 ms</td><td>219.4 ms</td><td><span class="good">Passed</span><small>96 / 96 delivered</small></td><td>732.7 ms</td><td><a href="latest-groups/group-1.html">HTML</a> · <a href="latest-groups/group-1.json">JSON</a></td></tr><tr><th scope="row"><a href="latest-groups/group-2.html">group-2</a></th><td>2 tenants<small>tenant-4, tenant-5</small></td><td>7,091.5</td><td>425,998</td><td>0</td><td>13.0 ms</td><td>215.1 ms</td><td><span class="good">Passed</span><small>96 / 96 delivered</small></td><td>675.4 ms</td><td><a href="latest-groups/group-2.html">HTML</a> · <a href="latest-groups/group-2.json">JSON</a></td></tr><tr><th scope="row"><a href="latest-groups/group-3.html">group-3</a></th><td>2 tenants<small>tenant-6, tenant-7</small></td><td>7,104.9</td><td>427,131</td><td>0</td><td>12.7 ms</td><td>226.0 ms</td><td><span class="good">Passed</span><small>96 / 96 delivered</small></td><td>698.9 ms</td><td><a href="latest-groups/group-3.html">HTML</a> · <a href="latest-groups/group-3.json">JSON</a></td></tr><tr><th scope="row"><a href="latest-groups/group-4.html">group-4</a></th><td>2 tenants<small>tenant-8, tenant-9</small></td><td>7,123.2</td><td>427,959</td><td>0</td><td>11.3 ms</td><td>217.2 ms</td><td><span class="good">Passed</span><small>96 / 96 delivered</small></td><td>716.4 ms</td><td><a href="latest-groups/group-4.html">HTML</a> · <a href="latest-groups/group-4.json">JSON</a></td></tr><tr><th scope="row"><a href="latest-groups/group-5.html">group-5</a></th><td>2 tenants<small>tenant-10, tenant-11</small></td><td>6,960.7</td><td>418,422</td><td>0</td><td>13.8 ms</td><td>281.4 ms</td><td><span class="good">Passed</span><small>96 / 96 delivered</small></td><td>636.4 ms</td><td><a href="latest-groups/group-5.html">HTML</a> · <a href="latest-groups/group-5.json">JSON</a></td></tr><tr><th scope="row"><a href="latest-groups/group-6.html">group-6</a></th><td>2 tenants<small>tenant-12, tenant-13</small></td><td>6,850.5</td><td>411,949</td><td>0</td><td>12.6 ms</td><td>230.6 ms</td><td><span class="good">Passed</span><small>96 / 96 delivered</small></td><td>694.8 ms</td><td><a href="latest-groups/group-6.html">HTML</a> · <a href="latest-groups/group-6.json">JSON</a></td></tr><tr><th scope="row"><a href="latest-groups/group-7.html">group-7</a></th><td>2 tenants<small>tenant-14, tenant-15</small></td><td>6,922.3</td><td>416,314</td><td>0</td><td>13.4 ms</td><td>221.6 ms</td><td><span class="good">Passed</span><small>96 / 96 delivered</small></td><td>728.3 ms</td><td><a href="latest-groups/group-7.html">HTML</a> · <a href="latest-groups/group-7.json">JSON</a></td></tr></tbody></table></div><p class="note">Read and write p99s use each group's separate primary customer histograms, excluding worker polls and explicit replays. Missing or empty populations remain unavailable. Recovery is measured separately per injected crash; it is not a cluster-wide failover time.</p></section>
+<section id="latency"><h2>The tail belongs to the customers.</h2><div class="charts"><figure><svg viewBox="0 0 660 372" role="img" aria-labelledby="customer-tail-title customer-tail-description"><title id="customer-tail-title">Combined customer latency</title><desc id="customer-tail-description">All groups&#39; bucket counts are merged before extracting quantiles. These are logical customer calls, including retries until success or terminal failure. reads p50: 1.0 ms; reads p95: 4.8 ms; reads p99: 12.9 ms; writes p50: 96.1 ms; writes p95: 172.8 ms; writes p99: 228.3 ms; All p50: 1.7 ms; All p95: 137.4 ms; All p99: 189.0 ms</desc><text x="126" y="28" text-anchor="end">reads p50</text><rect x="138" y="12" width="400" height="23" rx="4" fill="#eef0e5"/><rect x="138" y="12" width="1.679981157982273" height="23" rx="4" fill="#376448"/><text x="548" y="28">1.0</text><text x="126" y="64" text-anchor="end">reads p95</text><rect x="138" y="48" width="400" height="23" rx="4" fill="#eef0e5"/><rect x="138" y="48" width="8.337687045438443" height="23" rx="4" fill="#bc7149"/><text x="548" y="64">4.8</text><text x="126" y="100" text-anchor="end">reads p99</text><rect x="138" y="84" width="400" height="23" rx="4" fill="#eef0e5"/><rect x="138" y="84" width="22.55189122589063" height="23" rx="4" fill="#866287"/><text x="548" y="100">12.9</text><text x="126" y="136" text-anchor="end">writes p50</text><rect x="138" y="120" width="400" height="23" rx="4" fill="#eef0e5"/><rect x="138" y="120" width="168.3063385810462" height="23" rx="4" fill="#899545"/><text x="548" y="136">96.1</text><text x="126" y="172" text-anchor="end">writes p95</text><rect x="138" y="156" width="400" height="23" rx="4" fill="#eef0e5"/><rect x="138" y="156" width="302.7342273738581" height="23" rx="4" fill="#376448"/><text x="548" y="172">172.8</text><text x="126" y="208" text-anchor="end">writes p99</text><rect x="138" y="192" width="400" height="23" rx="4" fill="#eef0e5"/><rect x="138" y="192" width="400" height="23" rx="4" fill="#bc7149"/><text x="548" y="208">228.3</text><text x="126" y="244" text-anchor="end">All p50</text><rect x="138" y="228" width="400" height="23" rx="4" fill="#eef0e5"/><rect x="138" y="228" width="3.021798240946806" height="23" rx="4" fill="#866287"/><text x="548" y="244">1.7</text><text x="126" y="280" text-anchor="end">All p95</text><rect x="138" y="264" width="400" height="23" rx="4" fill="#eef0e5"/><rect x="138" y="264" width="240.80745532235622" height="23" rx="4" fill="#899545"/><text x="548" y="280">137.4</text><text x="126" y="316" text-anchor="end">All p99</text><rect x="138" y="300" width="400" height="23" rx="4" fill="#eef0e5"/><rect x="138" y="300" width="331.0959660162673" height="23" rx="4" fill="#376448"/><text x="548" y="316">189.0</text><text x="138" y="367" class="muted">ms · linear scale</text></svg><figcaption>All groups&#39; bucket counts are merged before extracting quantiles. These are logical customer calls, including retries until success or terminal failure.</figcaption></figure><div class="scroll"><table><caption>Combined customer populations; worker and explicit replay methods are excluded.</caption><thead><tr><th scope="col">Customer population</th><th scope="col">Samples</th><th scope="col">p50</th><th scope="col">p95</th><th scope="col">p99</th><th scope="col">Maximum</th></tr></thead><tbody><tr><th scope="row">Customer reads</th><td>2,362,869</td><td>1.0 ms</td><td>4.8 ms</td><td>12.9 ms</td><td>1,602.5 ms</td></tr><tr><th scope="row">Customer writes</th><td>1,014,333</td><td>96.1 ms</td><td>172.8 ms</td><td>228.3 ms</td><td>1,112.4 ms</td></tr><tr><th scope="row">All customer calls</th><td>3,377,202</td><td>1.7 ms</td><td>137.4 ms</td><td>189.0 ms</td><td>1,602.5 ms</td></tr></tbody></table></div></div><p class="note">Nearest-rank logarithmic histogram upper bounds are approximate (within 1% over the configured normal bucket range). Empty populations stay unavailable. This report never averages p99 values or fabricates missing samples. Customer failures contribute latency observations but zero successful goodput.</p></section>
+<section id="recovery"><h2>Recovery and the full delivery cycle.</h2><h3>Leader failure under customer load</h3><div class="scroll"><table><caption>One row per recorded leader crash. Recovery and catch-up both start at the crash, not at each other.</caption><thead><tr><th scope="col">Group</th><th scope="col">Crash</th><th scope="col">Time into load</th><th scope="col">Leader before → after</th><th scope="col">Serving quorum</th><th scope="col">Restarted replica caught up</th></tr></thead><tbody><tr><th scope="row"><a href="latest-groups/group-0.html">group-0</a></th><td>1</td><td>30.03 s</td><td>1 → 3</td><td>613.4 ms</td><td>2,776.7 ms</td></tr><tr><th scope="row"><a href="latest-groups/group-1.html">group-1</a></th><td>1</td><td>30.04 s</td><td>1 → 3</td><td>732.7 ms</td><td>2,880.1 ms</td></tr><tr><th scope="row"><a href="latest-groups/group-2.html">group-2</a></th><td>1</td><td>30.04 s</td><td>1 → 3</td><td>675.4 ms</td><td>2,843.1 ms</td></tr><tr><th scope="row"><a href="latest-groups/group-3.html">group-3</a></th><td>1</td><td>30.01 s</td><td>1 → 3</td><td>698.9 ms</td><td>2,837.3 ms</td></tr><tr><th scope="row"><a href="latest-groups/group-4.html">group-4</a></th><td>1</td><td>30.01 s</td><td>1 → 2</td><td>716.4 ms</td><td>2,882.5 ms</td></tr><tr><th scope="row"><a href="latest-groups/group-5.html">group-5</a></th><td>1</td><td>30.03 s</td><td>1 → 3</td><td>636.4 ms</td><td>2,828.1 ms</td></tr><tr><th scope="row"><a href="latest-groups/group-6.html">group-6</a></th><td>1</td><td>30.02 s</td><td>1 → 3</td><td>694.8 ms</td><td>2,855.6 ms</td></tr><tr><th scope="row"><a href="latest-groups/group-7.html">group-7</a></th><td>1</td><td>30.01 s</td><td>1 → 3</td><td>728.3 ms</td><td>2,866.0 ms</td></tr></tbody></table></div><p class="note">A serving quorum can resume before the killed replica rejoins. These polling observations are per group; they do not measure the time until every client succeeds. Missing milestones remain unavailable.</p><h3>Orders, timers, and safety probes</h3><dl><div><dt>Audited orders</dt><dd>768</dd></div><div><dt>Audited pizzas</dt><dd>1,916</dd></div><div><dt>Exact receipt replay checks</dt><dd>101,757</dd></div><div><dt>Expired-lease rejection checks</dt><dd>107</dd></div><div><dt>Configured baking delay</dt><dd>250.0 ms</dd></div><div><dt>Configured lease duration</dt><dd>2,000.0 ms</dd></div></dl><div class="scroll"><table><caption>Delivery and timer sample counts include load and drain. Safety-probe counts cover the complete run.</caption><thead><tr><th scope="col">Group</th><th scope="col">Deliveries</th><th scope="col">Delivery p50</th><th scope="col">Delivery p95</th><th scope="col">Delivery p99</th><th scope="col">Timers</th><th scope="col">Lateness p95</th><th scope="col">Lateness p99</th><th scope="col">Replays</th><th scope="col">Stale leases</th></tr></thead><tbody><tr><th scope="row"><a href="latest-groups/group-0.html">group-0</a></th><td>96</td><td>2,830.2 ms</td><td>5,090.6 ms</td><td>5,674.0 ms</td><td>96</td><td>603.0 ms</td><td>603.0 ms</td><td>12,772</td><td>13</td></tr><tr><th scope="row"><a href="latest-groups/group-1.html">group-1</a></th><td>96</td><td>3,034.3 ms</td><td>5,350.3 ms</td><td>7,115.0 ms</td><td>96</td><td>587.5 ms</td><td>888.0 ms</td><td>12,867</td><td>10</td></tr><tr><th scope="row"><a href="latest-groups/group-2.html">group-2</a></th><td>96</td><td>2,974.5 ms</td><td>5,910.1 ms</td><td>7,533.0 ms</td><td>96</td><td>542.6 ms</td><td>830.0 ms</td><td>12,794</td><td>13</td></tr><tr><th scope="row"><a href="latest-groups/group-3.html">group-3</a></th><td>96</td><td>3,034.3 ms</td><td>5,403.8 ms</td><td>6,570.0 ms</td><td>96</td><td>570.3 ms</td><td>571.0 ms</td><td>12,895</td><td>12</td></tr><tr><th scope="row"><a href="latest-groups/group-4.html">group-4</a></th><td>96</td><td>2,692.8 ms</td><td>5,512.4 ms</td><td>7,359.0 ms</td><td>96</td><td>589.0 ms</td><td>589.0 ms</td><td>12,823</td><td>13</td></tr><tr><th scope="row"><a href="latest-groups/group-5.html">group-5</a></th><td>96</td><td>2,830.2 ms</td><td>4,990.3 ms</td><td>7,155.0 ms</td><td>96</td><td>576.0 ms</td><td>576.0 ms</td><td>12,521</td><td>11</td></tr><tr><th scope="row"><a href="latest-groups/group-6.html">group-6</a></th><td>96</td><td>3,064.7 ms</td><td>5,623.2 ms</td><td>6,646.0 ms</td><td>96</td><td>570.3 ms</td><td>571.0 ms</td><td>12,462</td><td>17</td></tr><tr><th scope="row"><a href="latest-groups/group-7.html">group-7</a></th><td>96</td><td>3,004.3 ms</td><td>5,851.6 ms</td><td>7,757.0 ms</td><td>96</td><td>602.0 ms</td><td>602.0 ms</td><td>12,623</td><td>18</td></tr></tbody></table></div><p class="note">Order-to-delivery includes baking, queueing, abandoned leases, and delivery. Timer lateness measures callback execution after its due time, excluding the configured baking delay. These per-group lifecycle percentiles are separate from customer request latency and are not averaged into a global percentile. Replay and expired-lease probes contribute to correctness checks, not customer goodput. Expected stale-lease rejections appear as HTTP errors in the child reports.</p></section>
+<section id="resources"><h2>The garden shares a machine.</h2><div class="scroll"><table><caption>Server RSS sums add per-process sampled peaks; those peaks need not coincide. CPU is the sum of sampled per-node mean cores.</caption><thead><tr><th scope="col">Group</th><th scope="col">Server peak sums, MiB</th><th scope="col">Node peak, MiB</th><th scope="col">Sampled server cores</th><th scope="col">Node load cores</th><th scope="col">Node user CPU</th><th scope="col">Node system CPU</th><th scope="col">Node loop p99</th><th scope="col">Rust driver peak, MiB</th><th scope="col">Rust driver cores</th><th scope="col">Disk, MiB</th></tr></thead><tbody><tr><th scope="row">group-0</th><td>841.2</td><td>413.0</td><td>1.05</td><td>0.05</td><td>4,386.4 ms</td><td>460.3 ms</td><td>42.6 ms</td><td>20.0</td><td>0.15</td><td>142.3</td></tr><tr><th scope="row">group-1</th><td>820.8</td><td>401.4</td><td>1.06</td><td>0.05</td><td>4,281.2 ms</td><td>478.9 ms</td><td>44.8 ms</td><td>20.5</td><td>0.15</td><td>143.2</td></tr><tr><th scope="row">group-2</th><td>808.3</td><td>396.4</td><td>1.06</td><td>0.05</td><td>4,368.4 ms</td><td>489.6 ms</td><td>45.3 ms</td><td>20.5</td><td>0.15</td><td>142.3</td></tr><tr><th scope="row">group-3</th><td>820.7</td><td>393.3</td><td>1.06</td><td>0.05</td><td>4,292.9 ms</td><td>497.4 ms</td><td>42.3 ms</td><td>20.4</td><td>0.15</td><td>142.3</td></tr><tr><th scope="row">group-4</th><td>850.6</td><td>446.9</td><td>1.06</td><td>0.05</td><td>4,350.0 ms</td><td>500.7 ms</td><td>42.7 ms</td><td>20.5</td><td>0.15</td><td>141.5</td></tr><tr><th scope="row">group-5</th><td>813.6</td><td>411.0</td><td>1.04</td><td>0.05</td><td>4,323.0 ms</td><td>510.5 ms</td><td>43.8 ms</td><td>20.1</td><td>0.15</td><td>146.6</td></tr><tr><th scope="row">group-6</th><td>821.7</td><td>425.3</td><td>1.03</td><td>0.05</td><td>4,360.2 ms</td><td>497.4 ms</td><td>46.6 ms</td><td>20.7</td><td>0.14</td><td>144.0</td></tr><tr><th scope="row">group-7</th><td>818.2</td><td>409.5</td><td>1.04</td><td>0.05</td><td>4,364.3 ms</td><td>522.8 ms</td><td>44.9 ms</td><td>20.4</td><td>0.15</td><td>146.1</td></tr></tbody></table></div><p class="note">Each child generator and every replica run on this host. Adding Raft groups adds writer lanes, replication work, drivers, memory, and disk contention; these results do not establish multi-host capacity or linear scaling. Node user/system CPU covers the whole run; Node load cores and optional Rust driver cores cover sampled load intervals. Both processes count toward driver cost. Sampling can miss short peaks; missing measurements are shown as unavailable.</p></section>
+<section id="methodology"><h2>Enough detail to repeat it.</h2><dl><div><dt>CPU</dt><dd>Apple M5 Pro</dd></div><div><dt>OS / architecture</dt><dd>darwin 27.2.0 / arm64</dd></div><div><dt>Logical CPUs</dt><dd>18</dd></div><div><dt>Database processes</dt><dd>24</dd></div><div><dt>Generator/controller processes</dt><dd>16</dd></div><div><dt>Customer driver</dt><dd>rust</dd></div><div><dt>Node.js controller</dt><dd>v26.10.0</dd></div><div><dt>Driver SHA-256</dt><dd>1cf843cbf4e064d13a1d3597d9295c509325fee5c74b6eb2242ac7e98ece553d</dd></div><div><dt>Customer loops per group</dt><dd>256</dd></div><div><dt>Drone loops per group</dt><dd>4</dd></div><div><dt>Tenants per group / stores per tenant</dt><dd>2 / 4</dd></div><div><dt>Hot stores per tenant</dt><dd>1</dd></div><div><dt>Hot-set mixture weight</dt><dd>80.0%</dd></div><div><dt>Read endpoints</dt><dd>replicas</dd></div><div><dt>Customer read policy</dt><dd>replica-local</dd></div><div><dt>Application transport</dt><dd>HTTP/2 · pooled h2c</dd></div><div><dt>Requested load / warmup</dt><dd>60.0 s / 1.0 s</dd></div><div><dt>Order cap per group</dt><dd>96</dd></div><div><dt>Maximum drain</dt><dd>60.0 s</dd></div><div><dt>Initialization</dt><dd>static</dd></div><div><dt>Binary SHA-256</dt><dd><code>f9272bd6ccd6b252f6b16cb7e0582878fbc2d8d8936fb5a0fce8c2871a32292e</code></dd></div><div><dt>Bundle hash</dt><dd><code>264f2718f2336ea92b850ec939282695609e4ac929a73006455bf212872473b0</code></dd></div><div><dt>Engine</dt><dd>quickjs</dd></div></dl><p class="note">Hot-set weight is mixed with uniform store selection; it is not the final observed hot-store probability. Tenant selection is spread independently. Each tenant's stores and derived ranking remain in its assigned group. A busy tenant still shares one ordered writer lane; adding unrelated groups does not speed up that tenant's serial mutations.</p><p class="note">Customer loops are closed-loop: each waits before issuing its next call. After the order cap, order choices become reads. Compare runs with the same workload, consistency, host, binary, and runtime settings. These are simultaneous independent-group measurements, not a globally atomic transaction or snapshot benchmark.</p><details><summary>Runtime settings and complete workload options</summary><pre>{
+  &quot;runtime&quot;: {
+    &quot;engine&quot;: &quot;quickjs&quot;,
+    &quot;settings&quot;: {
+      &quot;TOKIO_WORKER_THREADS&quot;: &quot;2&quot;,
+      &quot;FLOWER_WRITER_BATCH_MODE&quot;: &quot;adaptive&quot;,
+      &quot;FLOWER_WRITER_QUEUE_CAPACITY&quot;: &quot;1024&quot;,
+      &quot;FLOWER_QUERY_WORKERS&quot;: &quot;16&quot;,
+      &quot;FLOWER_PREPARATION_WORKERS&quot;: &quot;16&quot;,
+      &quot;FLOWER_WRITER_PREPARATION_WORKERS&quot;: &quot;1&quot;,
+      &quot;FLOWER_WRITER_BATCH_MS&quot;: &quot;50&quot;,
+      &quot;FLOWER_OTEL_ENABLED&quot;: &quot;0&quot;,
+      &quot;OTEL_SDK_DISABLED&quot;: &quot;true&quot;
+    }
+  },
+  &quot;environment&quot;: {
+    &quot;node&quot;: &quot;v26.10.0&quot;,
+    &quot;os&quot;: &quot;darwin 27.2.0&quot;,
+    &quot;arch&quot;: &quot;arm64&quot;,
+    &quot;cpu&quot;: &quot;Apple M5 Pro&quot;,
+    &quot;logicalCpus&quot;: 18,
+    &quot;colocatedNodes&quot;: 24,
+    &quot;replicasPerGroup&quot;: 3,
+    &quot;colocatedDrivers&quot;: 16,
+    &quot;colocatedControllers&quot;: 8,
+    &quot;colocatedNativeDrivers&quot;: 8
+  },
+  &quot;options&quot;: {
+    &quot;offeredRate&quot;: 0,
+    &quot;groups&quot;: 8,
+    &quot;tenants&quot;: 2,
+    &quot;duration&quot;: 60,
+    &quot;warmup&quot;: 1,
+    &quot;drain&quot;: 60,
+    &quot;concurrency&quot;: 256,
+    &quot;workers&quot;: 4,
+    &quot;shops&quot;: 4,
+    &quot;hotShops&quot;: 1,
+    &quot;hotProbability&quot;: 0.8,
+    &quot;maxOrders&quot;: 96,
+    &quot;bakeMs&quot;: 250,
+    &quot;leaseMs&quot;: 2000,
+    &quot;duplicateRate&quot;: 0.1,
+    &quot;abandonRate&quot;: 0.1,
+    &quot;pollMs&quot;: 150,
+    &quot;requestTimeoutMs&quot;: 2000,
+    &quot;retryBudgetMs&quot;: 15000,
+    &quot;nodes&quot;: 3,
+    &quot;seed&quot;: &quot;42&quot;,
+    &quot;initialization&quot;: &quot;static&quot;,
+    &quot;queryRouting&quot;: &quot;replicas&quot;,
+    &quot;readConsistency&quot;: &quot;replica-local&quot;,
+    &quot;driver&quot;: &quot;rust&quot;,
+    &quot;driverBinary&quot;: &quot;/tmp/flower-latency-20260924/bin/driver&quot;,
+    &quot;binary&quot;: &quot;/tmp/flower-latency-20260924/bin/redb&quot;,
+    &quot;json&quot;: &quot;/tmp/flower-latency-20260924/final-latency.json&quot;,
+    &quot;html&quot;: &quot;/tmp/flower-latency-20260924/final-latency.html&quot;,
+    &quot;baseline&quot;: null,
+    &quot;cpuProfile&quot;: null,
+    &quot;chaos&quot;: true,
+    &quot;http2&quot;: true,
+    &quot;keepData&quot;: false,
+    &quot;help&quot;: false
+  }
+}</pre></details><details><summary>Group failures and replica routing</summary><pre>[
+  {
+    &quot;group&quot;: &quot;group-0&quot;,
+    &quot;failures&quot;: [],
+    &quot;queryRouting&quot;: {
+      &quot;mode&quot;: &quot;replicas&quot;,
+      &quot;consistency&quot;: &quot;replica-local&quot;,
+      &quot;auditConsistency&quot;: &quot;fresh&quot;,
+      &quot;nodes&quot;: [
+        {
+          &quot;id&quot;: 1,
+          &quot;url&quot;: &quot;http://127.0.0.1:56483&quot;,
+          &quot;attempts&quot;: 101256,
+          &quot;completed&quot;: 101174,
+          &quot;failures&quot;: 82
+        },
+        {
+          &quot;id&quot;: 2,
+          &quot;url&quot;: &quot;http://127.0.0.1:56494&quot;,
+          &quot;attempts&quot;: 105265,
+          &quot;completed&quot;: 105265,
+          &quot;failures&quot;: 0
+        },
+        {
+          &quot;id&quot;: 3,
+          &quot;url&quot;: &quot;http://127.0.0.1:56496&quot;,
+          &quot;attempts&quot;: 105263,
+          &quot;completed&quot;: 105263,
+          &quot;failures&quot;: 0
+        }
+      ]
+    },
+    &quot;counters&quot;: {
+      &quot;issuedOrders&quot;: 96,
+      &quot;delivered&quot;: 96,
+      &quot;replayChecks&quot;: 12772,
+      &quot;claims&quot;: 109,
+      &quot;emptyClaims&quot;: 855,
+      &quot;reclaimed&quot;: 13,
+      &quot;abandoned&quot;: 13,
+      &quot;lostLeases&quot;: 0,
+      &quot;staleLeaseChecks&quot;: 13
+    }
+  },
+  {
+    &quot;group&quot;: &quot;group-1&quot;,
+    &quot;failures&quot;: [],
+    &quot;queryRouting&quot;: {
+      &quot;mode&quot;: &quot;replicas&quot;,
+      &quot;consistency&quot;: &quot;replica-local&quot;,
+      &quot;auditConsistency&quot;: &quot;fresh&quot;,
+      &quot;nodes&quot;: [
+        {
+          &quot;id&quot;: 1,
+          &quot;url&quot;: &quot;http://127.0.0.1:56484&quot;,
+          &quot;attempts&quot;: 102121,
+          &quot;completed&quot;: 102035,
+          &quot;failures&quot;: 86
+        },
+        {
+          &quot;id&quot;: 2,
+          &quot;url&quot;: &quot;http://127.0.0.1:56491&quot;,
+          &quot;attempts&quot;: 106058,
+          &quot;completed&quot;: 106058,
+          &quot;failures&quot;: 0
+        },
+        {
+          &quot;id&quot;: 3,
+          &quot;url&quot;: &quot;http://127.0.0.1:56493&quot;,
+          &quot;attempts&quot;: 106058,
+          &quot;completed&quot;: 106058,
+          &quot;failures&quot;: 0
+        }
+      ]
+    },
+    &quot;counters&quot;: {
+      &quot;issuedOrders&quot;: 96,
+      &quot;delivered&quot;: 96,
+      &quot;replayChecks&quot;: 12867,
+      &quot;claims&quot;: 106,
+      &quot;emptyClaims&quot;: 852,
+      &quot;reclaimed&quot;: 10,
+      &quot;abandoned&quot;: 10,
+      &quot;lostLeases&quot;: 0,
+      &quot;staleLeaseChecks&quot;: 10
+    }
+  },
+  {
+    &quot;group&quot;: &quot;group-2&quot;,
+    &quot;failures&quot;: [],
+    &quot;queryRouting&quot;: {
+      &quot;mode&quot;: &quot;replicas&quot;,
+      &quot;consistency&quot;: &quot;replica-local&quot;,
+      &quot;auditConsistency&quot;: &quot;fresh&quot;,
+      &quot;nodes&quot;: [
+        {
+          &quot;id&quot;: 1,
+          &quot;url&quot;: &quot;http://127.0.0.1:56486&quot;,
+          &quot;attempts&quot;: 102154,
+          &quot;completed&quot;: 101972,
+          &quot;failures&quot;: 182
+        },
+        {
+          &quot;id&quot;: 2,
+          &quot;url&quot;: &quot;http://127.0.0.1:56498&quot;,
+          &quot;attempts&quot;: 105921,
+          &quot;completed&quot;: 105921,
+          &quot;failures&quot;: 0
+        },
+        {
+          &quot;id&quot;: 3,
+          &quot;url&quot;: &quot;http://127.0.0.1:56499&quot;,
+          &quot;attempts&quot;: 105919,
+          &quot;completed&quot;: 105919,
+          &quot;failures&quot;: 0
+        }
+      ]
+    },
+    &quot;counters&quot;: {
+      &quot;issuedOrders&quot;: 96,
+      &quot;delivered&quot;: 96,
+      &quot;replayChecks&quot;: 12794,
+      &quot;claims&quot;: 109,
+      &quot;emptyClaims&quot;: 856,
+      &quot;reclaimed&quot;: 13,
+      &quot;abandoned&quot;: 13,
+      &quot;lostLeases&quot;: 0,
+      &quot;staleLeaseChecks&quot;: 13
+    }
+  },
+  {
+    &quot;group&quot;: &quot;group-3&quot;,
+    &quot;failures&quot;: [],
+    &quot;queryRouting&quot;: {
+      &quot;mode&quot;: &quot;replicas&quot;,
+      &quot;consistency&quot;: &quot;replica-local&quot;,
+      &quot;auditConsistency&quot;: &quot;fresh&quot;,
+      &quot;nodes&quot;: [
+        {
+          &quot;id&quot;: 1,
+          &quot;url&quot;: &quot;http://127.0.0.1:56482&quot;,
+          &quot;attempts&quot;: 102622,
+          &quot;completed&quot;: 102503,
+          &quot;failures&quot;: 119
+        },
+        {
+          &quot;id&quot;: 2,
+          &quot;url&quot;: &quot;http://127.0.0.1:56489&quot;,
+          &quot;attempts&quot;: 106168,
+          &quot;completed&quot;: 106168,
+          &quot;failures&quot;: 0
+        },
+        {
+          &quot;id&quot;: 3,
+          &quot;url&quot;: &quot;http://127.0.0.1:56492&quot;,
+          &quot;attempts&quot;: 106166,
+          &quot;completed&quot;: 106166,
+          &quot;failures&quot;: 0
+        }
+      ]
+    },
+    &quot;counters&quot;: {
+      &quot;issuedOrders&quot;: 96,
+      &quot;delivered&quot;: 96,
+      &quot;replayChecks&quot;: 12895,
+      &quot;claims&quot;: 108,
+      &quot;emptyClaims&quot;: 865,
+      &quot;reclaimed&quot;: 12,
+      &quot;abandoned&quot;: 12,
+      &quot;lostLeases&quot;: 0,
+      &quot;staleLeaseChecks&quot;: 12
+    }
+  },
+  {
+    &quot;group&quot;: &quot;group-4&quot;,
+    &quot;failures&quot;: [],
+    &quot;queryRouting&quot;: {
+      &quot;mode&quot;: &quot;replicas&quot;,
+      &quot;consistency&quot;: &quot;replica-local&quot;,
+      &quot;auditConsistency&quot;: &quot;fresh&quot;,
+      &quot;nodes&quot;: [
+        {
+          &quot;id&quot;: 1,
+          &quot;url&quot;: &quot;http://127.0.0.1:56481&quot;,
+          &quot;attempts&quot;: 102433,
+          &quot;completed&quot;: 102310,
+          &quot;failures&quot;: 123
+        },
+        {
+          &quot;id&quot;: 2,
+          &quot;url&quot;: &quot;http://127.0.0.1:56488&quot;,
+          &quot;attempts&quot;: 106351,
+          &quot;completed&quot;: 106351,
+          &quot;failures&quot;: 0
+        },
+        {
+          &quot;id&quot;: 3,
+          &quot;url&quot;: &quot;http://127.0.0.1:56490&quot;,
+          &quot;attempts&quot;: 106349,
+          &quot;completed&quot;: 106349,
+          &quot;failures&quot;: 0
+        }
+      ]
+    },
+    &quot;counters&quot;: {
+      &quot;issuedOrders&quot;: 96,
+      &quot;delivered&quot;: 96,
+      &quot;replayChecks&quot;: 12823,
+      &quot;claims&quot;: 109,
+      &quot;emptyClaims&quot;: 859,
+      &quot;reclaimed&quot;: 13,
+      &quot;abandoned&quot;: 13,
+      &quot;lostLeases&quot;: 0,
+      &quot;staleLeaseChecks&quot;: 13
+    }
+  },
+  {
+    &quot;group&quot;: &quot;group-5&quot;,
+    &quot;failures&quot;: [],
+    &quot;queryRouting&quot;: {
+      &quot;mode&quot;: &quot;replicas&quot;,
+      &quot;consistency&quot;: &quot;replica-local&quot;,
+      &quot;auditConsistency&quot;: &quot;fresh&quot;,
+      &quot;nodes&quot;: [
+        {
+          &quot;id&quot;: 1,
+          &quot;url&quot;: &quot;http://127.0.0.1:56487&quot;,
+          &quot;attempts&quot;: 100450,
+          &quot;completed&quot;: 100305,
+          &quot;failures&quot;: 145
+        },
+        {
+          &quot;id&quot;: 2,
+          &quot;url&quot;: &quot;http://127.0.0.1:56500&quot;,
+          &quot;attempts&quot;: 103879,
+          &quot;completed&quot;: 103879,
+          &quot;failures&quot;: 0
+        },
+        {
+          &quot;id&quot;: 3,
+          &quot;url&quot;: &quot;http://127.0.0.1:56501&quot;,
+          &quot;attempts&quot;: 103878,
+          &quot;completed&quot;: 103878,
+          &quot;failures&quot;: 0
+        }
+      ]
+    },
+    &quot;counters&quot;: {
+      &quot;issuedOrders&quot;: 96,
+      &quot;delivered&quot;: 96,
+      &quot;replayChecks&quot;: 12521,
+      &quot;claims&quot;: 107,
+      &quot;emptyClaims&quot;: 839,
+      &quot;reclaimed&quot;: 11,
+      &quot;abandoned&quot;: 11,
+      &quot;lostLeases&quot;: 0,
+      &quot;staleLeaseChecks&quot;: 11
+    }
+  },
+  {
+    &quot;group&quot;: &quot;group-6&quot;,
+    &quot;failures&quot;: [],
+    &quot;queryRouting&quot;: {
+      &quot;mode&quot;: &quot;replicas&quot;,
+      &quot;consistency&quot;: &quot;replica-local&quot;,
+      &quot;auditConsistency&quot;: &quot;fresh&quot;,
+      &quot;nodes&quot;: [
+        {
+          &quot;id&quot;: 1,
+          &quot;url&quot;: &quot;http://127.0.0.1:56485&quot;,
+          &quot;attempts&quot;: 99137,
+          &quot;completed&quot;: 99014,
+          &quot;failures&quot;: 123
+        },
+        {
+          &quot;id&quot;: 2,
+          &quot;url&quot;: &quot;http://127.0.0.1:56495&quot;,
+          &quot;attempts&quot;: 102617,
+          &quot;completed&quot;: 102617,
+          &quot;failures&quot;: 0
+        },
+        {
+          &quot;id&quot;: 3,
+          &quot;url&quot;: &quot;http://127.0.0.1:56497&quot;,
+          &quot;attempts&quot;: 102615,
+          &quot;completed&quot;: 102615,
+          &quot;failures&quot;: 0
+        }
+      ]
+    },
+    &quot;counters&quot;: {
+      &quot;issuedOrders&quot;: 96,
+      &quot;delivered&quot;: 96,
+      &quot;replayChecks&quot;: 12462,
+      &quot;claims&quot;: 113,
+      &quot;emptyClaims&quot;: 845,
+      &quot;reclaimed&quot;: 17,
+      &quot;abandoned&quot;: 17,
+      &quot;lostLeases&quot;: 0,
+      &quot;staleLeaseChecks&quot;: 17
+    }
+  },
+  {
+    &quot;group&quot;: &quot;group-7&quot;,
+    &quot;failures&quot;: [],
+    &quot;queryRouting&quot;: {
+      &quot;mode&quot;: &quot;replicas&quot;,
+      &quot;consistency&quot;: &quot;replica-local&quot;,
+      &quot;auditConsistency&quot;: &quot;fresh&quot;,
+      &quot;nodes&quot;: [
+        {
+          &quot;id&quot;: 1,
+          &quot;url&quot;: &quot;http://127.0.0.1:56502&quot;,
+          &quot;attempts&quot;: 99835,
+          &quot;completed&quot;: 99755,
+          &quot;failures&quot;: 80
+        },
+        {
+          &quot;id&quot;: 2,
+          &quot;url&quot;: &quot;http://127.0.0.1:56503&quot;,
+          &quot;attempts&quot;: 103596,
+          &quot;completed&quot;: 103596,
+          &quot;failures&quot;: 0
+        },
+        {
+          &quot;id&quot;: 3,
+          &quot;url&quot;: &quot;http://127.0.0.1:56504&quot;,
+          &quot;attempts&quot;: 103594,
+          &quot;completed&quot;: 103594,
+          &quot;failures&quot;: 0
+        }
+      ]
+    },
+    &quot;counters&quot;: {
+      &quot;issuedOrders&quot;: 96,
+      &quot;delivered&quot;: 96,
+      &quot;replayChecks&quot;: 12623,
+      &quot;claims&quot;: 114,
+      &quot;emptyClaims&quot;: 852,
+      &quot;reclaimed&quot;: 18,
+      &quot;abandoned&quot;: 18,
+      &quot;lostLeases&quot;: 0,
+      &quot;staleLeaseChecks&quot;: 18
+    }
+  }
+]</pre></details></section>
+<footer><span>✿ Flower · Durable promises, clearly measured.</span><span>Self-contained HTML and SVG · no network assets or scripts</span></footer></main><div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/flower-js-org/runtime">Source ↗</a></div></div></div></body></html>

@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f8f5ec">
+<meta name="description" content="Reference for managed keys: handles, provisioning, rotation, authorization and limits.">
+<meta property="og:title" content="Managed keys · Flower">
+<meta property="og:description" content="Reference for managed keys: handles, provisioning, rotation, authorization and limits.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://flower.js.org/reference/keys.html">
+<link rel="canonical" href="https://flower.js.org/reference/keys.html">
+<title>Managed keys · Flower</title>
+<link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
+<link rel="stylesheet" href="../site.css?v=eb05c8aa5c04">
+<script src="../site.js?v=3184f0662fa5" defer></script>
+</head>
+<body class="doc-page">
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/" aria-current="page">Reference</a><a class="site-repository" href="https://github.com/flower-js-org/runtime">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
+<div class="documentation">
+<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/methods.html"><span>04</span>Methods & retries</a></li><li><a href="../guide/reads.html"><span>05</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>06</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>07</span>Leases & expiry</a></li><li><a href="../guide/workers.html"><span>08</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>09</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>10</span>Crypto & tokens</a></li><li><a href="../guide/deployments.html"><span>11</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/definitions.html"><span>03</span>Contexts & definitions</a></li><li><a href="../reference/client.html"><span>04</span>Client & transports</a></li><li><a href="../reference/time.html"><span>05</span>Expiry, leases & timers</a></li><li><a href="../reference/crypto.html"><span>06</span>NaCl & JWT</a></li><li class="current"><a href="#top" aria-current="page"><span>07</span>Managed keys</a><ol id="section-nav" aria-label="On this page"><li><a href="#declare-keys">Declare a key</a></li><li><a href="#which-operation-can-use-which">What each algorithm does</a></li><li><a href="#provision-and-administer">Create and bind keys</a></li><li><a href="#authorization-rotation-and-reactive-state">Rotation, revocation and reads</a></li><li><a href="#native-reuse-and-operating-limits">Server settings</a></li><li><a href="#key-versions">Key versions</a></li></ol></li><li><a href="../reference/partitions.html"><span>08</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>09</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>10</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>11</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>12</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Clear contracts.<br>Honest limits.<br>Room to grow.</p></div></aside>
+<main id="main" tabindex="-1">
+<header class="page-intro" id="top"><p class="eyebrow">Reference · 07</p><h1>Managed keys.</h1><p class="lead">Declare a key in code; an operator provides it. Private key bytes never reach your code.</p></header>
+<div class="page-content">
+<!-- content:start -->
+<p>Code declares the keys it needs; an operator creates the key and binds it. Private bytes never reach TypeScript. An operation works only if both the declaration and the binding allow it.</p>
+<section id="declare-keys" data-toc="Declare a key">
+<h2>Declare a key</h2>
+<div class="table-wrap"><table><thead><tr><th>API</th><th>Contract</th></tr></thead><tbody><tr><th scope="row"><code data-api-symbol="key">key(name: string, options: KeyOptions): ManagedKey</code></th><td>Declare a key handle and list it in <code>define({keys: [handle]})</code>. Name must be nonempty and unique; usages must be nonempty and distinct. Don't use a handle during bundle initialization.</td></tr><tr><th scope="row"><code data-api-symbol="ManagedKeyAlgorithm">ManagedKeyAlgorithm</code></th><td><code>"Ed25519" | "P256" | "RSA" | "HS256" | "A256GCM" | "XSalsa20Poly1305" | "X25519"</code>.</td></tr><tr><th scope="row"><code data-api-symbol="KeyUsage">KeyUsage</code></th><td><code>"sign" | "verify" | "encrypt" | "decrypt" | "derive" | "publicKey"</code>. Each usage must fit the algorithm.</td></tr><tr><th scope="row"><code data-api-symbol="KeyOptions">KeyOptions</code></th><td><code>{readonly algorithm: ManagedKeyAlgorithm; readonly usages: readonly KeyUsage[]}</code>. No other properties.</td></tr><tr><th scope="row"><code data-api-symbol="ManagedKey">ManagedKey</code></th><td><code>KeyOptions &amp; {readonly kind: "key"; readonly name: string}</code>. Public metadata only; holding it grants nothing.</td></tr><tr><th scope="row"><code data-api-symbol="publicKey">publicKey(key: ManagedKey): Uint8Array</code></th><td>Needs the <code>publicKey</code> usage. Ed25519/X25519 return 32 raw bytes; P256/RSA return SPKI DER. Symmetric keys have none.</td></tr><tr><th scope="row"><code data-api-symbol="SharedKey">SharedKey</code></th><td>Opaque handle from managed <code>nacl.box.before</code>. Valid only inside that callback; cannot be serialized or forged.</td></tr><tr><th scope="row"><code data-api-symbol="ManagedJWTSignOptions">ManagedJWTSignOptions</code></th><td><code>{algorithm?: JWTAlgorithm; typ?: string}</code>. The algorithm follows the key (Ed25519→EdDSA, P256→ES256, RSA→RS256, HS256→HS256); a supplied one must match. Flower sets <code>kid</code>.</td></tr><tr><th scope="row"><code data-api-symbol="ManagedJWTVerifyOptions">ManagedJWTVerifyOptions</code></th><td><code>JWTValidationOptions &amp; {algorithms?: readonly JWTAlgorithm[]}</code>. If given, <code>algorithms</code> must be just the key's algorithm. Expiry is still required by default.</td></tr></tbody></table></div>
+</section>
+<section id="which-operation-can-use-which">
+<h2>What each algorithm does</h2>
+<div class="table-wrap"><table><thead><tr><th>API</th><th>Contract</th></tr></thead><tbody><tr><th scope="row"><code>Ed25519</code></th><td>JWT sign/verify; NaCl <code>sign</code>, <code>sign.open</code>, <code>sign.detached</code>, <code>sign.detached.verify</code>.</td></tr><tr><th scope="row"><code>P256 / RSA / HS256</code></th><td>JWT sign/verify. P256/RSA also allow <code>publicKey</code>. For public-only verification keys, use the raw byte API.</td></tr><tr><th scope="row"><code>A256GCM</code></th><td>JWT encrypt/decrypt. Pass a unique 12-byte nonce, or omit it inside a mutation.</td></tr><tr><th scope="row"><code>XSalsa20Poly1305</code></th><td>NaCl <code>secretbox</code>/<code>open</code> and <code>box.after</code>/<code>open.after</code>. Pass a unique 24-byte nonce on every encryption.</td></tr><tr><th scope="row"><code>X25519</code></th><td>NaCl <code>box</code>/<code>open</code> with a raw peer public key. <code>box.before</code> needs <code>derive</code> and returns a SharedKey. <code>scalarMult.base</code> needs <code>publicKey</code>.</td></tr><tr><th scope="row"><code>SharedKey</code></th><td>Works with <code>secretbox</code>/<code>open</code> and <code>box.after</code>/<code>open.after</code> in the same callback. Managed <code>scalarMult</code> and <code>keyPair.fromSecretKey</code> are not supported.</td></tr></tbody></table></div>
+<ul>
+<li>The raw byte-key APIs still work alongside managed keys.</li>
+<li>Managed NaCl uses the active version and stores no version in its output. Save <code>keyVersion(key).version</code> with the ciphertext or signature, or you can't decrypt or verify after a rotation (see <a href="#key-versions">key versions</a>).</li>
+<li>Managed JWTs carry their version in <code>kid</code>. Tokens without a managed <code>kid</code> need the raw public-key API.</li>
+</ul>
+</section>
+<section id="provision-and-administer">
+<h2>Create and bind keys</h2>
+<p>Use <code>new FlowerClient(url, {adminToken})</code>, and <code>client.partition(id)</code> for a named database. Every key method needs the admin token.</p>
+<ul>
+<li>Changing methods take <code>ControlOptions</code> (<code>requestId?, signal?</code>). If a response is lost, retry with the same request ID and the same arguments.</li>
+<li>They return <code>{revision, value, duplicate}</code>, where <code>value</code> is the public catalog.</li>
+</ul>
+<div class="table-wrap"><table><thead><tr><th>API</th><th>Contract</th></tr></thead><tbody><tr><th scope="row"><code data-api-method="FlowerClient.keyList">client.keyList(options?: RequestOptions)</code></th><td>Return the current public catalog.</td></tr><tr><th scope="row"><code data-api-method="FlowerClient.keyCacheStats">client.keyCacheStats(options?: RequestOptions)</code></th><td>Cache statistics for the node that received the request, not per database.</td></tr><tr><th scope="row"><code data-api-method="FlowerClient.keyGenerate">client.keyGenerate(name, algorithm, options?: KeyGenerateOptions)</code></th><td>Generate a new key as version 1. The name must be new. Returns metadata only.</td></tr><tr><th scope="row"><code data-api-method="FlowerClient.keyImport">client.keyImport(name, algorithm, sealed, options?: ControlOptions)</code></th><td>Import a <code>SealedKeyImport</code> made by <code>flower key seal</code>. Plaintext uploads are rejected.</td></tr><tr><th scope="row"><code data-api-method="FlowerClient.keyBind">client.keyBind(alias, keyName, usages, options?: ControlOptions)</code></th><td>Bind a declared alias to a key with the given usages (creates or replaces). Deployed code can never get more than this grants.</td></tr><tr><th scope="row"><code data-api-method="FlowerClient.keyUnbind">client.keyUnbind(alias, options?: ControlOptions)</code></th><td>Remove a binding. Keeps the key. Fails for an unknown alias.</td></tr><tr><th scope="row"><code data-api-method="FlowerClient.keyRotate">client.keyRotate(keyName, options?: KeyGenerateOptions)</code></th><td>Add a new version and use it for new operations. Old versions stay usable for reading.</td></tr><tr><th scope="row"><code data-api-method="FlowerClient.keyRevoke">client.keyRevoke(keyName, options?: KeyRevokeOptions)</code></th><td>Permanently revoke one version, or all versions if none is given. Revoking the active version blocks new operations until you rotate. Does not delete data.</td></tr><tr><th scope="row"><code data-api-symbol="KeyGenerateOptions">KeyGenerateOptions</code></th><td><code>ControlOptions &amp; {bits?: number}</code>. RSA only: 2048 (default), 3072, 4096 or 8192. RSA generation can be slow and blocks writes to that database meanwhile; if it times out, retry with the same request ID.</td></tr><tr><th scope="row"><code data-api-symbol="KeyRevokeOptions">KeyRevokeOptions</code></th><td><code>ControlOptions &amp; {version?: number}</code>. The version must exist.</td></tr><tr><th scope="row"><code data-api-symbol="SealedKeyImport">SealedKeyImport</code></th><td><code>{version: 1; wrappingId: string; nonce: string; ciphertext: string}</code>, base64url. Encrypted; contains no private bytes.</td></tr><tr><th scope="row"><code data-api-symbol="ManagedKeyCatalog">ManagedKeyCatalog</code></th><td><code>{domain: string | null; revision: number; keys; bindings}</code>. <code>keys</code> maps names to <code>{id, algorithm, activeVersion, versions: {version, revoked, retired, destroyed, wrappingId: string | null, kid}[]}</code>; <code>bindings</code> maps aliases to <code>{key, usages}</code>. Empty catalog: null domain, revision 0. Never includes key material.</td></tr><tr><th scope="row"><code data-api-symbol="KeyCacheStats">KeyCacheStats</code></th><td><code>{entries, bytes, budgetBytes, hits, misses, loads, evictions, flightEntries, flightBytes, coalesced}</code>, all numbers, for one node. Reset on restart. <code>bytes</code> is not process memory.</td></tr></tbody></table></div>
+<div class="code-block"><div class="code-head"><span>Mount once; grant explicitly</span><button class="copy-button" type="button" aria-label="Copy Mount once; grant explicitly">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="comment"># Install the same protected wrapping file on every authorized server.</span>
+umask <span class="num">077</span>
+openssl rand <span class="num">32</span> &gt; /secure/flower<span class="var">-wrapping</span>.key
+<span class="comment"># Start each server with FLOWER_KEYRING_FILE=/secure/flower-wrapping.key.</span>
+
+<span class="comment"># SDK CLI: supply FLOWER_URL and FLOWER_ADMIN_TOKEN for your cluster.</span>
+flower key generate session<span class="var">-signing</span> <span class="var">--algorithm</span> Ed<span class="num">2</span><span class="num">5</span><span class="num">5</span><span class="num">1</span><span class="num">9</span> <span class="var">--request-id</span> create<span class="var">-session-key</span>
+flower key bind sessions session<span class="var">-signing</span> <span class="var">--usages</span> sign,verify <span class="var">--request-id</span> bind<span class="var">-sessions</span>
+flower deploy sessions.ts <span class="var">--request-id</span> deploy<span class="var">-sessions</span>
+flower key rotate session<span class="var">-signing</span> <span class="var">--request-id</span> rotate<span class="var">-sessions-2</span>
+flower key list
+flower key cache</code></pre></div>
+<div class="code-block"><div class="code-head"><span>Import existing material without a plaintext HTTP upload</span><button class="copy-button" type="button" aria-label="Copy Import existing material without a plaintext HTTP upload">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="comment"># Native runtime executable: plaintext stays on this local machine.</span>
+/path/to/native/flower key seal <span class="var">--wrapping-key-file</span> /secure/flower<span class="var">-wrapping</span>.key \
+  <span class="var">--format</span> pem &lt; private.pem &gt; sealed.json
+<span class="comment"># SDK CLI sends only the authenticated encrypted envelope.</span>
+flower key import imported<span class="var">-signing</span> sealed.json <span class="var">--algorithm</span> Ed<span class="num">2</span><span class="num">5</span><span class="num">5</span><span class="num">1</span><span class="num">9</span> \
+  <span class="var">--request-id</span> import<span class="var">-signing</span></code></pre></div>
+<ul>
+<li>There are two <code>flower</code> executables. The SDK CLI does network administration. Only the native runtime executable has <code>key seal</code>, which reads plaintext from stdin (<code>--format raw|pem|der</code>, <code>--wrapping-key-file PATH</code>) and writes sealed JSON. <code>flower key import NAME FILE</code> reads that JSON; FILE <code>-</code> means stdin.</li>
+<li>Keep the wrapping file out of the Raft data directory and its backups. <strong>If you lose it, you lose the keys.</strong></li>
+<li>Import formats: HS256 raw bytes (32 or more); A256GCM, XSalsa20Poly1305, X25519 exactly 32 raw bytes; Ed25519 32-byte seed, 64-byte NaCl secret or PKCS#8; P256 32-byte scalar or PKCS#8; RSA PKCS#8 or PKCS#1 (2048–8192 bits). Public-only keys, certificates, SEC1 and password-protected PEM are not supported.</li>
+<li>If you pass your own nonces, you must keep them unique across retries and concurrent calls.</li>
+</ul>
+</section>
+<section id="authorization-rotation-and-reactive-state">
+<h2>Rotation, revocation and reads</h2>
+<ul>
+<li>Each logical database has its own catalog. A named partition keeps its keys when moved.</li>
+<li>A callback sees one version of the key policy for its whole run; a rotation never switches keys mid-call.</li>
+<li>When any managed key is declared, all queries and watches read fresh quorum snapshots, even ones marked replica-local. This trades stale-read availability for up-to-date revocation.</li>
+<li>Rebinding, rotation and revocation recompute dependent derived values. A derived value that depends on a revoked key becomes an error, not an old answer.</li>
+<li>Rotation keeps old versions; revocation marks them unusable but keeps them. Nothing is destroyed or rewrapped automatically.</li>
+<li>Revocation only affects new operations. It can't take back bytes already returned or tokens already accepted elsewhere.</li>
+<li>Keys don't authenticate users. Your methods still decide who may sign, decrypt or read public keys.</li>
+</ul>
+</section>
+<section id="native-reuse-and-operating-limits">
+<h2>Server settings</h2>
+<div class="table-wrap"><table><thead><tr><th>API</th><th>Contract</th></tr></thead><tbody><tr><th scope="row"><code>FLOWER_KEYRING_FILE</code></th><td>Path to a 32-byte wrapping key, <code>chmod 600</code> on Unix. Read once at startup. Unset: managed keys are locked. Invalid: the server won't start.</td></tr><tr><th scope="row"><code>FLOWER_KEY_CACHE_BYTES</code></th><td>Default 16 MiB. Per-node cache of prepared keys. <code>0</code> disables it.</td></tr><tr><th scope="row"><code>FLOWER_KEY_CACHE_TTL_MS</code></th><td>Default <code>0</code> (no expiry). A positive value limits how long a prepared key is reused. Not a revocation delay.</td></tr></tbody></table></div>
+<ul>
+<li>A node without the right wrapping key refuses managed-key work. Queries that don't touch keys still run.</li>
+<li>Give every node that may own a database the same wrapping key. Otherwise a partition move pauses until you fix the configuration and restart; then it continues.</li>
+<li>Backups hold only encrypted key material, but a running server holds unwrapped keys in memory. Use TLS or a trusted network; the default h2c mode is unencrypted.</li>
+<li>Not supported: KMS/HSM, private-key export, moving between different wrapping keys without a rewrap.</li>
+</ul>
+<p>Details: <a href="https://github.com/flower-js-org/runtime/blob/main/SECRETS.md">managed-key operating contract</a>.</p>
+</section>
+<section id="key-versions">
+<h2>Key versions</h2>
+<p><code data-api-symbol="keyVersion">keyVersion(key, version?)</code> returns a <code data-api-symbol="ManagedKeyVersion">ManagedKeyVersion</code>: <code>{kind:"keyVersion",key:ManagedKey,version:string}</code>. Without <code>version</code> it gives the current <code>flower.&lt;keyId&gt;.&lt;version&gt;</code> ID. Store that ID next to NaCl ciphertext and pass it back to decrypt later. Old versions can verify, decrypt and export public keys, but not sign, encrypt or derive.</p>
+<div class="table-wrap"><table><tbody>
+<tr><th><code data-api-method="FlowerClient.keyRetire">client.keyRetire(name, options?: KeyRevokeOptions)</code></th><td>Stop new signing/encryption with one or all versions; verification and decryption still work. Rotate to get a new writable version.</td></tr>
+<tr><th><code data-api-method="FlowerClient.keyDestroy">client.keyDestroy(name, options?: KeyRevokeOptions)</code></th><td>Delete the stored key material, keeping a tombstone. Doesn't erase backups. Rotating a destroyed RSA key needs explicit <code>bits</code>.</td></tr>
+<tr><th><code data-api-method="FlowerClient.keyRewrap">client.keyRewrap(name, options?: KeyRevokeOptions)</code></th><td>Re-encrypt versions under the current wrapping key. To change wrapping keys: list old ones in <code>FLOWER_KEYRING_PREVIOUS_FILES</code> (JSON array of paths), restart, rewrap every catalog, remove the old ones, restart again.</td></tr>
+</tbody></table></div><p>CLI: <code>flower key retire|destroy|rewrap NAME [--version N]</code>. Keep the same <code>--request-id</code> when retrying.</p>
+</section>
+<!-- content:end -->
+</div>
+<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../reference/crypto.html"><small>Previous · Reference</small>NaCl & JWT</a><a rel="next" href="../reference/partitions.html"><small>Next · Reference</small>Partitions & transactions</a></nav>
+</main>
+</div>
+<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/flower-js-org/runtime">Source ↗</a></div></div></div>
+<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
+</body>
+</html>

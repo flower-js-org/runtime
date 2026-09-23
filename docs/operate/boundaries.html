@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f8f5ec">
+<meta name="description" content="What Flower implements today, and the limits to plan around.">
+<meta property="og:title" content="Current boundaries · Flower">
+<meta property="og:description" content="What Flower implements today, and the limits to plan around.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://flower.js.org/operate/boundaries.html">
+<link rel="canonical" href="https://flower.js.org/operate/boundaries.html">
+<title>Current boundaries · Flower</title>
+<link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
+<link rel="stylesheet" href="../site.css?v=eb05c8aa5c04">
+<script src="../site.js?v=3184f0662fa5" defer></script>
+</head>
+<body class="doc-page">
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/">Guide</a><a href="../operate/" aria-current="page">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/flower-js-org/runtime">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
+<div class="documentation">
+<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/methods.html"><span>04</span>Methods & retries</a></li><li><a href="../guide/reads.html"><span>05</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>06</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>07</span>Leases & expiry</a></li><li><a href="../guide/workers.html"><span>08</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>09</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>10</span>Crypto & tokens</a></li><li><a href="../guide/deployments.html"><span>11</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li class="current"><a href="#top" aria-current="page"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/definitions.html"><span>03</span>Contexts & definitions</a></li><li><a href="../reference/client.html"><span>04</span>Client & transports</a></li><li><a href="../reference/time.html"><span>05</span>Expiry, leases & timers</a></li><li><a href="../reference/crypto.html"><span>06</span>NaCl & JWT</a></li><li><a href="../reference/keys.html"><span>07</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>08</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>09</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>10</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>11</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>12</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Three nodes.<br>One failure tolerated.<br>Honest limits.</p></div></aside>
+<main id="main" tabindex="-1">
+<header class="page-intro" id="top"><p class="eyebrow">Operate · 04</p><h1>What works today, and what doesn’t yet.</h1><p class="lead">Flower is a working prototype. Here is what it does, and the limits to plan around.</p></header>
+<div class="page-content">
+<!-- content:start -->
+<div class="boundary-grid"><article><h3>Implemented</h3><ul><li>Raft replication and durable storage</li><li>TypeScript logic in isolated sandboxes</li><li>Atomic mutations and reactive derived values</li><li>Fresh reads and safe retries</li><li>Live query watches over SSE</li><li>Timers, expiration and fenced leases</li><li>Durable indexes and incremental aggregates</li><li>Membership changes and rolling upgrades</li><li>Recoverable cross-group transactions</li><li>Snapshots, recovery and tested leader failover</li></ul></article><article><h3>Know the edges</h3><ul><li>Data is finite JSON</li><li>Each indivisible piece of a rebuild must fit in one evaluation</li><li>Callbacks are pure and synchronous; workers do the I/O</li><li>A prepared cross-group transaction can block availability until it resolves</li></ul></article></div>
+<p>Plan around these:</p>
+<ul>
+<li><strong>All live data stays in RAM.</strong> The published benchmark uses a small, hot dataset. It says nothing about capacity for large state.</li>
+<li><strong>You set retention.</strong> Retry results are kept only if you opt in. Transaction history must be closed and collected explicitly. Jobs, timers and other finished records need their own cleanup.</li>
+<li><strong>Writes to one database are ordered.</strong> Each logical database has one writer, so hot conflicting writes line up. Named partitions write independently.</li>
+<li><strong>Keep host clocks in sync.</strong> Time comes from the serving node. A query can see a time that later appears to go backward after a leader change.</li>
+<li><strong>No I/O in callbacks.</strong> They can't call out or keep module state between calls. Put external work in a queue and let workers do it.</li>
+</ul>
+<details><summary>Queue and size limits</summary><div class="details-body"><p>There is no fixed limit on records, watches or operations per method. Time and memory budgets, queue sizes and JSON depth set the real limits; a very deep graph can hit the stack guard first. Full queues reject with 503. See the <a href="capacity.html#capacity">capacity settings</a> and <a href="capacity.html#budgets">per-request limits</a>.</p></div></details>
+<!-- content:end -->
+</div>
+<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../operate/benchmarks.html"><small>Previous · Operate</small>Benchmarks</a><a rel="next" href="../reference/"><small>Next · Reference</small>Packages</a></nav>
+</main>
+</div>
+<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/flower-js-org/runtime">Source ↗</a></div></div></div>
+<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
+</body>
+</html>

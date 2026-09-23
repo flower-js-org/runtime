@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f8f5ec">
+<meta name="description" content="Reference for Flower values, collections, indexes, ordered scans and incremental aggregates.">
+<meta property="og:title" content="Values &amp; collections · Flower">
+<meta property="og:description" content="Reference for Flower values, collections, indexes, ordered scans and incremental aggregates.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://flower.js.org/reference/data.html">
+<link rel="canonical" href="https://flower.js.org/reference/data.html">
+<title>Values &amp; collections · Flower</title>
+<link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
+<link rel="stylesheet" href="../site.css?v=eb05c8aa5c04">
+<script src="../site.js?v=3184f0662fa5" defer></script>
+</head>
+<body class="doc-page">
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/" aria-current="page">Reference</a><a class="site-repository" href="https://github.com/flower-js-org/runtime">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
+<div class="documentation">
+<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/methods.html"><span>04</span>Methods & retries</a></li><li><a href="../guide/reads.html"><span>05</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>06</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>07</span>Leases & expiry</a></li><li><a href="../guide/workers.html"><span>08</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>09</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>10</span>Crypto & tokens</a></li><li><a href="../guide/deployments.html"><span>11</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li class="current"><a href="#top" aria-current="page"><span>02</span>Values & collections</a><ol id="section-nav" aria-label="On this page"><li><a href="#values">Values &amp; purity</a></li><li><a href="#collections">Collections &amp; indexes</a></li><li><a href="#aggregates">Incremental aggregates</a></li></ol></li><li><a href="../reference/definitions.html"><span>03</span>Contexts & definitions</a></li><li><a href="../reference/client.html"><span>04</span>Client & transports</a></li><li><a href="../reference/time.html"><span>05</span>Expiry, leases & timers</a></li><li><a href="../reference/crypto.html"><span>06</span>NaCl & JWT</a></li><li><a href="../reference/keys.html"><span>07</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>08</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>09</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>10</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>11</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>12</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Clear contracts.<br>Honest limits.<br>Room to grow.</p></div></aside>
+<main id="main" tabindex="-1">
+<header class="page-intro" id="top"><p class="eyebrow">Reference · 02</p><h1>Values and collections.</h1><p class="lead">What a value can be, how collections and indexes work, and incremental totals.</p></header>
+<div class="page-content">
+<!-- content:start -->
+<section id="values" data-toc="Values &amp; purity">
+<h2>Values and callbacks</h2>
+<p>Flower stores JSON. Callbacks are plain synchronous functions over that JSON.</p>
+<div class="table-wrap"><table><thead><tr><th>API</th><th>Contract</th></tr></thead><tbody><tr><th scope="row"><code data-api-symbol="Json">Json</code></th><td>The stored value type: <code>null | boolean | number | string | Json[] | { [key: string]: Json }</code>. Numbers must be finite. Checked at runtime too.</td></tr><tr><th scope="row"><code data-api-symbol="canonicalJson">canonicalJson(value: unknown): string</code></th><td>Serializes with sorted object keys; used for identity and equality. <code>-0</code> becomes <code>0</code>. Throws <code>TypeError</code> for anything that isn’t plain JSON (cycles, depth over 128, BigInt, undefined, class instances, and so on).</td></tr></tbody></table></div>
+<ul>
+<li>Encode BigInt, Date, Map, Set and typed arrays as JSON yourself. Use safe integers (such as cents) when you need exact math.</li>
+<li>Return a JSON value, never a Promise or undefined. Use <code>null</code> for “nothing”.</li>
+<li>Callbacks have no filesystem, network, timers or wall clock. Use <code>ctx.now()</code> for time and external workers for side effects.</li>
+<li>Each callback starts from a fresh, isolated image. Module globals don’t persist between calls.</li>
+</ul>
+</section>
+<section id="collections" data-toc="Collections &amp; indexes">
+<h2>Collections and indexes</h2>
+<p>A collection is a named set of JSON records keyed by string. Indexes let you look records up by field.</p>
+<div class="table-wrap"><table><thead><tr><th>API</th><th>Contract</th></tr></thead><tbody><tr><th scope="row"><code data-api-symbol="collection">collection&lt;T = Record&lt;string, Json&gt;&gt;(name: string): Collection&lt;T&gt;</code></th><td>Returns a reference to a collection; it doesn’t contact a server. Keys are nonempty strings. Missing records read as null.</td></tr><tr><th scope="row"><code data-api-method="Collection.index">ref.index(name, fields): Collection&lt;T&gt;</code></th><td>Declares an index on one or more fields and returns the same reference. Duplicate index names are rejected. Declare indexes before <code>define()</code>.</td></tr><tr><th scope="row"><code data-api-method="Collection.by">ref.by(name).eq(value: Json): Query&lt;T&gt;</code></th><td>Equality query on an index. For a multi-field index, pass an array in field order. Unknown index or wrong length throws TypeError.</td></tr><tr><th scope="row"><code data-api-symbol="Collection">Collection&lt;T&gt;</code></th><td>Readonly <code>kind: "collection"</code>, <code>name</code> and <code>indexes</code>, plus <code>index</code> and <code>by</code>. A definition, not a client-side table.</td></tr><tr><th scope="row"><code data-api-symbol="Query">Query&lt;T&gt;</code></th><td>Readonly <code>kind: "query"</code>, <code>collection</code>, <code>fields</code> and <code>value</code>.</td></tr><tr><th scope="row"><code>ref.by(name).range(options): RangeQuery&lt;T&gt;</code></th><td>Ordered, limited query on an index. Declare the collection in <code>define({collections})</code> so it uses a stored index instead of a scan.</td></tr><tr><th scope="row"><code data-api-symbol="IndexScalar">IndexScalar</code></th><td><code>null | boolean | number | string</code>. Sort order: null, false, true, numbers, then strings. Ties break by record key. Records with a missing or non-scalar field are left out of ordered scans.</td></tr><tr><th scope="row"><code data-api-symbol="ScanOptions">ScanOptions</code></th><td>Options for <code>ctx.scan</code>: <code>index</code> (omit to walk keys), <code>prefix</code>, one lower bound (<code>gt</code>/<code>gte</code>) and one upper bound (<code>lt</code>/<code>lte</code>) on the next field, <code>reverse</code> (default false), <code>offset</code> (default 0) and <code>limit</code> (default all). Unknown options are rejected.</td></tr><tr><th scope="row"><code data-api-symbol="RangeOptions">RangeOptions</code></th><td>Required positive <code>limit</code>. Optional <code>prefix</code>, bounds, <code>reverse</code>, and <code>after</code> (a cursor from the previous page).</td></tr><tr><th scope="row"><code data-api-symbol="RangeQuery">RangeQuery&lt;T&gt;</code></th><td>Readonly <code>kind: "range"</code>, collection, fields and options.</td></tr><tr><th scope="row"><code data-api-symbol="RangePage">RangePage&lt;T&gt;</code></th><td><code>rows: {key, value}[]</code> and <code>cursor: string | null</code>; null means no more rows. Pass the cursor as <code>after</code> with the same query. Rows edited between pages can be skipped or repeated.</td></tr><tr><th scope="row"><code data-api-symbol="CollectionManifest">CollectionManifest</code></th><td>Readonly <code>name</code> and <code>indexes</code>: the collection schema as stored in a deployed module.</td></tr></tbody></table></div><div class="code-block"><div class="code-head"><span>Declare the schema as part of the application</span><button class="copy-button" type="button" aria-label="Copy Declare the schema as part of the application">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { collection, define, query } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
+
+<span class="kw">const</span> orders = collection&lt;{ tenant: <span class="kw">string</span>; state: <span class="kw">string</span>; cents: <span class="kw">number</span> }&gt;(<span class="str">"orders"</span>)
+  .index(<span class="str">"byTenantState"</span>, [<span class="str">"tenant"</span>, <span class="str">"state"</span>]);
+<span class="kw">const</span> pending = query(<span class="str">"orders.pending"</span>, (ctx, tenant: <span class="kw">string</span>) =&gt;
+  ctx.query(orders.by(<span class="str">"byTenantState"</span>).eq([tenant, <span class="str">"pending"</span>])));
+
+<span class="kw">export</span> <span class="kw">default</span> define({ collections: [orders], http: { pending } });</code></pre></div>
+<ul>
+<li>List indexed collections in <code>define({ collections })</code>. Otherwise queries fall back to scanning.</li>
+<li>Indexes don’t enforce uniqueness. A missing field doesn’t match <code>null</code>.</li>
+<li>Rows and their index entries commit together. Queries inside a mutation see that mutation’s writes.</li>
+<li>Deploying a new index builds it in one step. For large collections, use <a href="deployments.html">staged deployment</a>.</li>
+</ul>
+<p>Example: find due timers with <code>ctx.range(timers.by("due").range({prefix: ["pending"], lte: ctx.now(), limit: 1}))</code>. More detail is in <a href="https://github.com/flower-js-org/runtime/blob/main/INDEXES.md">INDEXES.md</a>.</p>
+</section>
+<section id="aggregates" data-toc="Incremental aggregates">
+<h2>Running totals</h2>
+<p>An aggregate keeps a per-group value, such as a sum, and updates it from each changed row. It doesn’t reread the whole group.</p>
+<div class="table-wrap"><table><thead><tr><th>API</th><th>Contract</th></tr></thead><tbody><tr><th scope="row"><code data-api-symbol="aggregate">aggregate&lt;Row, Value&gt;(name, options: AggregateOptions&lt;Row, Value&gt;): Aggregate&lt;Value&gt;</code></th><td>A derived value per group, where the group is the value of one index. Read it with <code>ctx.get(agg, group)</code>.</td></tr><tr><th scope="row"><code data-api-symbol="Aggregate">Aggregate&lt;T = Json&gt;</code></th><td>A <code>Derived&lt;Json, T&gt;</code> with readonly <code>aggregate: AggregateMetadata</code>.</td></tr><tr><th scope="row"><code data-api-symbol="AggregateMetadata">AggregateMetadata</code></th><td>Readonly <code>collection</code> and <code>fields</code>.</td></tr><tr><th scope="row"><code data-api-symbol="AggregateOptions">AggregateOptions&lt;Row, Value&gt;</code></th><td>Required <code>source</code>, <code>index</code>, <code>initial(group)</code>, <code>add(value, row, key, group)</code> and <code>remove(value, row, key, group)</code>. The source and index must be declared in the module.</td></tr></tbody></table></div><div class="code-block"><div class="code-head"><span>Maintain a sum from changed rows</span><button class="copy-button" type="button" aria-label="Copy Maintain a sum from changed rows">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { aggregate, collection } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
+
+<span class="kw">const</span> lines = collection&lt;{ shop: <span class="kw">string</span>; cents: <span class="kw">number</span> }&gt;(<span class="str">"lines"</span>)
+  .index(<span class="str">"byShop"</span>, [<span class="str">"shop"</span>]);
+<span class="kw">const</span> total = aggregate(<span class="str">"shop.total"</span>, {
+  source: lines, index: <span class="str">"byShop"</span>,
+  initial: () =&gt; <span class="num">0</span>,
+  add: (sum, row) =&gt; sum + row.cents,
+  remove: (sum, row) =&gt; sum - row.cents,
+});
+<span class="comment">// Register collections: [lines], definitions: [total].</span>
+<span class="comment">// In a mutation: ctx.materialize(total, shop);</span>
+<span class="comment">// In any callback: ctx.get(total, shop);</span></code></pre></div>
+<ul>
+<li><code>add</code> and <code>remove</code> must be deterministic, work in any order, and undo each other. Flower can’t check this for you.</li>
+<li>Use integer units for exact totals. Floating-point sums can drift.</li>
+<li>An update removes the old row and adds the new one, so moving a row between groups updates both.</li>
+<li>Materialize an aggregate to keep it maintained. Unmaterialized ones may rebuild on every read. Redeploying rebuilds them.</li>
+<li>If a reducer throws, the error is stored and the next relevant change rebuilds from scratch.</li>
+</ul>
+</section>
+<!-- content:end -->
+</div>
+<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../reference/"><small>Previous · Reference</small>Packages</a><a rel="next" href="../reference/definitions.html"><small>Next · Reference</small>Contexts & definitions</a></nav>
+</main>
+</div>
+<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/flower-js-org/runtime">Source ↗</a></div></div></div>
+<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
+</body>
+</html>

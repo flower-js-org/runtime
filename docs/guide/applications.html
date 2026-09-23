@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f8f5ec">
+<meta name="description" content="Define collections, derived values, queries and mutations, and choose which methods are public.">
+<meta property="og:title" content="Applications · Flower">
+<meta property="og:description" content="Define collections, derived values, queries and mutations, and choose which methods are public.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://flower.js.org/guide/applications.html">
+<link rel="canonical" href="https://flower.js.org/guide/applications.html">
+<title>Applications · Flower</title>
+<link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
+<link rel="stylesheet" href="../site.css?v=eb05c8aa5c04">
+<script src="../site.js?v=3184f0662fa5" defer></script>
+</head>
+<body class="doc-page">
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/" aria-current="page">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/flower-js-org/runtime">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
+<div class="documentation">
+<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li class="current"><a href="#top" aria-current="page"><span>02</span>Applications</a><ol id="section-nav" aria-label="On this page"><li><a href="#example">A complete example</a></li><li><a href="#a-small-context-ordinary-typescript">The context</a></li><li><a href="#reuse-initialized-application-snapshots">Static initialization</a></li></ol></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/methods.html"><span>04</span>Methods & retries</a></li><li><a href="../guide/reads.html"><span>05</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>06</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>07</span>Leases & expiry</a></li><li><a href="../guide/workers.html"><span>08</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>09</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>10</span>Crypto & tokens</a></li><li><a href="../guide/deployments.html"><span>11</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/definitions.html"><span>03</span>Contexts & definitions</a></li><li><a href="../reference/client.html"><span>04</span>Client & transports</a></li><li><a href="../reference/time.html"><span>05</span>Expiry, leases & timers</a></li><li><a href="../reference/crypto.html"><span>06</span>NaCl & JWT</a></li><li><a href="../reference/keys.html"><span>07</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>08</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>09</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>10</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>11</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>12</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
+<main id="main" tabindex="-1">
+<header class="page-intro" id="top"><p class="eyebrow">Guide · 02</p><h1>Your code is the API.</h1><p class="lead">An app is collections of JSON records, values derived from them, and methods that read or change them. Only the methods you list are public.</p></header>
+<div class="page-content">
+<!-- content:start -->
+<p>An application is one TypeScript module built from three pieces:</p>
+<div class="definition-grid"><article><span class="small-label">SOURCE</span><h3>collection</h3><p>Named JSON records with string keys.</p></article><article><span class="small-label">DEPENDENCY</span><h3>derive</h3><p>A synchronous function of records and other derived values. Always private.</p></article><article><span class="small-label">BOUNDARY</span><h3>query / mutation</h3><p>Read a snapshot, or make one atomic change. Public only if you list it in <code>http</code>.</p></article></div>
+<section id="example">
+<h2>A complete example</h2>
+<p>Save this as <code>examples/counter.ts</code>:</p>
+<div class="code-block"><div class="code-head"><span>examples/counter.ts</span><button type="button" class="copy-button" aria-label="Copy examples/counter.ts">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { collection, define, derive, mutation, query } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
+
+<span class="kw">const</span> counters = collection&lt;<span class="kw">number</span>&gt;(<span class="str">"counters"</span>);
+
+<span class="kw">const</span> doubled = derive(<span class="str">"counter.doubled"</span>, (ctx, id: <span class="kw">string</span>) =&gt;
+  (ctx.get(counters, id) ?? <span class="num">0</span>) * <span class="num">2</span>,
+);
+
+<span class="kw">const</span> increment = mutation(<span class="str">"internal.counter.increment"</span>, (ctx, id: <span class="kw">string</span>) =&gt; {
+  <span class="kw">if</span> (<span class="kw">typeof</span> id !== <span class="str">"string"</span> || !id) <span class="kw">throw</span> <span class="kw">new</span> TypeError(<span class="str">"An ID is required"</span>);
+  ctx.set(counters, id, (ctx.get(counters, id) ?? <span class="num">0</span>) + <span class="num">1</span>);
+  ctx.materialize(doubled, id);
+  <span class="kw">return</span> ctx.get(doubled, id); <span class="comment">// Includes the write above.</span>
+});
+
+<span class="kw">const</span> get = query(<span class="str">"internal.counter.get"</span>, (ctx, id: <span class="kw">string</span>) =&gt; {
+  <span class="kw">if</span> (<span class="kw">typeof</span> id !== <span class="str">"string"</span> || !id) <span class="kw">throw</span> <span class="kw">new</span> TypeError(<span class="str">"An ID is required"</span>);
+  <span class="kw">return</span> {
+    count: ctx.get(counters, id) ?? <span class="num">0</span>,
+    doubled: ctx.get(doubled, id),
+  };
+});
+
+<span class="kw">export</span> <span class="kw">default</span> define({
+  definitions: [doubled],
+  http: {
+    <span class="str">"counter.increment"</span>: increment,
+    <span class="str">"counter.get"</span>: get,
+  },
+});</code></pre></div>
+<p>Deploy it and call it:</p>
+<div class="code-block"><div class="code-head"><span>Deploy and call</span><button type="button" class="copy-button" aria-label="Copy Deploy and call">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">node</span> sdk/cli.ts deploy examples/counter.ts
+<span class="kw">node</span> sdk/cli.ts call counter.increment <span class="str">'"visits"'</span> <span class="var">--request-id</span> visit-<span class="num">001</span>
+<span class="kw">node</span> sdk/cli.ts call counter.get <span class="str">'"visits"'</span>
+<span class="comment"># value: { count: 1, doubled: 2 }</span></code></pre></div>
+<ul>
+<li>Only aliases listed in <code>http</code> are public. Everything else stays private.</li>
+<li>Aliases don't have to match internal names.</li>
+<li>Each deploy replaces the whole list of public methods.</li>
+</ul>
+</section>
+<section id="a-small-context-ordinary-typescript" data-toc="The context">
+<h2>What <code>ctx</code> can do</h2>
+<p>Queries can read; mutations can also write.</p>
+<div class="table-wrap"><table><caption class="sr-only">Database context operations</caption><thead><tr><th>Read operations</th><th>Mutation-only operations</th></tr></thead><tbody><tr><td><code>ctx.get(collection, key)</code></td><td><code>ctx.set(collection, key, value)</code></td></tr><tr><td><code>ctx.get(derived, args)</code></td><td><code>ctx.delete(collection, key)</code></td></tr><tr><td><code>ctx.scan(collection)</code></td><td><code>ctx.materialize(derived, args)</code></td></tr><tr><td><code>ctx.query(collection.by(index).eq(value))</code></td><td><code>ctx.unmaterialize(derived, args)</code></td></tr><tr><td><code>ctx.range(collection.by(index).range({prefix, lte, limit}))</code></td><td>Bounded pages over an index.</td></tr><tr><td><code>ctx.now()</code></td><td>Throw to abort the whole mutation.</td></tr></tbody></table></div>
+<ul>
+<li><code>get</code> returns <code>null</code> for a missing record.</li>
+<li><code>scan</code> returns <code>{key, value}</code> rows in key order.</li>
+<li>Types aren't checked at runtime. Validate arguments yourself.</li>
+</ul>
+</section>
+<section id="reuse-initialized-application-snapshots" data-toc="Static initialization">
+<h2>Start callbacks faster</h2>
+<p>If module setup doesn't depend on the call, add <code>--initialization static</code> to build or deploy. Flower initializes the module once and reuses it.</p>
+<ul>
+<li>Globals and closures still reset on every call.</li>
+<li>Memory and execution limits still apply.</li>
+</ul>
+</section>
+<!-- content:end -->
+</div>
+<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../guide/"><small>Previous · Guide</small>Get started</a><a rel="next" href="../guide/reactivity.html"><small>Next · Guide</small>Reactive values</a></nav>
+</main>
+</div>
+<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/flower-js-org/runtime">Source ↗</a></div></div></div>
+<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
+</body>
+</html>

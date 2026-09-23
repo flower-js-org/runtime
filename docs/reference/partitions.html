@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f8f5ec">
+<meta name="description" content="Reference for logical partitions, resizing and cross-group transactions.">
+<meta property="og:title" content="Partitions &amp; transactions · Flower">
+<meta property="og:description" content="Reference for logical partitions, resizing and cross-group transactions.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://flower.js.org/reference/partitions.html">
+<link rel="canonical" href="https://flower.js.org/reference/partitions.html">
+<title>Partitions &amp; transactions · Flower</title>
+<link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
+<link rel="stylesheet" href="../site.css?v=eb05c8aa5c04">
+<script src="../site.js?v=3184f0662fa5" defer></script>
+</head>
+<body class="doc-page">
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/" aria-current="page">Reference</a><a class="site-repository" href="https://github.com/flower-js-org/runtime">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
+<div class="documentation">
+<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/methods.html"><span>04</span>Methods & retries</a></li><li><a href="../guide/reads.html"><span>05</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>06</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>07</span>Leases & expiry</a></li><li><a href="../guide/workers.html"><span>08</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>09</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>10</span>Crypto & tokens</a></li><li><a href="../guide/deployments.html"><span>11</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/definitions.html"><span>03</span>Contexts & definitions</a></li><li><a href="../reference/client.html"><span>04</span>Client & transports</a></li><li><a href="../reference/time.html"><span>05</span>Expiry, leases & timers</a></li><li><a href="../reference/crypto.html"><span>06</span>NaCl & JWT</a></li><li><a href="../reference/keys.html"><span>07</span>Managed keys</a></li><li class="current"><a href="#top" aria-current="page"><span>08</span>Partitions & transactions</a><ol id="section-nav" aria-label="On this page"><li><a href="#partitions">Partitions &amp; resizing</a></li><li><a href="#partition-operations">Running partitions</a></li><li><a href="#transactions">Cross-group transactions</a></li></ol></li><li><a href="../reference/deployments.html"><span>09</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>10</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>11</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>12</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Clear contracts.<br>Honest limits.<br>Room to grow.</p></div></aside>
+<main id="main" tabindex="-1">
+<header class="page-intro" id="top"><p class="eyebrow">Reference · 08</p><h1>Partitions and transactions.</h1><p class="lead">Move tenants between Raft groups, and commit changes across groups at once.</p></header>
+<div class="page-content">
+<!-- content:start -->
+<section id="partitions" data-toc="Partitions &amp; resizing">
+<h2>Partitions and resizing</h2>
+<p>A named partition is a separate database (its own bundle, data, timers and retry receipts) that you can move between Raft groups. Several partitions share one group.</p>
+<ul>
+<li>Choose partitions when you create a database. Data in the default database can't be turned into a partition later.</li>
+<li>Named partitions don't support cross-partition reads or transactions yet.</li>
+</ul>
+<div class="code-block"><div class="code-head"><span>Operator · existing, initialized groups</span><button class="copy-button" type="button" aria-label="Copy partition example">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { FlowerClient } <span class="kw">from</span> <span class="str">"@flower-js/sdk/client"</span>;
+
+<span class="kw">const</span> cluster = <span class="kw">new</span> FlowerClient(<span class="str">"http://catalog-1:7101"</span>, {
+  adminToken: process.env.FLOWER_ADMIN_TOKEN,
+});
+<span class="kw">await</span> cluster.registerGroup({ id: <span class="str">"west"</span>, addresses: [<span class="str">"west-1:7101"</span>, <span class="str">"west-2:7101"</span>, <span class="str">"west-3:7101"</span>] });
+<span class="kw">await</span> cluster.registerGroup({ id: <span class="str">"east"</span>, addresses: [<span class="str">"east-1:7101"</span>, <span class="str">"east-2:7101"</span>, <span class="str">"east-3:7101"</span>] });
+<span class="kw">await</span> cluster.createPartition(<span class="str">"tenant-a"</span>, <span class="str">"west"</span>, { requestId: <span class="str">"create-tenant-a"</span> });
+<span class="kw">await</span> cluster.waitForPartition(<span class="str">"tenant-a"</span>);
+<span class="kw">const</span> tenant = cluster.partition(<span class="str">"tenant-a"</span>);
+<span class="comment">// Deploy a bundle through tenant.deploy(bundle), then call its exposed methods.</span>
+<span class="kw">await</span> cluster.resize([<span class="str">"west"</span>, <span class="str">"east"</span>], { requestId: <span class="str">"grow-two-groups"</span> });
+console.log(<span class="kw">await</span> cluster.layout()); <span class="comment">// Durable progress; resize continues after this client exits.</span></code></pre></div>
+<div class="table-wrap"><table><thead><tr><th>API</th><th>Contract</th></tr></thead><tbody>
+<tr><th><code data-api-method="FlowerClient.partition">partition(name): FlowerClient</code></th><td>A client for <code>/partitions/{name}</code>, keeping the same transport and tokens. Works wherever the partition lives. Isolation only; it doesn't authenticate tenants.</td></tr>
+<tr><th><code data-api-method="FlowerClient.layout">layout(options?): Promise&lt;ClusterLayout&gt;</code></th><td>Current groups, placements, moves and rebalance plan.</td></tr>
+<tr><th><code data-api-method="FlowerClient.registerGroup">registerGroup(group, options?): Promise&lt;ClusterGroup&gt;</code></th><td>Register a group that is already running. Safe to repeat. Doesn't start servers.</td></tr>
+<tr><th><code data-api-method="FlowerClient.removeGroup">removeGroup(id, options?): Promise&lt;{removed: string}&gt;</code></th><td>Unregister an empty, unused group (never the catalog). Doesn't stop servers or delete files.</td></tr>
+<tr><th><code data-api-method="FlowerClient.createPartition">createPartition(name, group, options?): Promise&lt;PartitionPlacement&gt;</code></th><td>Create an empty partition. Wait until active, then deploy to it.</td></tr>
+<tr><th><code data-api-method="FlowerClient.movePartition">movePartition(name, destination, options?): Promise&lt;PartitionMove&gt;</code></th><td>Start moving to another group. Returns before the move finishes; the move continues if the client goes away.</td></tr>
+<tr><th><code data-api-method="FlowerClient.resize">resize(groupIds, options?): Promise&lt;RebalancePlan&gt;</code></th><td>Spread partitions evenly by count across these groups, one move at a time; groups left out are drained. Doesn't balance by size or load. Register new groups first; remove drained ones after. Rejected while another plan or move is running.</td></tr>
+<tr><th><code data-api-method="FlowerClient.partitionStatus">partitionStatus(name, options?): Promise&lt;PartitionPlacement&gt;</code></th><td>Current phase, owner and epoch.</td></tr>
+<tr><th><code data-api-method="FlowerClient.waitForPartition">waitForPartition(name, options?): Promise&lt;PartitionPlacement&gt;</code></th><td>Poll until active. Defaults: <code>timeoutMs</code> 30,000, <code>intervalMs</code> 100. Throws <code>PARTITION_WAIT_TIMEOUT</code> on timeout; abort only stops waiting.</td></tr>
+<tr><th><code data-api-symbol="ControlOptions">ControlOptions</code></th><td>Optional <code>signal</code> and <code>requestId</code>. A UUID is generated if omitted; set your own so you can retry safely.</td></tr>
+<tr><th><code data-api-symbol="PartitionWaitOptions">PartitionWaitOptions</code></th><td>Optional <code>signal</code>, <code>timeoutMs</code> and <code>intervalMs</code>.</td></tr>
+<tr><th><code data-api-symbol="ClusterGroup">ClusterGroup</code></th><td><code>{id: string, addresses: string[]}</code>, with distinct <code>host:port</code> entries. Addresses are seeds and can't be changed while the group is registered; keep at least one reachable.</td></tr>
+<tr><th><code data-api-symbol="PartitionPlacement">PartitionPlacement</code></th><td><code>{partition, epoch, owner: ClusterGroup, status: "creating" | "active" | "moving", operation, movement: PartitionMove | null}</code>.</td></tr>
+<tr><th><code data-api-symbol="PartitionMove">PartitionMove</code></th><td><code>{operation, partition, source: ClusterGroup, destination: ClusterGroup, source_epoch, epoch, phase}</code>. The epoch changes on each move; revision and receipts carry over.</td></tr>
+<tr><th><code data-api-symbol="PartitionMovePhase">PartitionMovePhase</code></th><td><code>"copying" | "freezing" | "importing" | "activating" | "retiring" | "complete"</code>. Moves always finish; there is no cancel.</td></tr>
+<tr><th><code data-api-symbol="RebalanceMove">RebalanceMove</code></th><td><code>{partition, source, destination, operation}</code>, with group IDs.</td></tr>
+<tr><th><code data-api-symbol="RebalancePlan">RebalancePlan</code></th><td><code>{operation, groups: ClusterGroup[], moves: RebalanceMove[], next: number, complete: boolean}</code>. <code>next</code> is the index of the next move.</td></tr>
+<tr><th><code data-api-symbol="ClusterLayout">ClusterLayout</code></th><td><code>{groups: ClusterGroup[], partitions: PartitionPlacement[], moves: PartitionMove[], rebalance: RebalancePlan | null}</code>. Move history is kept indefinitely.</td></tr>
+</tbody></table></div>
+</section>
+<section id="partition-operations" data-toc="Running partitions">
+<h2>Running partitions</h2>
+<p>Configure every server with:</p>
+<ul>
+<li><code>FLOWER_GROUP</code>: this server's group.</li>
+<li><code>FLOWER_CATALOG_GROUP</code>: the group that stores placements.</li>
+<li><code>FLOWER_GROUPS</code>: JSON map of group IDs to <code>host:port</code> lists, including this group and the catalog.</li>
+<li>The same peer secret everywhere, and a separate operator token.</li>
+</ul>
+<p>Initialize each group on its own. Put applications in named partitions, not the catalog's default database.</p>
+<h3>During a move</h3>
+<ul>
+<li>The source keeps serving while it copies, then briefly freezes to send the final changes. Writes either land before the freeze or fail; none are lost.</li>
+<li>The freeze can take longer for large partitions or slow networks. It is not guaranteed to be milliseconds.</li>
+<li>If a group loses quorum after the freeze, the move pauses until it recovers.</li>
+<li>Pending cross-group transactions delay the freeze.</li>
+<li>Live watches end with an error when the owner changes. Reconnect through the partition client; there's no automatic replay.</li>
+<li>Other partitions on the same group keep working but share CPU, disk and the Raft log.</li>
+</ul>
+<div class="table-wrap"><table><thead><tr><th>Setting</th><th>Effect</th></tr></thead><tbody>
+<tr><th><code>FLOWER_ROUTE_CACHE_MS</code></th><td>How long a server trusts a cached owner. Default 1,000 ms. If the catalog is down when an entry expires, requests to that partition fail.</td></tr>
+<tr><th><code>FLOWER_PARTITION_TAIL_MAX_BYTES</code></th><td>If the final change set is bigger than this, send a full copy instead. Unset by default.</td></tr>
+<tr><th><code>FLOWER_PARTITION_BASE_MAX_BYTES</code></th><td>Maximum size of the initial copy. Unset by default.</td></tr>
+</tbody></table></div>
+<div class="note"><span class="note-mark" aria-hidden="true">↳</span><p>Partition URLs are not a security boundary. For public traffic, put a trusted gateway in front that limits each caller to its partitions. Retry uncertain mutations with the same request ID and body.</p></div>
+</section>
+<section id="transactions" data-toc="Cross-group transactions">
+<h2>Cross-group transactions</h2>
+<p>A transaction method calls methods on several groups or partitions and commits them all or none.</p>
+<div class="table-wrap"><table><thead><tr><th>API</th><th>Contract</th></tr></thead><tbody><tr><th scope="row"><code data-api-symbol="transaction">transaction&lt;Args, Value = Json&gt;(name, plan): TransactionMethod&lt;Args, Value&gt;</code></th><td><code>plan(args)</code> returns a <code>TransactionPlan</code>. It can't read data. Expose it as an HTTP alias and call it with <code>client.call</code>.</td></tr><tr><th scope="row"><code data-api-symbol="TransactionCall">TransactionCall</code></th><td>One of <code>group:string</code> or <code>partition:string</code>, plus <code>method:string</code> and optional <code>args:Json</code>. The method must be a query or mutation, not another transaction.</td></tr><tr><th scope="row"><code data-api-symbol="TransactionPlan">TransactionPlan&lt;Value = Json&gt;</code></th><td><code>calls: readonly TransactionCall[]</code> and optional <code>value: Value</code>. The call list is fixed up front; results can't choose later calls.</td></tr><tr><th scope="row"><code data-api-symbol="TransactionMethod">TransactionMethod&lt;Args = Json, Value = Json&gt;</code></th><td><code>{kind: "transactionMethod", name, compute}</code>. Create it with <code>transaction</code>; don't call <code>compute</code> yourself.</td></tr></tbody></table></div>
+<ul>
+<li>Check business rules inside the participant methods. Later calls to the same target see earlier ones. The result is <code>{results, value?}</code> in plan order.</li>
+<li>While a transaction is prepared, each participating database blocks fresh reads, watches, writes and deploys, even for unrelated keys. Other partitions on the same group are unaffected.</li>
+<li>Replica-local reads may not see the transaction atomically.</li>
+<li><strong>If the coordinator is unreachable, participants stay blocked until it recovers.</strong> Nothing times out on its own.</li>
+<li><code>TRANSACTION_PREPARED</code>: wait for recovery and retry with the same ID and content. <code>TRANSACTION_ABORTED</code> is final for that ID; fix the problem and use a new ID.</li>
+<li>Completed transaction records are cleaned up only by operator action; see <a href="access.html#retention">retry retention and transaction closure</a>.</li>
+<li>Every participant needs <code>FLOWER_GROUP</code>, <code>FLOWER_GROUPS</code> and the shared peer secret.</li>
+</ul>
+<p>Full protocol: <a href="https://github.com/flower-js-org/runtime/blob/main/TRANSACTIONS.md">transactions and recovery</a>.</p>
+</section>
+<!-- content:end -->
+</div>
+<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../reference/keys.html"><small>Previous · Reference</small>Managed keys</a><a rel="next" href="../reference/deployments.html"><small>Next · Reference</small>Staged deployment</a></nav>
+</main>
+</div>
+<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/flower-js-org/runtime">Source ↗</a></div></div></div>
+<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
+</body>
+</html>
