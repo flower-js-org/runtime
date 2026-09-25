@@ -92,6 +92,21 @@ fn fixture() -> Fixture {
                     .unwrap_or_else(|error| json!(error.code)))
             }) as Callback,
         ),
+        (
+            "grow",
+            (|args, host| {
+                let start = args["start"].as_u64().unwrap();
+                for tenant in start..start + args["count"].as_u64().unwrap() {
+                    let tenant = tenant.to_string();
+                    set(host, "input", &tenant, json!(tenant))?;
+                    host(
+                        "materialize",
+                        json!([{"kind":"derived","name":"top"}, tenant]),
+                    )?;
+                }
+                Ok(Value::Null)
+            }) as Callback,
+        ),
         ("noop", (|_, _| Ok(Value::Null)) as Callback),
     ])
 }
@@ -211,8 +226,8 @@ fn terminal_preview_errors_match_rollback_path_at_memory_boundaries() {
     let mut failures = 0;
     for budget in [
         1,
-        base.reactive().bytes / 2,
-        base.reactive().bytes,
+        base.reactive().bytes() / 2,
+        base.reactive().bytes(),
         32_768,
         131_072,
     ] {
@@ -256,15 +271,23 @@ fn terminal_preview_errors_match_rollback_path_at_memory_boundaries() {
     assert!(successes > 0 && failures > 0);
 }
 
+fn recover(data: &Records) -> Records {
+    let recovered: Records = serde_json::from_str(&serde_json::to_string(data).unwrap()).unwrap();
+    assert_eq!(data, &recovered);
+    assert!(!recovered.reactive().validated());
+    recovered
+}
+
+fn grow(start: usize, count: usize) -> Value {
+    json!({"name":"grow","args":{"start":start,"count":count}})
+}
+
 #[test]
-fn restart_revalidates_then_reuses_topology_and_accounts_its_budget() {
+fn restart_revalidates_then_reuses_topology_without_charging_it() {
     let fixture = fixture();
     let mut original = tenants(&fixture, 16);
     write(&mut original, &fixture, "0", 1000);
-    let mut recovered: Records =
-        serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
-    assert_eq!(original, recovered);
-    assert!(!recovered.reactive().validated());
+    let mut recovered = recover(&original);
     graph::take_graph_passes();
     graph::take_graph_visits();
     write(&mut recovered, &fixture, "0", 1001);
@@ -273,17 +296,122 @@ fn restart_revalidates_then_reuses_topology_and_accounts_its_budget() {
     write(&mut recovered, &fixture, "0", 1002);
     assert_eq!(graph::take_graph_passes(), (1, 0));
     assert_eq!(graph::take_graph_visits(), (0, 0));
-    let error = run_with_limit(
+    // Revalidation derives the snapshot's own proof. The invocation which
+    // happens to need it pays only for what it changes.
+    let recovered = recover(&original);
+    run_with_limit(
         recovered.clone(),
         json!({"name":"noop"}),
         "mutation",
         Some(1000),
         &fixture,
-        recovered.reactive().bytes - 1,
+        recovered.reactive().bytes() / 4,
+    )
+    .unwrap();
+    assert!(recovered.reactive().validated());
+}
+
+#[test]
+fn transaction_budget_covers_the_graph_it_adds_not_the_graph_it_inherits() {
+    let fixture = fixture();
+    // The smallest budget that admits adding `count` materialized tenants.
+    let needed = |data: &Records, count: usize| {
+        let run = |budget| {
+            run_with_limit(
+                data.clone(),
+                grow(10_000, count),
+                "mutation",
+                None,
+                &fixture,
+                budget,
+            )
+        };
+        let (mut low, mut high) = (0, 1 << 26);
+        run(high).unwrap();
+        while low + 1 < high {
+            let budget = low + (high - low) / 2;
+            match run(budget) {
+                Ok(_) => high = budget,
+                Err(error) => {
+                    assert_eq!(error.code, "EVALUATION_BUDGET");
+                    low = budget;
+                }
+            }
+        }
+        high
+    };
+    let mut small = tenants(&fixture, 2);
+    let mut large = tenants(&fixture, 512);
+    write(&mut small, &fixture, "0", 1000);
+    write(&mut large, &fixture, "0", 1000);
+    let one = needed(&small, 1);
+    let many = needed(&small, 16);
+    assert!(large.reactive().bytes() > 8 * many);
+    assert_eq!(needed(&large, 1), one);
+    assert_eq!(needed(&large, 16), many);
+    // Every added tenant is charged at least its graph entries, so large
+    // transactions stay bounded.
+    assert!(many - one >= 15 * large.reactive().bytes() / 512);
+    let error = run_with_limit(
+        large.clone(),
+        grow(10_000, 16),
+        "mutation",
+        None,
+        &fixture,
+        many - 1,
     )
     .unwrap_err();
     assert_eq!(error.code, "EVALUATION_BUDGET");
-    assert!(error.message.contains("Graph index"));
+}
+
+#[test]
+fn inserts_continue_after_the_graph_outgrows_the_transaction_budget() {
+    let fixture = fixture();
+    let budget = 128 * 1024;
+    let mut data = tenants(&fixture, 1);
+    let mut next = 1;
+    while data.reactive().bytes() <= 8 * budget {
+        let result = run_with_limit(
+            data.clone(),
+            grow(next, 16),
+            "mutation",
+            None,
+            &fixture,
+            budget,
+        )
+        .unwrap();
+        apply(&mut data, result);
+        next += 16;
+    }
+    assert_eq!(data.reactive().roots.len(), next);
+    // Removing a root and restarting both revalidate the whole graph, which
+    // the same budget admits too.
+    graph::take_graph_passes();
+    let result = run_with_limit(
+        data.clone(),
+        json!({"name":"mixed","args":{"tenant":"0","op":5,"value":0}}),
+        "mutation",
+        None,
+        &fixture,
+        budget,
+    )
+    .unwrap();
+    assert_eq!(graph::take_graph_passes().1, 1);
+    apply(&mut data, result);
+    assert_eq!(data.reactive().roots.len(), next - 1);
+    let mut recovered = recover(&data);
+    let result = run_with_limit(
+        recovered.clone(),
+        grow(next, 16),
+        "mutation",
+        None,
+        &fixture,
+        budget,
+    )
+    .unwrap();
+    assert!(recovered.reactive().validated());
+    apply(&mut recovered, result);
+    assert_eq!(recovered.reactive().roots.len(), next + 15);
 }
 
 const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -652,7 +780,6 @@ fn root_removal_collects_only_unreachable_shared_descendants() {
     assert!(data.reactive().cells.is_empty());
     assert!(data.reactive().roots.is_empty());
     assert!(data.reactive().reverse.is_empty());
-    assert_eq!(data.reactive().bytes, 0);
 }
 
 #[test]

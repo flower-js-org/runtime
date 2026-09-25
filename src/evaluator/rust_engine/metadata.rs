@@ -85,8 +85,6 @@ pub(crate) struct ReactiveIndex {
     pub(super) root_cells: im::OrdMap<Key, Arc<Root>>,
     invalid_cells: im::OrdMap<String, EngineError>,
     invalid_roots: im::OrdMap<String, EngineError>,
-    pub(super) root_bytes: usize,
-    pub(super) bytes: usize,
     clock_readers: usize,
     // Complete traversals and certified append-only extensions establish this
     // proof. Other topology edits detach it from prior snapshots.
@@ -111,8 +109,6 @@ impl Default for ReactiveIndex {
             root_cells: im::OrdMap::new(),
             invalid_cells: im::OrdMap::new(),
             invalid_roots: im::OrdMap::new(),
-            root_bytes: 0,
-            bytes: 0,
             clock_readers: 0,
             topology: Arc::new(Topology::empty()),
             shape: Arc::new(()),
@@ -288,6 +284,39 @@ impl ReactiveIndex {
         }
     }
 
+    /// Accounted bytes of this graph's entry for cell or root `id` that `base`
+    /// does not share, i.e. what a transaction adds or replaces. Entries kept
+    /// unchanged from the snapshot, and removed entries, cost nothing.
+    pub(super) fn unshared_bytes(&self, base: &Self, id: &str) -> usize {
+        if id.starts_with("cell:") {
+            match (self.cells.get(id), base.cells.get(id)) {
+                (Some(cell), Some(old)) if Arc::ptr_eq(cell, old) => 0,
+                (Some(cell), _) => cell.bytes,
+                (None, _) => 0,
+            }
+        } else if id.starts_with("root:") {
+            match (self.roots.get(id), base.roots.get(id)) {
+                (Some(root), Some(old)) if Arc::ptr_eq(root, old) => 0,
+                // Root lookup/traversal storage plus a pending append-frontier entry.
+                (Some(_), _) => 320 + id.len().saturating_mul(4),
+                (None, _) => 0,
+            }
+        } else {
+            0
+        }
+    }
+
+    /// The whole graph's accounted size: what building it from nothing costs.
+    #[cfg(test)]
+    pub(super) fn bytes(&self) -> usize {
+        let empty = Self::default();
+        self.cells
+            .keys()
+            .chain(self.roots.keys())
+            .map(|id| self.unshared_bytes(&empty, id))
+            .sum()
+    }
+
     pub(super) fn cacheable(&self) -> bool {
         self.clock_readers == 0
     }
@@ -441,7 +470,6 @@ impl ReactiveIndex {
             }
         }
         if let Some(old) = old {
-            self.bytes = self.bytes.saturating_sub(old.bytes);
             self.clock_readers -= usize::from(old.clock);
             self.change_scans(&old.scans, id, false);
             self.change_buckets(&old.buckets, false);
@@ -459,7 +487,6 @@ impl ReactiveIndex {
         }
         self.invalid_cells.remove(id);
         if let Some(new) = new {
-            self.bytes = self.bytes.saturating_add(new.bytes);
             self.clock_readers += usize::from(new.clock);
             self.change_scans(&new.scans, id, true);
             self.change_buckets(&new.buckets, true);
@@ -502,19 +529,11 @@ impl ReactiveIndex {
             self.invalidate_topology();
         }
         self.shape = Arc::new(());
-        let root_bytes = 128 + id.len();
-        // Root lookup/traversal storage plus a pending append-frontier entry.
-        let bytes = root_bytes + 192 + id.len().saturating_mul(3);
-        if self.roots.remove(id).is_some() {
-            self.root_bytes = self.root_bytes.saturating_sub(root_bytes);
-            self.bytes = self.bytes.saturating_sub(bytes);
-        }
+        self.roots.remove(id);
         self.root_cells.remove(&Key(format!("cell:{}", &id[5..])));
         self.invalid_roots.remove(id);
         if let Some(value) = next {
             self.roots.insert(id.into(), value.clone());
-            self.root_bytes = self.root_bytes.saturating_add(root_bytes);
-            self.bytes = self.bytes.saturating_add(bytes);
             let depth = if record_depth_valid {
                 Ok(())
             } else {

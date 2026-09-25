@@ -25,7 +25,7 @@
 <tr><td><code>FLOWER_BUNDLE_MAX_BYTES</code></td><td>2 MiB</td><td>Size of deployed application code.</td></tr>
 <tr><td><code>FLOWER_RESULT_MAX_BYTES</code></td><td>16 MiB</td><td>Size of a value returned by an evaluation.</td></tr>
 <tr><td><code>FLOWER_GUEST_MEMORY_BYTES</code></td><td>128 MiB</td><td>JavaScript memory for one evaluation.</td></tr>
-<tr><td><code>FLOWER_RUST_MEMORY_BYTES</code></td><td>128 MiB</td><td>Host memory for one evaluation's pending changes.</td></tr>
+<tr><td><code>FLOWER_RUST_MEMORY_BYTES</code></td><td>128 MiB</td><td>Host memory for one evaluation's pending changes, including derived values it adds. Stored data and the existing graph aren't counted.</td></tr>
 <tr><td><code>FLOWER_INDEX_MEMORY_BYTES</code></td><td>16 MiB</td><td>Cache for lookups on undeclared indexes. Declared indexes are stored and don't use it.</td></tr>
 <tr><td><code>FLOWER_WASM_POOL_SLOTS</code></td><td>256</td><td>Sandbox instances per process. Nested callbacks each need one.</td></tr>
 <tr><td><code>FLOWER_WASM_RECYCLE_BYTES</code></td><td>96 MiB</td><td>Memory kept for reusing idle sandboxes. <code>0</code> keeps none.</td></tr>

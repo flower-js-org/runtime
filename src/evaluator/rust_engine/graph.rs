@@ -127,7 +127,6 @@ impl Engine<'_> {
             ));
         }
         self.graph_ready = true;
-        self.refresh_graph_budget()?;
         // Physical application rebuilds metadata independently of evaluation.
         // Validate its pending append frontier against the previous certified
         // snapshot before this invocation edits the graph. The shared cache
@@ -156,13 +155,15 @@ impl Engine<'_> {
             .map_or_else(metadata::Depths::new, |extension| {
                 (*extension.baseline).clone()
             });
-        let roots = extension.as_ref().map_or_else(
-            || self.staged.reactive().roots.keys().cloned().collect(),
-            |extension| extension.roots.clone(),
-        );
+        // Iterate a persistent clone of the root set rather than copying its IDs.
+        let all_roots = self.staged.reactive().roots.clone();
+        let roots: Box<dyn Iterator<Item = &String>> = match &extension {
+            Some(extension) => Box::new(extension.roots.iter()),
+            None => Box::new(all_roots.keys()),
+        };
         let appended = extension.as_ref().map(|extension| &extension.cells);
         let mut visiting = HashSet::new();
-        for root in &roots {
+        for root in roots {
             let id = format!("cell:{}", &root[5..]);
             if self
                 .certified_depth(&id, 0, appended, &mut depths, &mut visiting)?
@@ -223,19 +224,6 @@ impl Engine<'_> {
         Ok(Some(height as u8))
     }
 
-    pub(super) fn refresh_graph_budget(&mut self) -> EngineResult<()> {
-        if self.graph_ready {
-            self.graph_index_bytes = self.staged.reactive().bytes;
-            if self.total_retained_bytes() > self.retained_limit {
-                return self.abort(
-                    "EVALUATION_BUDGET",
-                    "Graph index exceeds FLOWER_RUST_MEMORY_BYTES",
-                );
-            }
-        }
-        Ok(())
-    }
-
     pub(super) fn run_preview(
         &mut self,
         final_preview: bool,
@@ -259,6 +247,8 @@ impl Engine<'_> {
         let preview_dirty = self.preview_dirty;
         let retained_costs = self.retained_costs.clone();
         let retained_bytes = self.retained_bytes;
+        let graph_costs = self.graph_costs.clone();
+        let graph_index_bytes = self.graph_index_bytes;
         let result = self.run_preview_inner(final_preview, bundle_changed);
         if result.is_err() {
             self.staged = staged;
@@ -268,8 +258,9 @@ impl Engine<'_> {
             self.preview_dirty = preview_dirty;
             self.retained_costs = retained_costs;
             self.retained_bytes = retained_bytes;
+            self.graph_costs = graph_costs;
+            self.graph_index_bytes = graph_index_bytes;
             self.graph_ready = false;
-            self.graph_index_bytes = self.staged.reactive().root_bytes;
             self.rows = None;
             self.source_index_bytes = 0;
             self.query_indexes.clear();
@@ -514,7 +505,6 @@ impl Engine<'_> {
         } else {
             graph_pass(true);
         }
-        self.refresh_graph_budget()?;
         self.check_fatal()?;
         let (put_ids, bytes) = preview_changes(
             &before,
@@ -861,8 +851,9 @@ impl Engine<'_> {
             return self.abort("EVALUATION_BUDGET", "Reactive graph depth exceeds 128");
         }
         graph_visit(false);
-        // Graph indexing already reserves space for the cell identities and
-        // traversal sets; graph size has no independent count ceiling.
+        // Each cell's accounted bytes, charged to the transaction that added
+        // it, reserve its traversal and proof entries; graph size has no
+        // independent count ceiling.
         let mut cell = self.staged.get_shared(id).cloned().ok_or_else(|| {
             EngineError::new("INPUT_INVALID", format!("Missing derived dependency {id}"))
         })?;

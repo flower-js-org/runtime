@@ -141,6 +141,8 @@ struct Engine<'a> {
     graph_ready: bool,
     rows: Option<Rows>,
     source_index_bytes: usize,
+    /// Graph entries this transaction added or replaced, by cell or root ID.
+    graph_costs: HashMap<String, usize>,
     graph_index_bytes: usize,
     query_indexes: Vec<QueryIndex>,
     durable_roots: im::OrdMap<String, Arc<Value>>,
@@ -271,19 +273,13 @@ fn run_with_limit_and_schema(
     let speculative = mode == "mutation"
         && invocation["$speculate"] == true
         && !super::staging::maintaining_graph(&data);
+    // The snapshot's roots and graph are shared, not copied, so they cost this
+    // invocation nothing: it pays for the graph entries it adds or replaces.
     let durable_roots = data.reactive().roots.clone();
-    let root_bytes = data.reactive().root_bytes;
-    if root_bytes > retained_limit {
-        return Err(EngineError::new(
-            "EVALUATION_BUDGET",
-            "Root index exceeds FLOWER_RUST_MEMORY_BYTES",
-        ));
-    }
     let deployment_schema_bytes = deployment_schema
         .as_ref()
         .map_or(0, Schema::allocation_cost);
-    let occupied_bytes = root_bytes.saturating_add(deployment_schema_bytes);
-    if occupied_bytes > retained_limit {
+    if deployment_schema_bytes > retained_limit {
         return Err(EngineError::new(
             "EVALUATION_BUDGET",
             "Index schema exceeds the Rust memory budget",
@@ -291,15 +287,17 @@ fn run_with_limit_and_schema(
     }
     // Immutable metadata keeps its validated typed form across invocations on
     // this worker. Its conservative memory charge still applies to every call.
-    let (schema, stored_schema_bytes) =
-        Schema::load_shared(data.get_shared("schema"), retained_limit - occupied_bytes)?;
+    let (schema, stored_schema_bytes) = Schema::load_shared(
+        data.get_shared("schema"),
+        retained_limit - deployment_schema_bytes,
+    )?;
     let (shadow_schema, shadow_bytes) = if mode == "mutation" {
         match data.get_shared(super::staging::INDEXES) {
             Some(record) => {
                 let (schema, bytes) = Schema::load_shared(
                     Some(record),
                     retained_limit
-                        .saturating_sub(occupied_bytes)
+                        .saturating_sub(deployment_schema_bytes)
                         .saturating_sub(stored_schema_bytes),
                 )?;
                 (Some(schema), bytes)
@@ -324,7 +322,8 @@ fn run_with_limit_and_schema(
         graph_ready: false,
         rows: None,
         source_index_bytes: 0,
-        graph_index_bytes: root_bytes,
+        graph_costs: HashMap::new(),
+        graph_index_bytes: 0,
         query_indexes: Vec::new(),
         durable_roots,
         temporary_root: None,
@@ -526,8 +525,15 @@ impl Engine<'_> {
         self.retain(&id, Some(&value))?;
         self.changed.insert(id.clone());
         self.preview.changed.insert(id.clone());
-        self.staged.insert(id, value);
-        self.refresh_graph_budget()
+        self.staged.insert(id.clone(), value);
+        self.charge_graph(&id);
+        if self.total_retained_bytes() > self.retained_limit {
+            return self.abort(
+                "EVALUATION_BUDGET",
+                "Graph index changes exceed FLOWER_RUST_MEMORY_BYTES",
+            );
+        }
+        Ok(())
     }
 
     fn remove(&mut self, id: &str) {
@@ -538,9 +544,29 @@ impl Engine<'_> {
         self.changed.insert(id.into());
         self.preview.changed.insert(id.into());
         self.staged.remove_shared(id);
-        if self.graph_ready {
-            self.graph_index_bytes = self.staged.reactive().bytes;
+        self.charge_graph(id);
+    }
+
+    /// Charge the graph metadata this transaction allocates for a cell or
+    /// root: its entry if the snapshot does not share it, or nothing once it
+    /// is removed. The graph inherited from the snapshot is not charged.
+    fn charge_graph(&mut self, id: &str) {
+        if !id.starts_with("cell:") && !id.starts_with("root:") {
+            return;
         }
+        let bytes = self
+            .staged
+            .reactive()
+            .unshared_bytes(self.base.reactive(), id);
+        let previous = if bytes == 0 {
+            self.graph_costs.remove(id)
+        } else {
+            self.graph_costs.insert(id.into(), bytes)
+        };
+        self.graph_index_bytes = self
+            .graph_index_bytes
+            .saturating_sub(previous.unwrap_or(0))
+            .saturating_add(bytes);
     }
 
     fn source(&self, id: &str) -> Option<&Arc<Value>> {
