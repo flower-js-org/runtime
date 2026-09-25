@@ -34,11 +34,10 @@ node scripts/publish-bench-results.mjs --check</code></pre></div>
 </section>
 <section id="pizza-dashboard">
 <h2>Watch the live dashboard</h2>
-<p>The <a href="https://github.com/xmit-dev/flower/tree/main/examples/pizza-dashboard">dashboard</a> shows one tenant's stores, orders, oven timers, drone leases and rankings from a single watched <code>pizza.dashboard({tenant})</code> value.</p><div class="code-block"><div class="code-head"><span>Run the live kitchen board</span><button type="button" class="copy-button" aria-label="Copy Run the live kitchen board">Copy</button></div><pre tabindex="0"><code class="language-sh">cargo build --release --bin flower
-npm run demo:pizza
-# Optional: fixed port, paused arrivals, stop automatically after two minutes
-npm run demo:pizza -- --port 3030 --paused --duration 120</code></pre></div>
-<p>Open the printed URL. It starts a fresh three-node cluster with three tenants. Place orders, tip goblins, pause arrivals or crash the leader. Ctrl+C stops everything and deletes its data.</p>
+<p>The <a href="https://github.com/xmit-dev/flower/tree/main/examples/pizza-dashboard">dashboard</a> shows one tenant's stores, orders, oven timers, drone leases and rankings from a single watched <code>pizza.dashboard({tenant})</code> value.</p><div class="code-block"><div class="code-head"><span>Run the live kitchen board</span><button type="button" class="copy-button" aria-label="Copy Run the live kitchen board">Copy</button></div><pre tabindex="0"><code class="language-sh">bin/demo
+# Optional: another pace, fixed port, paused arrivals, stop after two minutes
+bin/demo --rate 80 --port 3030 --paused --duration 120</code></pre></div>
+<p>It builds the server, starts a fresh three-node cluster with three tenants and opens the dashboard. Customers order about 40 pizzas a second; change the pace from the page, place orders, tip goblins, pause arrivals or kill the leader and watch throughput, write latency and the replicas recover. Delivered orders are archived into kitchen tallies so the board's work stays the size of the orders in flight; per-call state such as retry receipts still grows, so arrivals stop at 150,000 orders. Ctrl+C stops everything and deletes its data.</p>
 <div class="note"><span class="note-mark" aria-hidden="true">↳</span><p><strong>The dashboard reads replica-local data.</strong> It can lag with no bound, and a reconnect may show an older revision. The benchmark's shop reads use <code>pizza.shop.local</code> the same way; pass <code>--read-consistency fresh</code> to measure fresh reads instead.</p></div>
 </section>
 <section id="compare-http-transports">

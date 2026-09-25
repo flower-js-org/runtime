@@ -6,7 +6,8 @@ import { queue } from "../sdk/temporal.ts";
 // Goblins run the kitchens; drones carry the pizzas. Everything here, including
 // oven timers, lease policy, stock accounting, and the leaderboard, is TypeScript.
 // Money is an integer number of copper coins. Successful records stay available
-// for the benchmark's independent audit; start a fresh database for each run.
+// for the benchmark's independent audit until pizza.archive folds delivered
+// orders into per-kitchen tallies; start a fresh database for each run.
 export const UNIT_PRICE = 7;
 export const MAX_LEASE_MS = 60_000;
 export type ShopRef = [tenant: string, store: string];
@@ -56,10 +57,12 @@ export interface OrderStats {
 }
 export interface ShopSummary extends PizzaShop, OrderStats {}
 export interface Delivery { orderId: string; shop: ShopRef; quantity: number }
+export interface ArchivedOrders { orders: number; pizzas: number }
 
 export const configuration = collection<PizzaConfig>("pizza.config");
 export const tenants = collection<PizzaConfig>("pizza.tenants");
 export const shops = collection<PizzaShop>("pizza.shops").key(shopRef);
+export const archived = collection<ArchivedOrders>("pizza.archived").key(shopRef);
 export const orders = collection<PizzaOrder>("pizza.orders")
   .key(v.tuple([identifier, identifier, identifier]))
   .index("byShop", ["shop"]);
@@ -212,6 +215,33 @@ export const tipKitchen = mutation("internal.pizza.tip", {
   return { shop: shop.id, tips };
 });
 
+// A long-running kitchen clears delivered orders off the board so its rows,
+// queue and dashboard stay the size of the work in flight. Their counts move
+// to one tally per kitchen in the same transaction; revenue stays on the shop.
+// Summaries and pizza.world then cover live orders only; the dashboard adds
+// the tallies back. The benchmark never archives, so it audits every order.
+export const archiveDeliveries = mutation("internal.pizza.archive", {
+  args: v.object({ tenant: identifier, olderThanMs: v.int({ min: 0, max: 86_400_000 }), limit: v.int({ min: 1, max: 1_000 }) }),
+}, (ctx, { tenant, olderThanMs, limit }) => {
+  tenantConfig(ctx, tenant);
+  const cutoff = ctx.now() - olderThanMs;
+  const queue = deliveries.scope(tenant);
+  let count = 0;
+  for (const job of queue.scan(ctx)) {
+    if (count >= limit) break;
+    if (job.state !== "completed" || job.updatedAt > cutoff) continue;
+    const key: [string, string, string] = [...job.payload.shop, job.payload.orderId];
+    const order = ctx.get(orders, key);
+    if (order?.status !== "delivered") continue;
+    const tally = ctx.get(archived, order.shop) ?? { orders: 0, pizzas: 0 };
+    ctx.set(archived, order.shop, { orders: tally.orders + 1, pizzas: tally.pizzas + order.quantity });
+    ctx.delete(orders, key);
+    queue.cancel(ctx, job.id);
+    count++;
+  }
+  return { archived: count };
+});
+
 const inspect = (ctx: Context, id: ShopRef) => ctx.get(shopSummary, id);
 export const inspectShop = query("internal.pizza.shop", { args: shopRef }, inspect);
 // Browsing can use a replica's coherent applied snapshot without contacting the
@@ -235,24 +265,35 @@ export const inspectWorld = query("internal.pizza.world", { args: v.null() }, (c
 
 // One public value drives the entire dashboard. Stable object keys let SSE
 // patches address one order/job instead of shifting a table's array indexes.
-// Keep the latest 120 orders on screen; summaries still cover the whole world.
-// This observational view tolerates replication lag, including older code and
-// aliases. Use pizza.world for a fresh audit; actions validate current state.
+// Keep the 120 orders with the latest activity on screen, so fresh orders,
+// pizzas out of the oven and deliveries all show at any pace, with every
+// delivery and oven timer still in flight. Summaries and totals, including
+// archived orders, still cover the whole world. This observational view
+// tolerates replication lag, including older code and aliases. Use pizza.world
+// for a fresh audit; actions validate current state.
+const activity = (order: PizzaOrder): number => order.deliveredAt ?? order.readyAt ?? order.createdAt;
+function withArchived(shop: ShopSummary, tally: ArchivedOrders | null): ShopSummary {
+  if (!tally) return shop;
+  return {
+    ...shop, orders: shop.orders + tally.orders, delivered: shop.delivered + tally.orders,
+    orderedQuantity: shop.orderedQuantity + tally.pizzas, deliveredQuantity: shop.deliveredQuantity + tally.pizzas,
+  };
+}
 export const inspectDashboard = query("internal.pizza.dashboard", {
   args: v.object({ tenant: identifier }), consistency: "replica-local",
 }, (ctx, { tenant }) => {
   const settings = tenantConfig(ctx, tenant);
-  const summaries = settings.shopIds.map((id) => ctx.get(shopSummary, id));
+  const tallies = settings.shopIds.map((id) => ctx.get(archived, id));
+  const summaries = settings.shopIds.map((id, index) => withArchived(ctx.get(shopSummary, id), tallies[index]));
   const recent = settings.shopIds.flatMap((id) => ctx.query(orders.by("byShop").eq(id)))
-    .sort((a, b) => b.createdAt - a.createdAt || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)).slice(0, 120);
-  const visible = new Set(recent.map(({ key }) => key));
+    .sort((a, b) => activity(b) - activity(a) || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)).slice(0, 120);
   return {
     tenant, tenantIds: config(ctx).tenantIds,
     config: settings,
     summaries: Object.fromEntries(summaries.map((shop) => [shop.key, shop])),
     orders: Object.fromEntries(recent.map((order) => [order.key, order])),
-    jobs: Object.fromEntries(deliveries.scope(tenant).scan(ctx).filter((job) => visible.has(job.id)).map((job) => [job.id, job])),
-    timers: Object.fromEntries(ovens.scan(ctx).filter((timer) => timer.id.startsWith("bake:") && visible.has(timer.id.slice(5)))
+    jobs: Object.fromEntries(deliveries.scope(tenant).scan(ctx).filter((job) => job.state !== "completed").map((job) => [job.id, job])),
+    timers: Object.fromEntries(ovens.scan(ctx).filter((timer) => timer.handler === "bake" && (timer.args as { shop: ShopRef }).shop[0] === tenant)
       .map((timer) => [timer.id, timer])),
     leaderboard: ctx.get(leaderboard, tenant).map((shop) => shop.key),
     totals: summaries.reduce((total, shop) => ({
@@ -261,6 +302,7 @@ export const inspectDashboard = query("internal.pizza.dashboard", {
       pizzas: total.pizzas + shop.deliveredQuantity, revenue: total.revenue + shop.revenue,
       tips: total.tips + shop.tips,
     }), { orders: 0, baking: 0, ready: 0, delivered: 0, pizzas: 0, revenue: 0, tips: 0 }),
+    archived: tallies.reduce((total, tally) => total + (tally?.orders ?? 0), 0),
   };
 });
 export type PizzaDashboard = ReturnType<typeof inspectDashboard.compute>;
@@ -275,6 +317,7 @@ const app = define({
     "pizza.claim": claimDelivery,
     "pizza.deliver": deliverPizza,
     "pizza.tip": tipKitchen,
+    "pizza.archive": archiveDeliveries,
     "pizza.shop": inspectShop,
     "pizza.shop.local": inspectShopLocal,
     "pizza.world": inspectWorld,

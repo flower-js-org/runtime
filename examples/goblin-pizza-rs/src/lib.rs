@@ -56,6 +56,7 @@ const HISTORY: Schema = v::object(&[
 static CONFIGURATION: Collection = Collection::new("pizza.config");
 static TENANTS: Collection = Collection::new("pizza.tenants");
 static SHOPS: Collection = Collection::new("pizza.shops").key(&SHOP_REF);
+static ARCHIVED: Collection = Collection::new("pizza.archived").key(&SHOP_REF);
 static ORDERS: Collection = Collection::new("pizza.orders")
     .key(&ORDER_REF)
     .indexes(&[IndexDef {
@@ -380,6 +381,50 @@ static TIP_KITCHEN: Method = Method::new("internal.pizza.tip", |ctx, input| {
 })
 .args(&TIP_ARGS);
 
+// A long-running kitchen clears delivered orders off the board so its rows,
+// queue and dashboard stay the size of the work in flight. Their counts move
+// to one tally per kitchen in the same transaction; revenue stays on the shop.
+// Summaries and pizza.world then cover live orders only; the dashboard adds
+// the tallies back. The benchmark never archives, so it audits every order.
+const ARCHIVE_ARGS: Schema = v::object(&[
+    v::field("tenant", IDENTIFIER),
+    v::field("olderThanMs", v::int().min(0.0).max(86_400_000.0)),
+    v::field("limit", v::int().min(1.0).max(1_000.0)),
+]);
+static ARCHIVE_DELIVERIES: Method = Method::new("internal.pizza.archive", |ctx, input| {
+    let tenant = input.text("tenant").unwrap_or_default();
+    tenant_config(ctx, tenant)?;
+    let cutoff = ctx.now()? - number(&input, "olderThanMs");
+    let limit = number(&input, "limit");
+    let queue = DELIVERIES.scope(tenant);
+    let mut count = 0.0;
+    for job in queue.scan(ctx)? {
+        if count >= limit {
+            break;
+        }
+        if job.text("state") != Some("completed") || number(&job, "updatedAt") > cutoff {
+            continue;
+        }
+        let payload = job.get("payload");
+        let key = order_id(payload.get("shop"), payload.get("orderId"));
+        let order = ctx.get(&ORDERS, &key)?;
+        if order.text("status") != Some("delivered") {
+            continue;
+        }
+        let tally = ctx.get(&ARCHIVED, order.get("shop"))?;
+        let archived = object! {
+            "orders" => tally.number("orders").unwrap_or(0.0) + 1.0,
+            "pizzas" => tally.number("pizzas").unwrap_or(0.0) + number(&order, "quantity"),
+        };
+        ctx.set(&ARCHIVED, order.get("shop"), archived)?;
+        ctx.delete(&ORDERS, &key)?;
+        queue.cancel(ctx, job.text("id").unwrap_or_default())?;
+        count += 1.0;
+    }
+    Ok(object! {"archived" => count})
+})
+.args(&ARCHIVE_ARGS);
+
 fn inspect(ctx: &mut Ctx, id: Value) -> Result<Value> {
     ctx.get_derived(&SHOP_SUMMARY, &id)
 }
@@ -419,31 +464,60 @@ static INSPECT_WORLD: Method = Method::new("internal.pizza.world", |ctx, _| {
 
 // One public value drives the entire dashboard. Stable object keys let SSE
 // patches address one order/job instead of shifting a table's array indexes.
-// Keep the latest 120 orders on screen; summaries still cover the whole world.
-// This observational view tolerates replication lag, including older code and
-// aliases. Use pizza.world for a fresh audit; actions validate current state.
+// Keep the 120 orders with the latest activity on screen, so fresh orders,
+// pizzas out of the oven and deliveries all show at any pace, with every
+// delivery and oven timer still in flight. Summaries and totals, including
+// archived orders, still cover the whole world. This observational view
+// tolerates replication lag, including older code and aliases. Use pizza.world
+// for a fresh audit; actions validate current state.
+fn activity(order: &Value) -> f64 {
+    order
+        .number("deliveredAt")
+        .or_else(|| order.number("readyAt"))
+        .unwrap_or_else(|| number(order, "createdAt"))
+}
+fn with_archived(mut shop: Value, tally: &Value) -> Value {
+    if tally.is_null() {
+        return shop;
+    }
+    let (orders, pizzas) = (number(tally, "orders"), number(tally, "pizzas"));
+    for (field, extra) in [
+        ("orders", orders),
+        ("delivered", orders),
+        ("orderedQuantity", pizzas),
+        ("deliveredQuantity", pizzas),
+    ] {
+        let total = number(&shop, field) + extra;
+        shop.set(field, total);
+    }
+    shop
+}
 const DASHBOARD_ARGS: Schema = v::object(&[v::field("tenant", IDENTIFIER)]);
 static INSPECT_DASHBOARD: Method = Method::new("internal.pizza.dashboard", |ctx, input| {
     let tenant = input.text("tenant").unwrap_or_default();
     let settings = tenant_config(ctx, tenant)?;
     let shop_ids: Vec<Value> = settings.get("shopIds").as_array().cloned().unwrap_or_default();
-    let mut summaries = Vec::new();
+    let mut tallies = Vec::new();
     for id in &shop_ids {
-        summaries.push(ctx.get_derived(&SHOP_SUMMARY, id)?);
+        tallies.push(ctx.get(&ARCHIVED, id)?);
     }
+    let mut summaries = Vec::new();
+    for (id, tally) in shop_ids.iter().zip(&tallies) {
+        summaries.push(with_archived(ctx.get_derived(&SHOP_SUMMARY, id)?, tally));
+    }
+    let archived: f64 = tallies.iter().map(|tally| tally.number("orders").unwrap_or(0.0)).sum();
     let mut recent = Vec::new();
     for id in &shop_ids {
         recent.extend(ctx.query(&ORDERS.by("byShop").eq(id.clone()))?);
     }
     recent.sort_by(|a, b| {
-        let difference = number(b, "createdAt") - number(a, "createdAt");
+        let difference = activity(b) - activity(a);
         if difference != 0.0 && !difference.is_nan() {
             return if difference < 0.0 { core::cmp::Ordering::Less } else { core::cmp::Ordering::Greater };
         }
         by_key(a, b)
     });
     recent.truncate(120);
-    let visible = |key: &str| recent.iter().any(|order| order.text("key") == Some(key));
     let tenant_ids = config(ctx)?.get("tenantIds").clone();
     let by_key_map = |items: &[Value], key: &str| -> Map {
         items.iter().map(|item| (item.text(key).unwrap_or_default(), item.clone())).collect()
@@ -452,12 +526,12 @@ static INSPECT_DASHBOARD: Method = Method::new("internal.pizza.dashboard", |ctx,
         .scope(tenant)
         .scan(ctx)?
         .into_iter()
-        .filter(|job| visible(job.text("id").unwrap_or_default()))
+        .filter(|job| job.text("state") != Some("completed"))
         .collect();
     let timers: Vec<Value> = OVENS
         .scan(ctx, None)?
         .into_iter()
-        .filter(|timer| timer.text("id").and_then(|id| id.strip_prefix("bake:")).is_some_and(visible))
+        .filter(|timer| timer.text("handler") == Some("bake") && timer.get("args").get("shop").at(0).as_str() == Some(tenant))
         .collect();
     let ranking = ctx.get_derived(&LEADERBOARD, &Value::from(tenant))?;
     let leaderboard: Vec<Value> = ranking.as_array().into_iter().flatten().map(|shop| shop.get("key").clone()).collect();
@@ -476,6 +550,7 @@ static INSPECT_DASHBOARD: Method = Method::new("internal.pizza.dashboard", |ctx,
             "orders" => orders, "baking" => baking, "ready" => ready, "delivered" => delivered,
             "pizzas" => pizzas, "revenue" => revenue, "tips" => tips,
         },
+        "archived" => archived,
     })
 })
 .args(&DASHBOARD_ARGS);
@@ -495,6 +570,7 @@ pub static APP: App = App {
         ("pizza.claim", Definition::Mutation(&CLAIM_DELIVERY)),
         ("pizza.deliver", Definition::Mutation(&DELIVER_PIZZA)),
         ("pizza.tip", Definition::Mutation(&TIP_KITCHEN)),
+        ("pizza.archive", Definition::Mutation(&ARCHIVE_DELIVERIES)),
         (
             "pizza.shop",
             Definition::Query(&INSPECT_SHOP, Consistency::Linearizable),

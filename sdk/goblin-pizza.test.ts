@@ -240,7 +240,7 @@ test("setup and lease policy are enforced, and only the business aliases are pub
   fails(() => db.query("pizza.world", {} as never), "INVALID_ARGUMENT");
   assert.deepEqual(db.data, before);
 
-  assert.deepEqual(Object.keys(app.http).sort(), ["pizza.claim", "pizza.dashboard", "pizza.deliver", "pizza.order", "pizza.setup", "pizza.shop", "pizza.shop.local", "pizza.tip", "pizza.world"]);
+  assert.deepEqual(Object.keys(app.http).sort(), ["pizza.archive", "pizza.claim", "pizza.dashboard", "pizza.deliver", "pizza.order", "pizza.setup", "pizza.shop", "pizza.shop.local", "pizza.tip", "pizza.world"]);
   assert.equal(app.maintenance?.name, "$flower.maintenance");
   for (const hidden of ["internal.pizza.finishBaking", "internal.pizza.order", "pizza.shopSummary", "pizza.orderStats", "$flower.maintenance"]) {
     assert.throws(() => (db as unknown as TestDatabase).call(hidden), { status: 404, code: "METHOD_NOT_FOUND" });
@@ -285,7 +285,8 @@ test("the dashboard joins lifecycle records under stable keys with tenant totals
     assert.deepEqual(await next(live), board);
     deliver(db, job);
     board = await next(live);
-    assert.deepEqual([board.orders[job.id].status, board.jobs[job.id].state], ["delivered", "completed"]);
+    // The board keeps the delivered order but only deliveries still in flight.
+    assert.deepEqual([board.orders[job.id].status, Object.hasOwn(board.jobs, job.id)], ["delivered", false]);
     db.mutate("pizza.tip", { shop: shop(0), amount: 3 });
     board = await next(live);
     assert.deepEqual(board.totals, { orders: 1, baking: 0, ready: 0, delivered: 1, pizzas: 2, revenue: 14, tips: 3 });
@@ -295,7 +296,7 @@ test("the dashboard joins lifecycle records under stable keys with tenant totals
   assert.deepEqual(db.query("pizza.dashboard", { tenant }), board, "local countdowns do not force clock-only snapshots");
 });
 
-test("the dashboard keeps the latest 120 orders while totals cover all of them", async () => {
+test("the dashboard keeps the latest 120 orders, every oven timer, and totals covering all of them", async () => {
   const db = await kitchen({ stockPerShop: 1000, bakeMs: 60_000 });
   for (let index = 0; index < 121; index++) {
     db.now++;
@@ -303,11 +304,45 @@ test("the dashboard keeps the latest 120 orders while totals cover all of them",
   }
   const board = db.query("pizza.dashboard", { tenant });
   assert.equal(Object.keys(board.orders).length, 120);
-  assert.equal(Object.keys(board.timers).length, 120);
+  assert.equal(Object.keys(board.timers).length, 121);
   assert.equal(Object.hasOwn(board.orders, key("recent-0")), false);
   assert.equal(Object.hasOwn(board.orders, key("recent-120")), true);
   assert.equal(board.totals.orders, 121);
   assert.equal(board.summaries[canonicalJson(shop(0))].orders, 121);
+});
+
+test("a delivery returns an old order to the board, and archiving keeps its counts", async () => {
+  const db = await kitchen({ stockPerShop: 1000, bakeMs: 0, leaseMs: 60_000 });
+  db.mutate("pizza.order", { id: "first", shop: shop(0), quantity: 2 });
+  db.maintain();
+  const job = claim(db, "drone");
+  for (let index = 0; index < 120; index++) {
+    db.now++;
+    db.mutate("pizza.order", { id: `later-${index}`, shop: shop(1), quantity: 1 });
+  }
+  let board = db.query("pizza.dashboard", { tenant });
+  assert.equal(Object.hasOwn(board.orders, key("first")), false, "the oldest order dropped off the board");
+  db.now++;
+  deliver(db, job);
+  board = db.query("pizza.dashboard", { tenant });
+  assert.equal(board.orders[key("first")].status, "delivered", "its delivery is the latest activity");
+  assert.equal(Object.keys(board.orders).length, 120);
+  const totals = board.totals;
+
+  assert.deepEqual(db.mutate("pizza.archive", { tenant, olderThanMs: 1_000, limit: 10 }), { archived: 0 });
+  db.now += 1_000;
+  assert.deepEqual(db.mutate("pizza.archive", { tenant, olderThanMs: 1_000, limit: 10 }), { archived: 1 });
+  board = db.query("pizza.dashboard", { tenant });
+  assert.equal(Object.hasOwn(board.orders, key("first")), false);
+  assert.deepEqual([board.totals, board.archived], [totals, 1]);
+  assert.deepEqual(pick(board.summaries[canonicalJson(shop(0))], "orders", "delivered", "orderedQuantity", "deliveredQuantity", "revenue"),
+    { orders: 1, delivered: 1, orderedQuantity: 2, deliveredQuantity: 2, revenue: 14 });
+  const world = db.query("pizza.world");
+  assert.equal(world.orders.some((order) => order.id === "first"), false);
+  assert.equal(world.jobs.some(({ id }) => id === job.id), false);
+  // Live summaries cover the orders still on record; revenue stays on the shop.
+  assert.deepEqual(pick(db.query("pizza.shop", shop(0)), "orders", "delivered", "revenue"), { orders: 0, delivered: 0, revenue: 14 });
+  fails(() => db.mutate("pizza.archive", { tenant: "nobody", olderThanMs: 0, limit: 1 }), "TENANT_NOT_FOUND");
 });
 
 test("tenants reuse store and order IDs while queues, timers, dashboards and accounting stay isolated", async () => {

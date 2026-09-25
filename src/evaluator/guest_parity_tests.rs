@@ -348,6 +348,47 @@ fn guest_parity() {
             .all(|order| order["status"] == "delivered"),
         "{world}"
     );
+    // Archive deliveries in bounded passes; the dashboard keeps their counts.
+    // t0 delivered at 1_310, 1_512 and 1_601: the cutoff 1_561 takes two.
+    let delivered = world["orders"].as_array().unwrap().len();
+    for (args, now, archived) in [
+        (
+            json!({"tenant": "t0", "olderThanMs": 1_450, "limit": 1}),
+            3_010,
+            Some(1),
+        ),
+        (
+            json!({"tenant": "t0", "olderThanMs": 1_450, "limit": 10}),
+            3_011,
+            Some(1),
+        ),
+        (
+            json!({"tenant": "t1", "olderThanMs": 0, "limit": 1_000}),
+            3_012,
+            None,
+        ),
+        (
+            json!({"tenant": "t9", "olderThanMs": 0, "limit": 1}),
+            3_013,
+            None,
+        ),
+        (
+            json!({"tenant": "t0", "olderThanMs": 0, "limit": 0}),
+            3_014,
+            None,
+        ),
+    ] {
+        let result = step("mutation", "internal.pizza.archive", args, now);
+        if let Some(count) = archived {
+            assert_eq!(result.unwrap()["archived"], count);
+        }
+    }
+    reads(&mut step, 3_020);
+    let world = step("query", "internal.pizza.world", Value::Null, 3_021).unwrap();
+    assert!(
+        world["orders"].as_array().unwrap().len() < delivered - 2,
+        "{world}"
+    );
     assert_eq!(
         step("query", "internal.pizza.missing", Value::Null, 3_003).unwrap_err()["code"],
         "DEFINITION_MISSING"

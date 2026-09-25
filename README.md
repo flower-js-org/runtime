@@ -346,13 +346,15 @@ A terminal server error arrives as an SSE `error` event and becomes `FlowerError
 The [Goblin Pizza dashboard](examples/pizza-dashboard) watches **one `pizza.dashboard({tenant})` value** for the selected tenant's stores, orders, timers, delivery leases, and leaderboard. New streams rotate across running replicas; switching tenants closes the previous stream. **This observational view is replica-local: data, code, and aliases may lag without a bound, and reconnecting can show an older revision even while connected.** The page labels this policy and marks disconnected data. Countdown labels use approximate local time; mutations determine actual deadlines.
 
 ```sh
-cargo build --release --bin flower
-npm run demo:pizza
-# Optional fixed port, initially paused arrivals, and automatic shutdown:
-npm run demo:pizza -- --port 3030 --paused --duration 120
+bin/demo
+# Builds the server, then opens the dashboard. Other paces, a fixed port,
+# initially paused arrivals, and automatic shutdown:
+bin/demo --rate 80 --port 3030 --paused --duration 120
 ```
 
-Open the printed local URL. The launcher creates a fresh three-node Rust/QuickJS cluster with three tenants and two stores each, runs tenant-scoped delivery workers, and offers buttons to place an order, tip a kitchen, pause arrivals, or crash the leader. Pausing arrivals leaves workers running. Order creation is capped at 160 attempts, including button clicks; workers continue polling until shutdown, and the board includes the latest 120 orders while totals cover the whole run. Ctrl+C stops owned processes and removes their temporary data. It never attaches to an existing database.
+The launcher creates a fresh three-node Rust/QuickJS cluster with three tenants and two stores each. Customers arrive as a Poisson process at 40 orders a second by default (`--rate`, 1 to 150, or the pace buttons), with each kitchen's popularity drifting over time, and a drone fleet sized to that pace claims deliveries from each tenant's queue scope. Idle drones wait for an oven bell rather than polling, now and then a drone vanishes so another reclaims its expired lease, and customers tip. Buttons place an order, tip a kitchen, pause arrivals, or kill the leader; the other replicas elect a replacement and the old one restarts from its data directory. Pausing arrivals leaves the drones running.
+
+Every two seconds the launcher calls `pizza.archive`, which folds deliveries older than ten seconds into per-kitchen tallies and deletes their order rows and queue jobs, so the dashboard's work stays the size of the orders in flight. Retry receipts and other per-call state still accumulate, about 1 MB/s across the three replicas at the default pace, so arrivals stop at 150,000 orders (`--max-orders`). The board shows the 120 orders with the latest activity plus every delivery and oven timer in flight; totals include archived orders. A pulse panel charts orders placed and delivered per second across all tenants and shows each replica's role, applied index, and dashboard streams, with write latency measured by the launcher. Ctrl+C stops owned processes and removes their temporary data. It never attaches to an existing database.
 
 Store identity is the tuple `[tenant, store]`. Shops are keyed by that tuple and orders by `[tenant, store, orderId]`, both declared with `.key(v.tuple(...))`. Different tenants and stores can reuse the same local order ID. Each tenant claims deliveries from its own scope of one queue and has its own derived leaderboard. Order statistics are an incremental aggregate, and one store summary per shop row stays materialized through `materialize: { each: shops }`; rankings compute from those summaries when read, so tips do not sort or replicate whole rankings. The scheduler uses composite timer IDs; order and dashboard queries use the durable store index.
 
