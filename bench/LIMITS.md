@@ -78,6 +78,9 @@ they do not weaken quorum, persistence, or log validation.
 | `FLOWER_SNAPSHOT_PURGE_BATCH_LOGS` | 1 | Minimum number of eligible logs purged in one operation. |
 | `FLOWER_RAFT_PAYLOAD_ENTRIES` | 64 | Preferred maximum logs in one replication RPC; actual serialized byte budget also applies. |
 | `FLOWER_RAFT_HEARTBEAT_MS` | 50 | Heartbeat interval. |
+| `FLOWER_LEADER_FLUSH` | deferred | `immediate` makes a leader flush every own log append. Otherwise a leader of at least three voters appends without an fsync and counts toward the commit quorum only after a later flush. |
+| `FLOWER_LEADER_FLUSH_GRACE_MS` | 30 | Deferred leader appends still uncommitted this long are flushed, for example while a follower is down. |
+| `FLOWER_LEADER_FLUSH_INTERVAL_MS` | 500 | Longest a deferred leader append waits for its flush. |
 | `FLOWER_RAFT_ELECTION_MIN_MS` | 150 | Lower randomized election delay. |
 | `FLOWER_RAFT_ELECTION_MAX_MS` | 300 | Upper election delay and OpenRaft's additional committed-leader lease. |
 
