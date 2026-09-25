@@ -64,10 +64,10 @@ node tests/e2e-rust-driver.mjs
 
 `--groups` counts independent Raft groups and `--nodes` counts replicas per group (one or three). Tenants, customers, workers, and order caps are per group; stores are per tenant.
 
-By default every replica is its own server process with its own database, so the stress preset runs 24 processes that flush one disk independently. `--hosted` instead starts one process per replica slot: host *k* serves replica *k* of every group (`flower --replica`) over one shared database, so all of its groups' log appends share each fsync. `--chaos` then kills the host that leads the most groups halfway through the load, which every group observes at once like a machine failure; the host restarts once every group serves again. Server CPU is sampled per host by the coordinator and reported in the aggregate `hosts` field, which `compare-cpu.mjs` uses instead of per-group server counters.
+By default every replica is its own server process with its own database, so the stress preset runs 24 processes that flush one disk independently. `--hosted` instead starts one process per replica slot: host *k* serves replica *k* of every group (`flower --replica`) over one shared database, so all of its groups' log appends share each fsync. `--chaos` then kills the host that leads the most groups halfway through the load, which every group observes at once like a machine failure; the host restarts once every group serves again. Server CPU is sampled per host by the coordinator and reported in the aggregate `hosts` field, which `compare-cpu.mjs` uses instead of per-group server counters. Group *g* is initialized through host *g* mod 3, whose replica wins the first election, so each host starts out leading an equal share of groups.
 
 ```sh
-npm run bench:stress -- --hosted
+npm run bench -- --groups 8 --http2 --hosted --chaos
 ``` `--driver-binary PATH` selects the Rust executable, defaulting to `target/release/flower-bench-driver`. The driver E2E checks real HTTP/2 pooling, replica routing, uncertain retries, receipt replay, histograms, and business accounting against a test server.
 
 By default each customer waits for its response before issuing more work: this is a closed-loop capacity measurement. Independent arrivals expose overload differently:

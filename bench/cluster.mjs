@@ -527,9 +527,12 @@ export class HostCluster {
     await Promise.all(this._reservations.map(releasePort));
     for (const host of this.hosts) this._startHost(host);
     await this._until("start all Flower hosts", async () => (await Promise.all(this.hosts.map((host) => this._serving(host)))).every(Boolean));
+    // The initializing replica wins the first election, so rotate it: each
+    // host starts out leading an equal share of groups.
     for (let group = 0; group < this.groups; group++) {
       const members = Object.fromEntries(this.hosts.map((host) => [host.id, host.addresses[group]]));
-      const response = await this._fetch(this.hosts[0].addresses[group], "/raft/initialize", { method: "POST", body: members, timeoutMs: this.startupTimeoutMs });
+      const initializer = this.hosts[group % this.hosts.length];
+      const response = await this._fetch(initializer.addresses[group], "/raft/initialize", { method: "POST", body: members, timeoutMs: this.startupTimeoutMs });
       if (!response.ok) throw new Error(`Group ${group} initialization returned HTTP ${response.status}: ${JSON.stringify(response.value)}`);
     }
     return this;
