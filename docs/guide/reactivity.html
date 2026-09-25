@@ -1,62 +1,35 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#f8f5ec">
-<meta name="description" content="How Flower tracks dependencies, keeps materialized values current, and maintains aggregates from row deltas.">
-<meta property="og:title" content="Reactive values · Flower">
-<meta property="og:description" content="How Flower tracks dependencies, keeps materialized values current, and maintains aggregates from row deltas.">
-<meta property="og:type" content="website">
-<meta property="og:url" content="https://flower.js.org/guide/reactivity.html">
-<link rel="canonical" href="https://flower.js.org/guide/reactivity.html">
-<title>Reactive values · Flower</title>
-<link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
-<link rel="stylesheet" href="../site.css?v=fd4ad318734f">
-<script src="../site.js?v=3184f0662fa5" defer></script>
-</head>
-<body class="doc-page">
-<a class="skip-link" href="#main">Skip to content</a>
-<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/" aria-current="page">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/xmit-dev/flower">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
-<div class="documentation">
-<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li class="current"><a href="#top" aria-current="page"><span>03</span>Reactive values</a><ol id="section-nav" aria-label="On this page"><li><a href="#materialize-what-should-stay-current">Keep a value current</a></li><li><a href="#choose-useful-dependency-boundaries">Keep dependencies narrow</a></li><li><a href="#maintain-totals-from-row-deltas">Aggregates</a></li><li><a href="#errors-have-defined-behavior">How errors behave</a></li></ol></li><li><a href="../guide/components.html"><span>04</span>Components & tasks</a></li><li><a href="../guide/methods.html"><span>05</span>Methods & retries</a></li><li><a href="../guide/access.html"><span>06</span>Access control</a></li><li><a href="../guide/reads.html"><span>07</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>08</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>09</span>Queues & expiry</a></li><li><a href="../guide/workers.html"><span>10</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>11</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>12</span>Crypto & tokens</a></li><li><a href="../guide/passkeys.html"><span>13</span>Passkeys</a></li><li><a href="../guide/testing.html"><span>14</span>Testing</a></li><li><a href="../guide/deployments.html"><span>15</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/schemas.html"><span>03</span>Schemas & failures</a></li><li><a href="../reference/definitions.html"><span>04</span>Contexts & definitions</a></li><li><a href="../reference/components.html"><span>05</span>Components & tasks</a></li><li><a href="../reference/client.html"><span>06</span>Client & transports</a></li><li><a href="../reference/time.html"><span>07</span>Queues, expiry & timers</a></li><li><a href="../reference/workers.html"><span>08</span>External values & workers</a></li><li><a href="../reference/testing.html"><span>09</span>Testing</a></li><li><a href="../reference/crypto.html"><span>10</span>Crypto & passkeys</a></li><li><a href="../reference/keys.html"><span>11</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>12</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>13</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>14</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>15</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>16</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
-<main id="main" tabindex="-1">
-<header class="page-intro" id="top"><p class="eyebrow">Guide · 03</p><h1>Derived values stay up to date.</h1><p class="lead">Flower remembers what each derived value reads. When those records change, it recomputes the value in the same commit.</p></header>
-<div class="page-content">
-<!-- content:start -->
 <div class="flow-diagram" role="img" aria-label="A source update recomputes its derived dependencies and result before one atomic commit"><div><span>01</span><strong>Source change</strong><small>orders["o-1"] = { shop: "north", … }</small></div><b aria-hidden="true">→</b><div><span>02</span><strong>Derived values</strong><small>revenue("north"), summary("north")</small></div><b aria-hidden="true">→</b><div><span>03</span><strong>One revision</strong><small>Sources + results + receipt</small></div></div>
 <section id="materialize-what-should-stay-current">
 <h2>Keep a value current</h2>
 <p>A materialized value is stored and recomputed whenever something it read changes. Say which instances to keep with <code>materialize</code>:</p>
-<div class="code-block"><div class="code-head"><span>shops.ts</span><button type="button" class="copy-button" aria-label="Copy shops.ts">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { aggregate, collection, define, derive, fail, query, v } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
+<div class="code-block"><div class="code-head"><span>shops.ts</span><button type="button" class="copy-button" aria-label="Copy shops.ts">Copy</button></div><pre tabindex="0"><code class="language-ts">import { aggregate, collection, define, derive, fail, query, v } from "@flower-js/sdk";
 
-<span class="kw">const</span> shops = collection(<span class="str">"shops"</span>, v.object({ name: v.<span class="kw">string</span>() }));
-<span class="kw">const</span> orders = collection(<span class="str">"orders"</span>, v.object({ shop: v.<span class="kw">string</span>(), cents: v.int({ min: <span class="num">0</span> }) }))
-  .index(<span class="str">"byShop"</span>, [<span class="str">"shop"</span>]);
+const shops = collection("shops", v.object({ name: v.string() }));
+const orders = collection("orders", v.object({ shop: v.string(), cents: v.int({ min: 0 }) }))
+  .index("byShop", ["shop"]);
 
-<span class="kw">const</span> revenue = aggregate(<span class="str">"shop.revenue"</span>, {
-  source: orders, index: <span class="str">"byShop"</span>,
-  initial: () =&gt; <span class="num">0</span>,
+const revenue = aggregate("shop.revenue", {
+  source: orders, index: "byShop",
+  initial: () =&gt; 0,
   add: (sum, order) =&gt; sum + order.cents,
   remove: (sum, order) =&gt; sum - order.cents,
 });
 
-<span class="kw">const</span> summary = derive(<span class="str">"shop.summary"</span>, (ctx, id: <span class="kw">string</span>) =&gt; ({
-  ...(ctx.get(shops, id) ?? fail(<span class="str">"SHOP_NOT_FOUND"</span>, <span class="str">`No shop ${id}`</span>)),
+const summary = derive("shop.summary", (ctx, id: string) =&gt; ({
+  ...(ctx.get(shops, id) ?? fail("SHOP_NOT_FOUND", `No shop ${id}`)),
   revenue: ctx.get(revenue, id),
 }), { materialize: { each: shops } });
 
-<span class="kw">const</span> shopCount = derive(<span class="str">"shop.count"</span>, (ctx) =&gt; ctx.scan(shops).length, { materialize: <span class="str">"always"</span> });
+const shopCount = derive("shop.count", (ctx) =&gt; ctx.scan(shops).length, { materialize: "always" });
 
-<span class="kw">const</span> read = query(<span class="str">"shop.read"</span>, { args: v.<span class="kw">string</span>() }, (ctx, id) =&gt; ctx.get(summary, id));
-<span class="kw">const</span> count = query(<span class="str">"internal.shop.count"</span>, (ctx) =&gt; ctx.get(shopCount));
+const read = query("shop.read", { args: v.string() }, (ctx, id) =&gt; ctx.get(summary, id));
+const count = query("internal.shop.count", (ctx) =&gt; ctx.get(shopCount));
 
-<span class="kw">const</span> app = define({
+const app = define({
   definitions: [revenue, summary, shopCount],
-  http: { <span class="str">"shop.read"</span>: read, <span class="str">"shop.count"</span>: count },
+  http: { "shop.read": read, "shop.count": count },
 });
-<span class="kw">export</span> <span class="kw">default</span> app;</code></pre></div>
+export default app;</code></pre></div>
 <ul>
 <li><code>{ each: shops }</code> keeps one instance per row of <code>shops</code>, with the row key as its argument. Instances appear and disappear with their rows, in the same commit. Rows that existed before the deploy are picked up in the background.</li>
 <li><code>"always"</code> keeps the single instance without arguments. It is materialized in the background after the deploy.</li>
@@ -99,12 +72,3 @@
 </ul>
 <div class="note"><span class="note-mark" aria-hidden="true">↳</span><p><strong>Callbacks are sandboxed and synchronous.</strong> Return JSON. There is no network, filesystem, current date (use <code>ctx.now()</code>) or async work. Globals don't persist between calls. Outside facts come in as method arguments, or from <a href="workers.html">external workers</a>.</p></div>
 </section>
-<!-- content:end -->
-</div>
-<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../guide/applications.html"><small>Previous · Guide</small>Applications</a><a rel="next" href="../guide/components.html"><small>Next · Guide</small>Components & tasks</a></nav>
-</main>
-</div>
-<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/xmit-dev/flower">Source ↗</a></div></div></div>
-<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
-</body>
-</html>

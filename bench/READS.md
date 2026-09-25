@@ -2,7 +2,7 @@
 
 The current publication measures **56,154.7 successful customer calls/sec**, **12.9 ms read p99** and **228.3 ms write p99**. All eight independent audits passed, with zero failed customer calls and all 768 orders delivered.
 
-[Charts, recovery, and every group](../docs/bench/latest.html) · [raw measurements](../docs/bench/latest.json) · [latency experiments and tracing](LATENCY.md) · [reproduction](README.md).
+[Charts, recovery, and every group](https://flower.xmit.dev/bench/latest.html) · [raw measurements](../docs/bench/latest.json) · [latency experiments and tracing](LATENCY.md) · [reproduction](README.md).
 
 ## Host and workload
 

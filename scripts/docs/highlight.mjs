@@ -1,5 +1,5 @@
 // Static highlighting: no browser dependency or network request, and copying
-// still returns exactly the original source. scripts/build-docs.mjs applies it.
+// still returns exactly the original source. The Eleventy page layout applies it.
 
 const escape = (text) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 const decode = (html) => html.replace(/<\/?span\b[^>]*>/g, "").replace(/&(#x[\da-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (_, entity) => {

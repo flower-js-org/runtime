@@ -1,30 +1,3 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#f8f5ec">
-<meta name="description" content="Deploy computation changes, stage large rebuilds, tune page sizes, and migrate stored records.">
-<meta property="og:title" content="Deploy changes · Flower">
-<meta property="og:description" content="Deploy computation changes, stage large rebuilds, tune page sizes, and migrate stored records.">
-<meta property="og:type" content="website">
-<meta property="og:url" content="https://flower.js.org/guide/deployments.html">
-<link rel="canonical" href="https://flower.js.org/guide/deployments.html">
-<title>Deploy changes · Flower</title>
-<link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
-<link rel="stylesheet" href="../site.css?v=fd4ad318734f">
-<script src="../site.js?v=3184f0662fa5" defer></script>
-</head>
-<body class="doc-page">
-<a class="skip-link" href="#main">Skip to content</a>
-<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/" aria-current="page">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/xmit-dev/flower">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
-<div class="documentation">
-<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/components.html"><span>04</span>Components & tasks</a></li><li><a href="../guide/methods.html"><span>05</span>Methods & retries</a></li><li><a href="../guide/access.html"><span>06</span>Access control</a></li><li><a href="../guide/reads.html"><span>07</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>08</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>09</span>Queues & expiry</a></li><li><a href="../guide/workers.html"><span>10</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>11</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>12</span>Crypto & tokens</a></li><li><a href="../guide/passkeys.html"><span>13</span>Passkeys</a></li><li><a href="../guide/testing.html"><span>14</span>Testing</a></li><li class="current"><a href="#top" aria-current="page"><span>15</span>Deploy changes</a><ol id="section-nav" aria-label="On this page"><li><a href="#staged-deployment">Deploy computation changes</a></li><li><a href="#deployment-tuning">Tune rebuild pages</a></li><li><a href="#data-migrations">Migrate stored records</a></li></ol></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/schemas.html"><span>03</span>Schemas & failures</a></li><li><a href="../reference/definitions.html"><span>04</span>Contexts & definitions</a></li><li><a href="../reference/components.html"><span>05</span>Components & tasks</a></li><li><a href="../reference/client.html"><span>06</span>Client & transports</a></li><li><a href="../reference/time.html"><span>07</span>Queues, expiry & timers</a></li><li><a href="../reference/workers.html"><span>08</span>External values & workers</a></li><li><a href="../reference/testing.html"><span>09</span>Testing</a></li><li><a href="../reference/crypto.html"><span>10</span>Crypto & passkeys</a></li><li><a href="../reference/keys.html"><span>11</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>12</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>13</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>14</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>15</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>16</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
-<main id="main" tabindex="-1">
-<header class="page-intro" id="top"><p class="eyebrow">Guide · 15</p><h1>Ship new code.</h1><p class="lead">Deploying new code recomputes derived values. Large apps can prepare the new version in the background, then switch over. Stored records change only when your own code migrates them.</p></header>
-<div class="page-content">
-<!-- content:start -->
 <section id="staged-deployment">
 <h2>Deploy computation changes</h2>
 <p>A change to a <code>derive</code> or aggregate does nothing until you build and deploy the bundle. You have two options:</p>
@@ -38,36 +11,36 @@
 <li>Before resuming, check that both the request ID and bundle hash match, rather than staging again.</li>
 <li>Nothing runs on its own: your code calls <code>advance</code> and <code>activate</code>. The progress counters show work done, not a percentage.</li>
 </ul>
-<div class="code-block"><div class="code-head"><span>Start or resume one deployment</span><button type="button" class="copy-button" aria-label="Copy staged deployment">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { FlowerAdmin } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
-<span class="kw">import</span> { buildBundle } <span class="kw">from</span> <span class="str">"@flower-js/sdk/bundle"</span>;
+<div class="code-block"><div class="code-head"><span>Start or resume one deployment</span><button type="button" class="copy-button" aria-label="Copy staged deployment">Copy</button></div><pre tabindex="0"><code class="language-ts">import { FlowerAdmin } from "@flower-js/sdk";
+import { buildBundle } from "@flower-js/sdk/bundle";
 
-<span class="kw">const</span> admin = <span class="kw">new</span> FlowerAdmin(<span class="str">"http://127.0.0.1:7101"</span>, { adminToken: process.env.FLOWER_ADMIN_TOKEN });
-<span class="kw">const</span> bundle = <span class="kw">await</span> buildBundle(<span class="str">"app.ts"</span>);
-<span class="kw">const</span> requestId = <span class="str">"application-upgrade-v2"</span>; <span class="comment">// Save and reuse for this bundle.</span>
-<span class="kw">const</span> maxBytes = <span class="num">256</span> * <span class="num">1024</span>;
-<span class="kw">let</span> build = (<span class="kw">await</span> admin.stagedDeploymentStatus()).value;
-<span class="kw">if</span> (build === <span class="kw">null</span> || build.phase === <span class="str">"collected"</span>) {
-  build = (<span class="kw">await</span> admin.stageDeployment(bundle, { requestId })).value;
+const admin = new FlowerAdmin("http://127.0.0.1:7101", { adminToken: process.env.FLOWER_ADMIN_TOKEN });
+const bundle = await buildBundle("app.ts");
+const requestId = "application-upgrade-v2"; // Save and reuse for this bundle.
+const maxBytes = 256 * 1024;
+let build = (await admin.stagedDeploymentStatus()).value;
+if (build === null || build.phase === "collected") {
+  build = (await admin.stageDeployment(bundle, { requestId })).value;
 }
-<span class="kw">if</span> (build.requestId !== requestId || build.bundleHash !== bundle.hash) {
-  <span class="kw">throw</span> <span class="kw">new</span> Error(<span class="str">"Existing deployment ID/bundle does not match this intent"</span>);
+if (build.requestId !== requestId || build.bundleHash !== bundle.hash) {
+  throw new Error("Existing deployment ID/bundle does not match this intent");
 }
-<span class="kw">while</span> (build.phase === <span class="str">"backfill"</span> || build.phase === <span class="str">"rebuilding"</span>) {
-  build = (<span class="kw">await</span> admin.controlStagedDeployment({
-    operation: <span class="str">"advance"</span>, requestId, maxBytes,
+while (build.phase === "backfill" || build.phase === "rebuilding") {
+  build = (await admin.controlStagedDeployment({
+    operation: "advance", requestId, maxBytes,
   })).value;
 }
-<span class="kw">if</span> (build.phase === <span class="str">"failed"</span>) {
-  <span class="kw">throw</span> <span class="kw">new</span> Error(build.error ?? <span class="str">"Cancel and collect the failed target"</span>);
+if (build.phase === "failed") {
+  throw new Error(build.error ?? "Cancel and collect the failed target");
 }
-<span class="kw">if</span> (build.phase === <span class="str">"ready"</span>) {
-  build = (<span class="kw">await</span> admin.controlStagedDeployment({
-    operation: <span class="str">"activate"</span>, requestId,
+if (build.phase === "ready") {
+  build = (await admin.controlStagedDeployment({
+    operation: "activate", requestId,
   })).value;
 }
-<span class="kw">while</span> (build.phase === <span class="str">"active"</span> || build.phase === <span class="str">"canceled"</span>) {
-  build = (<span class="kw">await</span> admin.controlStagedDeployment({
-    operation: <span class="str">"collect"</span>, requestId, maxBytes,
+while (build.phase === "active" || build.phase === "canceled") {
+  build = (await admin.controlStagedDeployment({
+    operation: "collect", requestId, maxBytes,
   })).value;
 }</code></pre></div>
 <ul>
@@ -86,9 +59,9 @@
 <li><code>FLOWER_DEPLOYMENT_PAGE_MS</code> sets the target time per page. Default 200 ms, capped by <code>FLOWER_EVALUATION_TIMEOUT_MS</code>. Try 20 ms if write latency matters, and measure.</li>
 <li><code>maxBytes</code> on each request limits page size. It defaults to the transaction byte budget.</li>
 </ul>
-<div class="code-block"><div class="code-head"><span>Each server · independent startup settings</span><button type="button" class="copy-button" aria-label="Copy deployment page tuning">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">export</span> FLOWER_DEPLOYMENT_PAGE_MS=<span class="num">20</span>
-<span class="kw">export</span> FLOWER_WRITER_BATCH_MS=<span class="num">50</span>
-<span class="comment"># Start or restart each Flower node with these settings.</span></code></pre></div>
+<div class="code-block"><div class="code-head"><span>Each server · independent startup settings</span><button type="button" class="copy-button" aria-label="Copy deployment page tuning">Copy</button></div><pre tabindex="0"><code class="language-sh">export FLOWER_DEPLOYMENT_PAGE_MS=20
+export FLOWER_WRITER_BATCH_MS=50
+# Start or restart each Flower node with these settings.</code></pre></div>
 <ul>
 <li>These are startup settings. Restart nodes to apply them. Ordinary write batching is unaffected.</li>
 <li>The page target is not a hard deadline. A page can take the target plus a full evaluation timeout.</li>
@@ -108,12 +81,3 @@
 </ul>
 <p>See the <a href="../reference/data.html#collections">range and cursor rules</a>, <a href="../reference/definitions.html#contexts">mutation context</a> and <a href="../reference/deployments.html">staged deployment API</a>. <a href="../operate/#resizing">Moving a partition</a> between Raft groups keeps data and code as they are; it is not a migration.</p>
 </section>
-<!-- content:end -->
-</div>
-<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../guide/testing.html"><small>Previous · Guide</small>Testing</a><a rel="next" href="../operate/"><small>Next · Operate</small>Run a cluster</a></nav>
-</main>
-</div>
-<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/xmit-dev/flower">Source ↗</a></div></div></div>
-<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
-</body>
-</html>

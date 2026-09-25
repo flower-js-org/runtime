@@ -5,8 +5,8 @@ holds public capability declarations; Rust resolves operator bindings, checks
 policy, selects immutable versions and reuses native cryptographic contexts.
 This is implemented with a mounted wrapping-key provider. Wrapping-key rewrap and mounted previous providers support rotation. KMS/HSM providers, private-key export and general exportable secrets are not implemented.
 
-The [Field Guide](https://flower.js.org/guide/crypto.html) gives a complete usage
-walkthrough. The [SDK reference](https://flower.js.org/reference/keys.html)
+The [Field Guide](https://flower.xmit.dev/guide/crypto.html) gives a complete usage
+walkthrough. The [SDK reference](https://flower.xmit.dev/reference/keys.html)
 covers every declaration, overload, operator method and option.
 
 ## Declare; then grant

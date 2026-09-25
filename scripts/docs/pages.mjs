@@ -1,5 +1,5 @@
 // The site's single table of contents. Every page's header, sidebar, pager,
-// title and intro come from here; page files own only their content.
+// title and intro come from here; docs/ page files own only their content.
 export const groups = [
   { id: "guide", label: "Guide", href: "guide/", note: "Small API.<br>Ordinary TypeScript.<br>Durable decisions." },
   { id: "operate", label: "Operate", href: "operate/", note: "Three nodes.<br>One failure tolerated.<br>Honest limits." },
@@ -102,6 +102,12 @@ export const pages = [
     title: "Run a three-node cluster.",
     lead: "Three nodes survive one failure. The leader runs writes, a majority confirms them, and any node can answer reads.",
     description: "Start and operate a three-node Flower cluster: acknowledgements, operator routines and partition resizing.",
+  },
+  {
+    path: "operate/groups.html", group: "operate", label: "Resize Raft groups",
+    title: "Grow and shrink the cluster.",
+    lead: "Start a new Raft group, move named partitions onto it, or drain a group before retiring its servers.",
+    description: "Change the number of Flower Raft groups: provision replicas, register groups, rebalance partitions, monitor progress and remove drained groups.",
   },
   {
     path: "operate/capacity.html", group: "operate", label: "Capacity & budgets",

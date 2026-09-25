@@ -1,30 +1,3 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#f8f5ec">
-<meta name="description" content="Build passkey (WebAuthn) registration and sign-in with Flower: ceremonies, native verification, sessions and counters.">
-<meta property="og:title" content="Passkeys · Flower">
-<meta property="og:description" content="Build passkey (WebAuthn) registration and sign-in with Flower: ceremonies, native verification, sessions and counters.">
-<meta property="og:type" content="website">
-<meta property="og:url" content="https://flower.js.org/guide/passkeys.html">
-<link rel="canonical" href="https://flower.js.org/guide/passkeys.html">
-<title>Passkeys · Flower</title>
-<link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
-<link rel="stylesheet" href="../site.css?v=fd4ad318734f">
-<script src="../site.js?v=3184f0662fa5" defer></script>
-</head>
-<body class="doc-page">
-<a class="skip-link" href="#main">Skip to content</a>
-<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/" aria-current="page">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/xmit-dev/flower">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
-<div class="documentation">
-<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/components.html"><span>04</span>Components & tasks</a></li><li><a href="../guide/methods.html"><span>05</span>Methods & retries</a></li><li><a href="../guide/access.html"><span>06</span>Access control</a></li><li><a href="../guide/reads.html"><span>07</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>08</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>09</span>Queues & expiry</a></li><li><a href="../guide/workers.html"><span>10</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>11</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>12</span>Crypto & tokens</a></li><li class="current"><a href="#top" aria-current="page"><span>13</span>Passkeys</a><ol id="section-nav" aria-label="On this page"><li><a href="#how">How it works</a></li><li><a href="#server">The server</a></li><li><a href="#browser">The browser</a></li><li><a href="#checks">What verification checks</a></li><li><a href="#counters">Counters and synced passkeys</a></li><li><a href="#testing">Testing</a></li></ol></li><li><a href="../guide/testing.html"><span>14</span>Testing</a></li><li><a href="../guide/deployments.html"><span>15</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/schemas.html"><span>03</span>Schemas & failures</a></li><li><a href="../reference/definitions.html"><span>04</span>Contexts & definitions</a></li><li><a href="../reference/components.html"><span>05</span>Components & tasks</a></li><li><a href="../reference/client.html"><span>06</span>Client & transports</a></li><li><a href="../reference/time.html"><span>07</span>Queues, expiry & timers</a></li><li><a href="../reference/workers.html"><span>08</span>External values & workers</a></li><li><a href="../reference/testing.html"><span>09</span>Testing</a></li><li><a href="../reference/crypto.html"><span>10</span>Crypto & passkeys</a></li><li><a href="../reference/keys.html"><span>11</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>12</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>13</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>14</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>15</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>16</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
-<main id="main" tabindex="-1">
-<header class="page-intro" id="top"><p class="eyebrow">Guide · 13</p><h1>Sign in with passkeys.</h1><p class="lead">Passwordless accounts: the browser creates a passkey, your methods verify it natively, and records keep the challenges, passkeys and sessions.</p></header>
-<div class="page-content">
-<!-- content:start -->
 <p>A passkey is a WebAuthn credential that the user’s device or password manager keeps. Signing in is a fingerprint, face or PIN check, with no password to phish, reuse or leak. The browser creates and uses the passkey; your methods issue challenges, verify responses natively, and keep the records.</p>
 <section id="how">
 <h2>How it works</h2>
@@ -38,143 +11,7 @@
 </section>
 <section id="server">
 <h2>The server</h2>
-<div class="code-block"><div class="code-head"><span>docs/passkeys.ts</span><button class="copy-button" type="button" aria-label="Copy docs/passkeys.ts">Copy</button></div><pre tabindex="0"><code class="language-ts" data-src="../passkeys.ts"><span class="comment">// Passwordless accounts with passkeys. Each ceremony is a begin/finish pair of</span>
-<span class="comment">// mutations: begin returns options for navigator.credentials.create() or get()</span>
-<span class="comment">// and stores the challenge; finish verifies the browser's credential.toJSON()</span>
-<span class="comment">// and consumes it, so every challenge is accepted at most once.</span>
-<span class="kw">import</span> { collection, define, fail, mutation, query, v } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
-<span class="kw">import</span> <span class="kw">type</span> { MutationContext } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
-<span class="kw">import</span> { base64url, nacl, sha256, webauthn } <span class="kw">from</span> <span class="str">"@flower-js/sdk/crypto"</span>;
-<span class="kw">import</span> <span class="kw">type</span> { WebAuthnCredential } <span class="kw">from</span> <span class="str">"@flower-js/sdk/crypto"</span>;
-<span class="kw">import</span> { scheduler } <span class="kw">from</span> <span class="str">"@flower-js/sdk/scheduler"</span>;
-
-<span class="comment">// Your site: the RP ID is its domain, and origins are exactly what browsers report.</span>
-<span class="kw">const</span> RP = { id: <span class="str">"garden.example"</span>, name: <span class="str">"Flower garden"</span> };
-<span class="kw">const</span> ORIGINS = [<span class="str">"https://garden.example"</span>];
-<span class="kw">const</span> CEREMONY_MS = <span class="num">5</span> * <span class="num">60_000</span>;
-<span class="kw">const</span> SESSION_MS = <span class="num">7</span> * <span class="num">24</span> * <span class="num">60</span> * <span class="num">60_000</span>;
-
-<span class="kw">interface</span> Account { handle: <span class="kw">string</span>; name: <span class="kw">string</span>; createdAt: <span class="kw">number</span> }
-<span class="kw">interface</span> Passkey { account: <span class="kw">string</span>; credential: WebAuthnCredential; createdAt: <span class="kw">number</span>; lastUsedAt: <span class="kw">number</span> | <span class="kw">null</span> }
-<span class="kw">interface</span> Ceremony { kind: <span class="str">"register"</span> | <span class="str">"signIn"</span>; challenge: <span class="kw">string</span>; account: { handle: <span class="kw">string</span>; name: <span class="kw">string</span> } | <span class="kw">null</span>; expiresAt: <span class="kw">number</span> }
-
-<span class="kw">const</span> accounts = collection&lt;Account&gt;(<span class="str">"accounts"</span>);
-<span class="kw">const</span> passkeys = collection&lt;Passkey&gt;(<span class="str">"passkeys"</span>).index(<span class="str">"byAccount"</span>, [<span class="str">"account"</span>]);
-<span class="kw">const</span> ceremonies = collection&lt;Ceremony&gt;(<span class="str">"passkeyCeremonies"</span>);
-<span class="comment">// Keyed by the token's SHA-256, so a leaked record cannot sign anyone in.</span>
-<span class="kw">const</span> sessions = collection&lt;{ account: <span class="kw">string</span>; expiresAt: <span class="kw">number</span> }&gt;(<span class="str">"sessions"</span>);
-
-<span class="kw">const</span> expire = mutation(<span class="str">"internal.passkey.expire"</span>, { args: v.<span class="kw">string</span>() }, (ctx, id) =&gt; {
-  ctx.<span class="kw">delete</span>(ceremonies, id);
-  <span class="kw">return</span> <span class="kw">null</span>;
-});
-<span class="kw">const</span> cleanup = scheduler(<span class="str">"passkeyCeremonyTimers"</span>, { expire });
-
-<span class="kw">function</span> begin(ctx: MutationContext, kind: Ceremony[<span class="str">"kind"</span>], challenge: <span class="kw">string</span>, account: Ceremony[<span class="str">"account"</span>]): <span class="kw">string</span> {
-  <span class="kw">const</span> id = base64url.encode(nacl.randomBytes(<span class="num">16</span>));
-  ctx.set(ceremonies, id, { kind, challenge, account, expiresAt: ctx.now() + CEREMONY_MS });
-  cleanup.after(ctx, id, CEREMONY_MS, <span class="str">"expire"</span>, id);
-  <span class="kw">return</span> id;
-}
-
-<span class="comment">// A failed verification rolls this back too, so the user may retry until it expires.</span>
-<span class="kw">function</span> finish(ctx: MutationContext, id: <span class="kw">string</span>, kind: Ceremony[<span class="str">"kind"</span>]): Ceremony {
-  <span class="kw">const</span> ceremony = ctx.get(ceremonies, id);
-  <span class="kw">if</span> (!ceremony || ceremony.kind !== kind || ceremony.expiresAt &lt;= ctx.now()) fail(<span class="str">"CEREMONY_EXPIRED"</span>, <span class="str">"Start again"</span>);
-  ctx.<span class="kw">delete</span>(ceremonies, id);
-  cleanup.cancel(ctx, id);
-  <span class="kw">return</span> ceremony;
-}
-
-<span class="kw">const</span> sessionKey = (token: <span class="kw">string</span>) =&gt; base64url.encode(sha256(<span class="kw">new</span> Uint8Array(Array.<span class="kw">from</span>(token, (character) =&gt; character.charCodeAt(<span class="num">0</span>)))));
-<span class="kw">const</span> ceremonyArgs = v.object({ ceremony: v.<span class="kw">string</span>({ min: <span class="num">1</span>, max: <span class="num">64</span> }), response: v.json() });
-
-<span class="comment">// Signed in, this adds a passkey to your account; otherwise it opens a new one.</span>
-<span class="kw">const</span> registerBegin = mutation(<span class="str">"passkey.register.begin"</span>, {
-  access: <span class="str">"public"</span>, args: v.object({ name: v.optional(v.<span class="kw">string</span>({ min: <span class="num">1</span>, max: <span class="num">64</span> })) }),
-}, (ctx, args) =&gt; {
-  <span class="kw">const</span> signedIn = ctx.principal();
-  <span class="kw">let</span> account: { handle: <span class="kw">string</span>; name: <span class="kw">string</span> };
-  <span class="kw">if</span> (signedIn) {
-    account = ctx.get(accounts, signedIn.subject) ?? fail(<span class="str">"ACCOUNT_NOT_FOUND"</span>, <span class="str">"Your account no longer exists"</span>);
-  } <span class="kw">else</span> {
-    <span class="kw">if</span> (!args.name) fail(<span class="str">"NAME_REQUIRED"</span>, <span class="str">"Choose a name for the new account"</span>);
-    <span class="kw">if</span> (ctx.get(accounts, args.name)) fail(<span class="str">"NAME_TAKEN"</span>, <span class="str">"That name is taken; sign in to add a passkey to it"</span>);
-    account = { handle: base64url.encode(nacl.randomBytes(<span class="num">16</span>)), name: args.name };
-  }
-  <span class="kw">const</span> options = webauthn.registrationOptions({
-    rp: RP,
-    user: { id: account.handle, name: account.name },
-    exclude: ctx.query(passkeys.by(<span class="str">"byAccount"</span>).eq(account.name)).map(({ credential }) =&gt; ({ id: credential.id, transports: credential.transports })),
-  });
-  <span class="kw">return</span> { ceremony: begin(ctx, <span class="str">"register"</span>, options.challenge, { handle: account.handle, name: account.name }), options };
-});
-
-<span class="kw">const</span> registerFinish = mutation(<span class="str">"passkey.register.finish"</span>, { access: <span class="str">"public"</span>, args: ceremonyArgs }, (ctx, args) =&gt; {
-  <span class="kw">const</span> { challenge, account } = finish(ctx, args.ceremony, <span class="str">"register"</span>);
-  <span class="kw">const</span> { credential } = webauthn.verifyRegistration(args.response, { challenge, origin: ORIGINS, rpId: RP.id });
-  <span class="kw">if</span> (ctx.get(passkeys, credential.id)) fail(<span class="str">"PASSKEY_EXISTS"</span>, <span class="str">"This passkey is already registered"</span>);
-  <span class="kw">const</span> existing = ctx.get(accounts, account!.name);
-  <span class="kw">if</span> (existing &amp;&amp; existing.handle !== account!.handle) fail(<span class="str">"NAME_TAKEN"</span>, <span class="str">"That name was taken meanwhile"</span>);
-  <span class="kw">if</span> (existing &amp;&amp; ctx.principal()?.subject !== existing.name) fail(<span class="str">"UNAUTHENTICATED"</span>, <span class="str">"Sign in to add a passkey to this account"</span>);
-  <span class="kw">if</span> (!existing) ctx.set(accounts, account!.name, { ...account!, createdAt: ctx.now() });
-  ctx.set(passkeys, credential.id, { account: account!.name, credential, createdAt: ctx.now(), lastUsedAt: <span class="kw">null</span> });
-  <span class="kw">return</span> { account: account!.name, passkey: credential.id, synced: credential.backupState };
-});
-
-<span class="comment">// No allow list: the browser offers every passkey it holds for this site.</span>
-<span class="kw">const</span> signInBegin = mutation(<span class="str">"passkey.signIn.begin"</span>, { access: <span class="str">"public"</span> }, (ctx) =&gt; {
-  <span class="kw">const</span> options = webauthn.authenticationOptions({ rpId: RP.id });
-  <span class="kw">return</span> { ceremony: begin(ctx, <span class="str">"signIn"</span>, options.challenge, <span class="kw">null</span>), options };
-});
-
-<span class="kw">const</span> signInFinish = mutation(<span class="str">"passkey.signIn.finish"</span>, { access: <span class="str">"public"</span>, args: ceremonyArgs }, (ctx, args) =&gt; {
-  <span class="kw">const</span> { challenge } = finish(ctx, args.ceremony, <span class="str">"signIn"</span>);
-  <span class="kw">const</span> id = (args.response <span class="kw">as</span> { id?: <span class="kw">unknown</span> } | <span class="kw">null</span>)?.id;
-  <span class="kw">const</span> passkey = (<span class="kw">typeof</span> id === <span class="str">"string"</span> ? ctx.get(passkeys, id) : <span class="kw">null</span>) ?? fail(<span class="str">"PASSKEY_UNKNOWN"</span>, <span class="str">"This passkey isn't registered here"</span>);
-  <span class="kw">const</span> account = ctx.get(accounts, passkey.account) ?? fail(<span class="str">"ACCOUNT_NOT_FOUND"</span>, <span class="str">"The passkey's account no longer exists"</span>);
-  <span class="kw">const</span> verified = webauthn.verifyAuthentication(args.response, {
-    challenge, origin: ORIGINS, rpId: RP.id, credential: passkey.credential, userHandle: account.handle,
-  });
-  ctx.set(passkeys, passkey.credential.id, {
-    ...passkey, credential: { ...passkey.credential, signCount: verified.signCount, backupState: verified.backupState }, lastUsedAt: ctx.now(),
-  });
-  <span class="kw">const</span> token = base64url.encode(nacl.randomBytes(<span class="num">32</span>));
-  ctx.set(sessions, sessionKey(token), { account: account.name, expiresAt: ctx.now() + SESSION_MS });
-  <span class="kw">return</span> { account: account.name, token };
-});
-
-<span class="kw">const</span> me = query(<span class="str">"account.me"</span>, { access: <span class="str">"authenticated"</span> }, (ctx) =&gt; {
-  <span class="kw">const</span> name = ctx.principal()!.subject;
-  <span class="kw">return</span> {
-    name,
-    passkeys: ctx.query(passkeys.by(<span class="str">"byAccount"</span>).eq(name)).map(({ credential, createdAt, lastUsedAt }) =&gt; ({
-      id: credential.id, synced: credential.backupState, createdAt, lastUsedAt,
-    })),
-  };
-});
-
-<span class="kw">const</span> app = define({
-  uses: [cleanup],
-  collections: [accounts, passkeys, ceremonies, sessions],
-  auth: {
-    authenticate: (ctx, credentials) =&gt; {
-      <span class="kw">if</span> (credentials === <span class="kw">null</span>) <span class="kw">return</span> <span class="kw">null</span>;
-      <span class="kw">const</span> valid = <span class="kw">typeof</span> credentials === <span class="str">"string"</span> &amp;&amp; /^[A-Za-z0-<span class="num">9_</span>-]{<span class="num">43</span>}$/.test(credentials);
-      <span class="kw">const</span> session = valid ? ctx.get(sessions, sessionKey(credentials)) : <span class="kw">null</span>;
-      <span class="kw">if</span> (!session || session.expiresAt &lt;= ctx.now()) fail(<span class="str">"UNAUTHENTICATED"</span>, <span class="str">"Sign in again"</span>);
-      <span class="kw">return</span> { subject: session.account };
-    },
-  },
-  http: {
-    <span class="str">"passkey.register.begin"</span>: registerBegin,
-    <span class="str">"passkey.register.finish"</span>: registerFinish,
-    <span class="str">"passkey.signIn.begin"</span>: signInBegin,
-    <span class="str">"passkey.signIn.finish"</span>: signInFinish,
-    <span class="str">"account.me"</span>: me,
-  },
-});
-<span class="kw">export</span> <span class="kw">default</span> app;</code></pre></div>
+<div class="code-block"><div class="code-head"><span>docs/passkeys.ts</span><button class="copy-button" type="button" aria-label="Copy docs/passkeys.ts">Copy</button></div><pre tabindex="0"><code class="language-ts" data-src="../passkeys.ts"></code></pre></div>
 <ul>
 <li>Set <code>RP.id</code> to your domain and <code>ORIGINS</code> to exactly what browsers report, scheme and port included. An RP ID of <code>example.com</code> also covers its subdomains; list each origin you serve.</li>
 <li>Sign-in offers every passkey the device holds for your site, so nobody types a username. The response’s <code>id</code> picks the stored passkey, and its user handle must match the account.</li>
@@ -185,29 +22,29 @@
 </section>
 <section id="browser">
 <h2>The browser</h2>
-<div class="code-block"><div class="code-head"><span>passkeys-browser.ts</span><button class="copy-button" type="button" aria-label="Copy passkeys-browser.ts">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { FlowerClient } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
-<span class="kw">import</span> <span class="kw">type</span> app <span class="kw">from</span> <span class="str">"./passkeys.ts"</span>;
+<div class="code-block"><div class="code-head"><span>passkeys-browser.ts</span><button class="copy-button" type="button" aria-label="Copy passkeys-browser.ts">Copy</button></div><pre tabindex="0"><code class="language-ts">import { FlowerClient } from "@flower-js/sdk";
+import type app from "./passkeys.ts";
 
-<span class="kw">const</span> url = <span class="str">"https://garden.example"</span>;
-<span class="kw">const</span> client = <span class="kw">new</span> FlowerClient&lt;<span class="kw">typeof</span> app&gt;(url);
+const url = "https://garden.example";
+const client = new FlowerClient&lt;typeof app&gt;(url);
 
-<span class="comment">// Pass a session token to add a passkey to that account instead of opening one.</span>
-<span class="kw">export</span> <span class="kw">async</span> <span class="kw">function</span> register(name: <span class="kw">string</span>, token?: <span class="kw">string</span>) {
-  <span class="kw">const</span> options = token === <span class="kw">undefined</span> ? {} : { credentials: token };
-  <span class="kw">const</span> { value: begun } = <span class="kw">await</span> client.mutate(<span class="str">"passkey.register.begin"</span>, token === <span class="kw">undefined</span> ? { name } : {}, options);
-  <span class="kw">const</span> credential = <span class="kw">await</span> navigator.credentials.create({
+// Pass a session token to add a passkey to that account instead of opening one.
+export async function register(name: string, token?: string) {
+  const options = token === undefined ? {} : { credentials: token };
+  const { value: begun } = await client.mutate("passkey.register.begin", token === undefined ? { name } : {}, options);
+  const credential = await navigator.credentials.create({
     publicKey: PublicKeyCredential.parseCreationOptionsFromJSON(begun.options),
-  }) <span class="kw">as</span> PublicKeyCredential;
-  <span class="kw">return</span> client.mutate(<span class="str">"passkey.register.finish"</span>, { ceremony: begun.ceremony, response: credential.toJSON() }, options);
+  }) as PublicKeyCredential;
+  return client.mutate("passkey.register.finish", { ceremony: begun.ceremony, response: credential.toJSON() }, options);
 }
 
-<span class="kw">export</span> <span class="kw">async</span> <span class="kw">function</span> signIn() {
-  <span class="kw">const</span> { value: begun } = <span class="kw">await</span> client.mutate(<span class="str">"passkey.signIn.begin"</span>);
-  <span class="kw">const</span> credential = <span class="kw">await</span> navigator.credentials.get({
+export async function signIn() {
+  const { value: begun } = await client.mutate("passkey.signIn.begin");
+  const credential = await navigator.credentials.get({
     publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(begun.options),
-  }) <span class="kw">as</span> PublicKeyCredential;
-  <span class="kw">const</span> { value } = <span class="kw">await</span> client.mutate(<span class="str">"passkey.signIn.finish"</span>, { ceremony: begun.ceremony, response: credential.toJSON() });
-  <span class="kw">return</span> <span class="kw">new</span> FlowerClient&lt;<span class="kw">typeof</span> app&gt;(url, { credentials: value.token });
+  }) as PublicKeyCredential;
+  const { value } = await client.mutate("passkey.signIn.finish", { ceremony: begun.ceremony, response: credential.toJSON() });
+  return new FlowerClient&lt;typeof app&gt;(url, { credentials: value.token });
 }</code></pre></div>
 <ul>
 <li><code>parseCreationOptionsFromJSON</code>, <code>parseRequestOptionsFromJSON</code> and <code>toJSON()</code> are in current browsers. For older ones, a converter such as <code>@github/webauthn-json</code> produces the same JSON.</li>
@@ -234,12 +71,3 @@
 <h2>Testing</h2>
 <p>The <a href="testing.html">in-process test database</a> has no native crypto, so run passkey flows against a local cluster. <code>tests/e2e-passkeys.mjs</code> does so with a software authenticator: Node’s crypto makes keys and signatures, and a few lines of CBOR build what a browser would send.</p>
 </section>
-<!-- content:end -->
-</div>
-<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../guide/crypto.html"><small>Previous · Guide</small>Crypto & tokens</a><a rel="next" href="../guide/testing.html"><small>Next · Guide</small>Testing</a></nav>
-</main>
-</div>
-<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/xmit-dev/flower">Source ↗</a></div></div></div>
-<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
-</body>
-</html>

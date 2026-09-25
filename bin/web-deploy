@@ -2,4 +2,5 @@
 set -eu
 
 cd "$(dirname "$0")/.."
-exec xmit flower.xmit.dev docs/
+npm run docs:build
+exec xmit flower.xmit.dev _site/

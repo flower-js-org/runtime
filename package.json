@@ -51,6 +51,9 @@
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test",
     "build": "node scripts/build-sdk.mjs",
+    "docs:build": "node scripts/build-docs.mjs",
+    "docs:check": "node scripts/build-docs.mjs --check",
+    "docs:dev": "eleventy --serve",
     "prepack": "npm run build",
     "check:package": "node scripts/check-package.mjs"
   },
@@ -58,6 +61,7 @@
     "esbuild": "^0.28.2"
   },
   "devDependencies": {
+    "@11ty/eleventy": "^3.1.6",
     "@types/node": "^26.6.2",
     "typescript": "^7.0.2"
   },
@@ -69,7 +73,7 @@
     "type": "git",
     "url": "git+https://github.com/xmit-dev/flower.git"
   },
-  "homepage": "https://flower.js.org",
+  "homepage": "https://flower.xmit.dev",
   "bugs": {
     "url": "https://github.com/xmit-dev/flower/issues"
   },

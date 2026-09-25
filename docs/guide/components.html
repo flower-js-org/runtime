@@ -1,71 +1,44 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#f8f5ec">
-<meta name="description" content="Compose Flower applications from components, background tasks and triggers, and learn how maintenance runs them.">
-<meta property="og:title" content="Components &amp; tasks · Flower">
-<meta property="og:description" content="Compose Flower applications from components, background tasks and triggers, and learn how maintenance runs them.">
-<meta property="og:type" content="website">
-<meta property="og:url" content="https://flower.js.org/guide/components.html">
-<link rel="canonical" href="https://flower.js.org/guide/components.html">
-<title>Components &amp; tasks · Flower</title>
-<link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
-<link rel="stylesheet" href="../site.css?v=fd4ad318734f">
-<script src="../site.js?v=3184f0662fa5" defer></script>
-</head>
-<body class="doc-page">
-<a class="skip-link" href="#main">Skip to content</a>
-<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/" aria-current="page">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/xmit-dev/flower">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
-<div class="documentation">
-<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li class="current"><a href="#top" aria-current="page"><span>04</span>Components & tasks</a><ol id="section-nav" aria-label="On this page"><li><a href="#component">Package parts together</a></li><li><a href="#tasks">Run work in the background</a></li><li><a href="#triggers">React to changed rows</a></li><li><a href="#built-in">Built-in components</a></li></ol></li><li><a href="../guide/methods.html"><span>05</span>Methods & retries</a></li><li><a href="../guide/access.html"><span>06</span>Access control</a></li><li><a href="../guide/reads.html"><span>07</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>08</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>09</span>Queues & expiry</a></li><li><a href="../guide/workers.html"><span>10</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>11</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>12</span>Crypto & tokens</a></li><li><a href="../guide/passkeys.html"><span>13</span>Passkeys</a></li><li><a href="../guide/testing.html"><span>14</span>Testing</a></li><li><a href="../guide/deployments.html"><span>15</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/schemas.html"><span>03</span>Schemas & failures</a></li><li><a href="../reference/definitions.html"><span>04</span>Contexts & definitions</a></li><li><a href="../reference/components.html"><span>05</span>Components & tasks</a></li><li><a href="../reference/client.html"><span>06</span>Client & transports</a></li><li><a href="../reference/time.html"><span>07</span>Queues, expiry & timers</a></li><li><a href="../reference/workers.html"><span>08</span>External values & workers</a></li><li><a href="../reference/testing.html"><span>09</span>Testing</a></li><li><a href="../reference/crypto.html"><span>10</span>Crypto & passkeys</a></li><li><a href="../reference/keys.html"><span>11</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>12</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>13</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>14</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>15</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>16</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
-<main id="main" tabindex="-1">
-<header class="page-intro" id="top"><p class="eyebrow">Guide · 04</p><h1>Build from parts.</h1><p class="lead">A component bundles collections, definitions, background tasks and triggers. Plug it into <code>define({ uses })</code> and it just works.</p></header>
-<div class="page-content">
-<!-- content:start -->
 <p>Most of Flower's helpers are components: the scheduler, work queues, expiring collections and external values. You can write your own the same way, and <code>define</code> puts every part where it belongs.</p>
 <section id="component">
 <h2>Package parts together</h2>
 <p>This component keeps shopping carts. A task deletes carts a day after they open, and a trigger deletes a cart's lines whenever the cart goes, whoever deleted it.</p>
-<div class="code-block"><div class="code-head"><span>carts.ts</span><button type="button" class="copy-button" aria-label="Copy carts.ts">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { collection, component, define, mutation, query, task, trigger, v } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
+<div class="code-block"><div class="code-head"><span>carts.ts</span><button type="button" class="copy-button" aria-label="Copy carts.ts">Copy</button></div><pre tabindex="0"><code class="language-ts">import { collection, component, define, mutation, query, task, trigger, v } from "@flower-js/sdk";
 
-<span class="kw">const</span> DAY = <span class="num">86_400_000</span>;
-<span class="kw">const</span> carts = collection(<span class="str">"carts"</span>, v.object({ openedAt: v.int() })).index(<span class="str">"byOpened"</span>, [<span class="str">"openedAt"</span>]);
-<span class="kw">const</span> lines = collection(<span class="str">"cartLines"</span>, v.object({ quantity: v.int({ min: <span class="num">1</span> }) }))
-  .key(v.tuple([v.<span class="kw">string</span>(), v.<span class="kw">string</span>()])); <span class="comment">// [cart, sku]</span>
+const DAY = 86_400_000;
+const carts = collection("carts", v.object({ openedAt: v.int() })).index("byOpened", ["openedAt"]);
+const lines = collection("cartLines", v.object({ quantity: v.int({ min: 1 }) }))
+  .key(v.tuple([v.string(), v.string()])); // [cart, sku]
 
-<span class="kw">const</span> expire = task(<span class="str">"carts.expire"</span>, {
+const expire = task("carts.expire", {
   due: (ctx) =&gt; {
-    <span class="kw">const</span> oldest = ctx.range(carts.by(<span class="str">"byOpened"</span>).range({ limit: <span class="num">1</span> })).rows[<span class="num">0</span>];
-    <span class="kw">return</span> oldest ? oldest.value.openedAt + DAY : <span class="kw">null</span>;
+    const oldest = ctx.range(carts.by("byOpened").range({ limit: 1 })).rows[0];
+    return oldest ? oldest.value.openedAt + DAY : null;
   },
   run: (ctx) =&gt; {
-    <span class="kw">const</span> stale = ctx.range(carts.by(<span class="str">"byOpened"</span>).range({ lte: ctx.now() - DAY, limit: <span class="num">64</span> })).rows;
-    <span class="kw">for</span> (<span class="kw">const</span> cart <span class="kw">of</span> stale) ctx.<span class="kw">delete</span>(carts, cart.key);
-    <span class="kw">return</span> { expired: stale.length };
+    const stale = ctx.range(carts.by("byOpened").range({ lte: ctx.now() - DAY, limit: 64 })).rows;
+    for (const cart of stale) ctx.delete(carts, cart.key);
+    return { expired: stale.length };
   },
 });
 
-<span class="kw">const</span> cascade = trigger(<span class="str">"carts.cascade"</span>, carts, (ctx, { key, after }) =&gt; {
-  <span class="kw">if</span> (after === <span class="kw">null</span>) <span class="kw">for</span> (<span class="kw">const</span> line <span class="kw">of</span> ctx.scan(lines, { prefix: [key] })) ctx.<span class="kw">delete</span>(lines, line.key);
+const cascade = trigger("carts.cascade", carts, (ctx, { key, after }) =&gt; {
+  if (after === null) for (const line of ctx.scan(lines, { prefix: [key] })) ctx.delete(lines, line.key);
 });
 
-<span class="kw">export</span> <span class="kw">const</span> shoppingCarts = component({ collections: [carts, lines], tasks: [expire], triggers: [cascade] });
+export const shoppingCarts = component({ collections: [carts, lines], tasks: [expire], triggers: [cascade] });
 
-<span class="kw">const</span> add = mutation(<span class="str">"cart.add"</span>, {
-  args: v.object({ cart: v.<span class="kw">string</span>({ min: <span class="num">1</span> }), sku: v.<span class="kw">string</span>({ min: <span class="num">1</span> }), quantity: v.int({ min: <span class="num">1</span> }) }),
+const add = mutation("cart.add", {
+  args: v.object({ cart: v.string({ min: 1 }), sku: v.string({ min: 1 }), quantity: v.int({ min: 1 }) }),
 }, (ctx, { cart, sku, quantity }) =&gt; {
-  <span class="kw">if</span> (!ctx.get(carts, cart)) ctx.set(carts, cart, { openedAt: ctx.now() });
+  if (!ctx.get(carts, cart)) ctx.set(carts, cart, { openedAt: ctx.now() });
   ctx.set(lines, [cart, sku], { quantity });
-  <span class="kw">return</span> <span class="kw">null</span>;
+  return null;
 });
-<span class="kw">const</span> view = query(<span class="str">"cart.view"</span>, { args: v.<span class="kw">string</span>({ min: <span class="num">1</span> }) }, (ctx, cart) =&gt;
-  ctx.scan(lines, { prefix: [cart] }).map(({ key, value }) =&gt; ({ sku: key[<span class="num">1</span>], ...value })));
+const view = query("cart.view", { args: v.string({ min: 1 }) }, (ctx, cart) =&gt;
+  ctx.scan(lines, { prefix: [cart] }).map(({ key, value }) =&gt; ({ sku: key[1], ...value })));
 
-<span class="kw">const</span> app = define({ uses: [shoppingCarts], http: { <span class="str">"cart.add"</span>: add, <span class="str">"cart.view"</span>: view } });
-<span class="kw">export</span> <span class="kw">default</span> app;</code></pre></div>
+const app = define({ uses: [shoppingCarts], http: { "cart.add": add, "cart.view": view } });
+export default app;</code></pre></div>
 <ul>
 <li><code>component({ uses, collections, definitions, tasks, triggers, keys })</code> takes the same parts as <code>define</code>, except <code>http</code> and <code>auth</code>.</li>
 <li><code>define({ uses })</code> gathers every component it reaches, including nested <code>uses</code>. A component reached twice is included once.</li>
@@ -110,12 +83,3 @@
 </tbody></table></div>
 <p>Pass them straight to <code>uses</code>: <code>define({ uses: [timers, jobs, digest] })</code>. Materialization policies are added by <code>define</code> itself.</p>
 </section>
-<!-- content:end -->
-</div>
-<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../guide/reactivity.html"><small>Previous · Guide</small>Reactive values</a><a rel="next" href="../guide/methods.html"><small>Next · Guide</small>Methods & retries</a></nav>
-</main>
-</div>
-<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/xmit-dev/flower">Source ↗</a></div></div></div>
-<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
-</body>
-</html>

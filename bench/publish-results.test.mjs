@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { Histogram, Stats } from "./metrics.mjs";
 import { summarizeGroups } from "./multi-group.mjs";
-import { childPath, publishBenchResults, renderPublishedSummary, replaceSummary } from "../scripts/publish-bench-results.mjs";
+import { childPath, publishBenchResults, renderBenchResults, renderPublishedSummary, replaceSummary } from "../scripts/publish-bench-results.mjs";
 
 function fixture() {
   const stats = new Stats();
@@ -66,7 +66,7 @@ test("public summary leaves missing or empty split latencies unmeasured instead 
   assert.match(html, /No customer writes measurements/);
 });
 
-test("publication requires explicit markers and only reads child JSON within its source directory", () => {
+test("summaries require explicit markers and child JSON stays within its source directory", () => {
   const source = join(tmpdir(), "flower-results", "latest.json");
   for (const path of ["../secret.json", "https://example.com/x.json", "/tmp/secret.json", "group.log", "groups\\secret.json"]) {
     assert.throws(() => childPath(source, path), /relative JSON/);
@@ -98,18 +98,29 @@ test("publication is deterministic, checks child identity, and excludes unrelate
       await writeFile(join(site, page), "<html><!-- latest-benchmark:start --><!-- latest-benchmark:end --></html>");
     }
     const result = await publishBenchResults({ source, site });
-    assert.equal(result.files, 6);
+    assert.equal(result.files, 2);
     const publicSource = join(site, "bench/latest.json");
     const snapshot = await readFile(publicSource, "utf8");
     for (const key of splits) assert.deepEqual(JSON.parse(snapshot).groups[0][key], expectedSplits[key]);
     assert.deepEqual(await publishBenchResults({ source: publicSource, site, check: true }), result);
     await publishBenchResults({ source, site });
     assert.equal(await readFile(publicSource, "utf8"), snapshot);
-    assert.deepEqual((await readdir(join(site, "bench"))).sort(), ["latest-groups", "latest.html", "latest.json"]);
-    assert.match(await readFile(join(site, "bench/latest-groups/group-0.html"), "utf8"), /href="\.\.\/latest.html">All groups/);
-    assert.match(await readFile(join(site, "bench/latest.html"), "utf8"), /href="latest-groups\/group-0.html"/);
-    assert.match(await readFile(join(site, "bench/latest.html"), "utf8"), /class="site-header"[\s\S]*href="\.\.\/reference\/"/);
-    assert.match(await readFile(join(site, "operate/benchmarks.html"), "utf8"), /href="\.\.\/bench\/latest.html"/);
+    assert.deepEqual((await readdir(join(site, "bench"))).sort(), ["latest-groups", "latest.json"]);
+    assert.deepEqual(await readdir(join(site, "bench/latest-groups")), ["group-0.json"]);
+    for (const page of ["index.html", "operate/benchmarks.html"]) {
+      assert.equal(await readFile(join(site, page), "utf8"), "<html><!-- latest-benchmark:start --><!-- latest-benchmark:end --></html>");
+    }
+    const rendered = await renderBenchResults(publicSource);
+    assert.deepEqual(await renderBenchResults(publicSource), rendered);
+    assert.equal(rendered.size, 4);
+    assert.equal(rendered.get("bench/latest.json"), snapshot);
+    assert.match(rendered.get("bench/latest-groups/group-0.html"), /href="\.\.\/latest.html">All groups/);
+    assert.match(rendered.get("bench/latest.html"), /href="latest-groups\/group-0.html"/);
+    assert.match(rendered.get("bench/latest.html"), /class="site-header"[\s\S]*href="\.\.\/reference\/"/);
+    await writeFile(join(site, "bench/latest-groups/group-99.json"), "obsolete");
+    await assert.rejects(publishBenchResults({ source: publicSource, site, check: true }), /Obsolete benchmark measurement/);
+    await publishBenchResults({ source, site });
+    assert.deepEqual(await readdir(join(site, "bench/latest-groups")), ["group-0.json"]);
     aggregate.goodputRps *= 2;
     await writeFile(source, JSON.stringify(aggregate));
     await assert.rejects(publishBenchResults({ source, site }), /throughput must match/);

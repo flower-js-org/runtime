@@ -21,7 +21,7 @@ node scripts/publish-bench-results.mjs bench/results/latest.json
 node scripts/publish-bench-results.mjs --check
 ```
 
-Publication renders self-contained reports and compact JSON under `docs/bench/`, and updates the homepage and field guide. Commit those files to publish through GitHub Pages. The check validates the published artifacts offline; it does not rerun the workload.
+Publication validates and retains compact measurement JSON under `docs/bench/`; commit those source files. The site generator renders the reports and homepage/handbook summaries into `_site/` from that data. Use `bin/web-preview` for live preview or `bin/web-deploy` to build and publish. The check validates the retained measurements offline; it does not rerun the workload.
 
 ## Workload and accounting
 

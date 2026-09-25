@@ -1,5 +1,5 @@
-// Publish a measured multi-group run without copying logs, binaries, or stale
-// renderer output. --check verifies the checked-in public JSON and HTML offline.
+// Retain validated measurements in docs/bench/; Eleventy renders reports at build time.
+// --check verifies the retained JSON offline without rerunning the workload.
 import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -127,9 +127,9 @@ export function siteNavigation(html, child) {
   return result;
 }
 
-export async function publishBenchResults({ source = resolve(root, "bench/results/latest.json"), site = resolve(root, "docs"), check = false } = {}) {
+export async function renderBenchResults(source = resolve(root, "docs/bench/latest.json")) {
   const report = JSON.parse(await readFile(source, "utf8"));
-  const summary = renderPublishedSummary(report);
+  summarizePublishedRun(report);
   const output = new Map();
   const published = structuredClone(report);
   const children = [];
@@ -173,10 +173,11 @@ export async function publishBenchResults({ source = resolve(root, "bench/result
   }
   output.set("bench/latest.json", json(published));
   output.set("bench/latest.html", siteNavigation(renderGroupsReport(published), false));
-  const embeds = [["index.html", summary], ["operate/benchmarks.html", renderPublishedSummary(report, { root: "../", workload: false })]];
-  for (const [file, html] of embeds) {
-    output.set(file, replaceSummary(await readFile(resolve(site, file), "utf8"), html));
-  }
+  return output;
+}
+
+export async function publishBenchResults({ source = resolve(root, "bench/results/latest.json"), site = resolve(root, "docs"), check = false } = {}) {
+  const output = new Map([...(await renderBenchResults(source))].filter(([file]) => file.endsWith(".json")));
   if (check) {
     for (const [file, content] of output) {
       if (await readFile(resolve(site, file), "utf8") !== content) throw new Error(`Published benchmark file is stale: ${file}`);
@@ -186,11 +187,13 @@ export async function publishBenchResults({ source = resolve(root, "bench/result
       await mkdir(dirname(resolve(site, file)), { recursive: true });
       await writeFile(resolve(site, file), content);
     }
-    // This directory belongs to this publisher. Remove only its numbered child
-    // outputs after a run with fewer groups; never walk or copy arbitrary files.
-    const directory = resolve(site, "bench/latest-groups");
-    for (const file of await readdir(directory)) {
-      if (/^group-\d+\.(?:html|json)$/.test(file) && !output.has(`bench/latest-groups/${file}`)) await unlink(resolve(directory, file));
+  }
+  // Remove obsolete measurements after retaining a run with fewer groups.
+  const directory = resolve(site, "bench/latest-groups");
+  for (const file of await readdir(directory)) {
+    if (/^group-\d+\.json$/.test(file) && !output.has(`bench/latest-groups/${file}`)) {
+      if (check) throw new Error(`Obsolete benchmark measurement: ${file}`);
+      await unlink(resolve(directory, file));
     }
   }
   return { files: output.size, bytes: [...output.values()].reduce((sum, content) => sum + Buffer.byteLength(content), 0) };
@@ -203,5 +206,5 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (paths.length > 1 || paths.some((arg) => arg.startsWith("-"))) throw new Error("Usage: node scripts/publish-bench-results.mjs [report.json] [--check]");
   const source = paths[0] ? resolve(paths[0]) : resolve(root, check ? "docs/bench/latest.json" : "bench/results/latest.json");
   const result = await publishBenchResults({ source, check });
-  console.log(`${check ? "Verified" : "Published"} ${result.files} benchmark files and page sections (${number(result.bytes / 1024)} KiB)`);
+  console.log(`${check ? "Verified" : "Retained"} ${result.files} benchmark JSON files (${number(result.bytes / 1024)} KiB)`);
 }

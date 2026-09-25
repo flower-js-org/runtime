@@ -1,61 +1,34 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#f8f5ec">
-<meta name="description" content="Schedule durable callbacks that run application mutations after a deadline.">
-<meta property="og:title" content="Scheduled logic · Flower">
-<meta property="og:description" content="Schedule durable callbacks that run application mutations after a deadline.">
-<meta property="og:type" content="website">
-<meta property="og:url" content="https://flower.js.org/guide/timers.html">
-<link rel="canonical" href="https://flower.js.org/guide/timers.html">
-<title>Scheduled logic · Flower</title>
-<link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
-<link rel="stylesheet" href="../site.css?v=fd4ad318734f">
-<script src="../site.js?v=3184f0662fa5" defer></script>
-</head>
-<body class="doc-page">
-<a class="skip-link" href="#main">Skip to content</a>
-<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/" aria-current="page">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/xmit-dev/flower">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
-<div class="documentation">
-<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/components.html"><span>04</span>Components & tasks</a></li><li><a href="../guide/methods.html"><span>05</span>Methods & retries</a></li><li><a href="../guide/access.html"><span>06</span>Access control</a></li><li><a href="../guide/reads.html"><span>07</span>Reads & live queries</a></li><li class="current"><a href="#top" aria-current="page"><span>08</span>Scheduled logic</a><ol id="section-nav" aria-label="On this page"><li><a href="#timers-survive-closures-do-not">How timers run</a></li></ol></li><li><a href="../guide/leases.html"><span>09</span>Queues & expiry</a></li><li><a href="../guide/workers.html"><span>10</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>11</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>12</span>Crypto & tokens</a></li><li><a href="../guide/passkeys.html"><span>13</span>Passkeys</a></li><li><a href="../guide/testing.html"><span>14</span>Testing</a></li><li><a href="../guide/deployments.html"><span>15</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/schemas.html"><span>03</span>Schemas & failures</a></li><li><a href="../reference/definitions.html"><span>04</span>Contexts & definitions</a></li><li><a href="../reference/components.html"><span>05</span>Components & tasks</a></li><li><a href="../reference/client.html"><span>06</span>Client & transports</a></li><li><a href="../reference/time.html"><span>07</span>Queues, expiry & timers</a></li><li><a href="../reference/workers.html"><span>08</span>External values & workers</a></li><li><a href="../reference/testing.html"><span>09</span>Testing</a></li><li><a href="../reference/crypto.html"><span>10</span>Crypto & passkeys</a></li><li><a href="../reference/keys.html"><span>11</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>12</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>13</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>14</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>15</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>16</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
-<main id="main" tabindex="-1">
-<header class="page-intro" id="top"><p class="eyebrow">Guide · 08</p><h1>Run code later.</h1><p class="lead">Schedule a mutation to run after a deadline. The schedule is saved in the same commit as the change that made it.</p></header>
-<div class="page-content">
-<!-- content:start -->
-<p>This app marks an invoice ready five seconds after its last update. Save it as <code>examples/invoices.ts</code> and deploy it.</p><div class="code-block"><div class="code-head"><span>examples/invoices.ts</span><button type="button" class="copy-button" aria-label="Copy examples/invoices.ts">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { collection, define, mutation, query, v } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
-<span class="kw">import</span> { scheduler } <span class="kw">from</span> <span class="str">"@flower-js/sdk/scheduler"</span>;
+<p>This app marks an invoice ready five seconds after its last update. Save it as <code>examples/invoices.ts</code> and deploy it.</p><div class="code-block"><div class="code-head"><span>examples/invoices.ts</span><button type="button" class="copy-button" aria-label="Copy examples/invoices.ts">Copy</button></div><pre tabindex="0"><code class="language-ts">import { collection, define, mutation, query, v } from "@flower-js/sdk";
+import { scheduler } from "@flower-js/sdk/scheduler";
 
-<span class="kw">const</span> invoiceId = v.<span class="kw">string</span>({ min: <span class="num">1</span> });
-<span class="kw">const</span> invoices = collection(<span class="str">"invoices"</span>, v.object({
-  total: v.int({ min: <span class="num">0</span> }), status: v.enum([<span class="str">"draft"</span>, <span class="str">"ready"</span>]),
+const invoiceId = v.string({ min: 1 });
+const invoices = collection("invoices", v.object({
+  total: v.int({ min: 0 }), status: v.enum(["draft", "ready"]),
 }));
 
-<span class="kw">const</span> finalize = mutation(<span class="str">"internal.invoice.finalize"</span>, { args: invoiceId }, (ctx, id) =&gt; {
-  <span class="kw">const</span> invoice = ctx.get(invoices, id);
-  <span class="kw">if</span> (invoice) ctx.set(invoices, id, { ...invoice, status: <span class="str">"ready"</span> });
-  <span class="kw">return</span> <span class="kw">null</span>;
+const finalize = mutation("internal.invoice.finalize", { args: invoiceId }, (ctx, id) =&gt; {
+  const invoice = ctx.get(invoices, id);
+  if (invoice) ctx.set(invoices, id, { ...invoice, status: "ready" });
+  return null;
 });
-<span class="kw">const</span> timers = scheduler(<span class="str">"invoiceTimers"</span>, { finalize });
+const timers = scheduler("invoiceTimers", { finalize });
 
-<span class="kw">const</span> update = mutation(<span class="str">"internal.invoice.update"</span>, {
-  args: v.object({ id: invoiceId, total: v.int({ min: <span class="num">0</span> }) }),
+const update = mutation("internal.invoice.update", {
+  args: v.object({ id: invoiceId, total: v.int({ min: 0 }) }),
 }, (ctx, { id, total }) =&gt; {
-  ctx.set(invoices, id, { total, status: <span class="str">"draft"</span> });
-  <span class="kw">return</span> timers.after(ctx, <span class="str">`finalize:${id}`</span>, <span class="num">5_000</span>, <span class="str">"finalize"</span>, id);
+  ctx.set(invoices, id, { total, status: "draft" });
+  return timers.after(ctx, `finalize:${id}`, 5_000, "finalize", id);
 });
-<span class="kw">const</span> get = query(<span class="str">"internal.invoice.get"</span>, { args: invoiceId }, (ctx, id) =&gt; ctx.get(invoices, id));
+const get = query("internal.invoice.get", { args: invoiceId }, (ctx, id) =&gt; ctx.get(invoices, id));
 
-<span class="kw">const</span> app = define({
+const app = define({
   uses: [timers],
-  http: { <span class="str">"invoice.update"</span>: update, <span class="str">"invoice.get"</span>: get },
+  http: { "invoice.update": update, "invoice.get": get },
 });
-<span class="kw">export</span> <span class="kw">default</span> app;</code></pre></div><div class="code-block"><div class="code-head"><span>Try the delayed update</span><button type="button" class="copy-button" aria-label="Copy Try the delayed update">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">node</span> sdk/cli.ts deploy examples/invoices.ts
-<span class="kw">node</span> sdk/cli.ts call invoice.update <span class="str">'{"id":"inv-1","total":2400}'</span> \
-  <span class="var">--request-id</span> invoice<span class="var">-edit-1</span>
-<span class="kw">node</span> sdk/cli.ts watch invoice.get <span class="str">'"inv-1"'</span></code></pre></div>
+export default app;</code></pre></div><div class="code-block"><div class="code-head"><span>Try the delayed update</span><button type="button" class="copy-button" aria-label="Copy Try the delayed update">Copy</button></div><pre tabindex="0"><code class="language-sh">node sdk/cli.ts deploy examples/invoices.ts
+node sdk/cli.ts call invoice.update '{"id":"inv-1","total":2400}' \
+  --request-id invoice-edit-1
+node sdk/cli.ts watch invoice.get '"inv-1"'</code></pre></div>
 <ul>
 <li><code>uses: [timers]</code> adds the timer collection and the task that runs due timers.</li>
 <li>Handler names and arguments are type-checked against the handlers you passed. The handler's schema checks the arguments when you schedule (<code>INVALID_ARGUMENT</code>) and again when the timer runs.</li>
@@ -74,12 +47,3 @@
 <div class="note"><span class="note-mark" aria-hidden="true">◷</span><p><strong>A deadline means “not before.”</strong> Load, elections or lost quorum can delay it. Its changes commit once, but it may be evaluated more than once, so send external side effects through a <a href="leases.html">queue</a>.</p></div>
 <p>In tests, <code>db.advance(5_000)</code> moves the clock and runs due timers; see <a href="testing.html#time">Testing</a>. For background work that isn't tied to one deadline, write a <a href="components.html#tasks">task</a>. <a href="https://github.com/xmit-dev/flower/blob/main/examples/scheduling.ts"><code>examples/scheduling.ts</code></a> is a fuller timer app.</p>
 </section>
-<!-- content:end -->
-</div>
-<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../guide/reads.html"><small>Previous · Guide</small>Reads & live queries</a><a rel="next" href="../guide/leases.html"><small>Next · Guide</small>Queues & expiry</a></nav>
-</main>
-</div>
-<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/xmit-dev/flower">Source ↗</a></div></div></div>
-<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
-</body>
-</html>

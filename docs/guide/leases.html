@@ -1,63 +1,36 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#f8f5ec">
-<meta name="description" content="Queue jobs with leases, retries and fencing for external workers, and expire records, with ordinary TypeScript components.">
-<meta property="og:title" content="Queues &amp; expiry · Flower">
-<meta property="og:description" content="Queue jobs with leases, retries and fencing for external workers, and expire records, with ordinary TypeScript components.">
-<meta property="og:type" content="website">
-<meta property="og:url" content="https://flower.js.org/guide/leases.html">
-<link rel="canonical" href="https://flower.js.org/guide/leases.html">
-<title>Queues &amp; expiry · Flower</title>
-<link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
-<link rel="stylesheet" href="../site.css?v=fd4ad318734f">
-<script src="../site.js?v=3184f0662fa5" defer></script>
-</head>
-<body class="doc-page">
-<a class="skip-link" href="#main">Skip to content</a>
-<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/" aria-current="page">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/xmit-dev/flower">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
-<div class="documentation">
-<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/components.html"><span>04</span>Components & tasks</a></li><li><a href="../guide/methods.html"><span>05</span>Methods & retries</a></li><li><a href="../guide/access.html"><span>06</span>Access control</a></li><li><a href="../guide/reads.html"><span>07</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>08</span>Scheduled logic</a></li><li class="current"><a href="#top" aria-current="page"><span>09</span>Queues & expiry</a><ol id="section-nav" aria-label="On this page"><li><a href="#claim-work-complete-or-fail">Queue jobs</a></li><li><a href="#leases">Leases &amp; retries</a></li><li><a href="#expiry-is-a-read-rule">Let records expire</a></li></ol></li><li><a href="../guide/workers.html"><span>10</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>11</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>12</span>Crypto & tokens</a></li><li><a href="../guide/passkeys.html"><span>13</span>Passkeys</a></li><li><a href="../guide/testing.html"><span>14</span>Testing</a></li><li><a href="../guide/deployments.html"><span>15</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/schemas.html"><span>03</span>Schemas & failures</a></li><li><a href="../reference/definitions.html"><span>04</span>Contexts & definitions</a></li><li><a href="../reference/components.html"><span>05</span>Components & tasks</a></li><li><a href="../reference/client.html"><span>06</span>Client & transports</a></li><li><a href="../reference/time.html"><span>07</span>Queues, expiry & timers</a></li><li><a href="../reference/workers.html"><span>08</span>External values & workers</a></li><li><a href="../reference/testing.html"><span>09</span>Testing</a></li><li><a href="../reference/crypto.html"><span>10</span>Crypto & passkeys</a></li><li><a href="../reference/keys.html"><span>11</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>12</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>13</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>14</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>15</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>16</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
-<main id="main" tabindex="-1">
-<header class="page-intro" id="top"><p class="eyebrow">Guide · 09</p><h1>Hand out work. Let records expire.</h1><p class="lead">Queue jobs for workers, with leases, retries and delays, and let old records disappear. Both are components written in plain TypeScript.</p></header>
-<div class="page-content">
-<!-- content:start -->
 <p>A queue gives each job to one worker at a time, retries failures with backoff, and rejects results from workers that lost their lease. An expiring collection hides records after a deadline. Both are <a href="components.html">components</a>. For worker design, see <a href="workers.html">External workers</a>.</p>
 <section id="claim-work-complete-or-fail" data-toc="Queue jobs">
 <h2>Queue jobs in the same commit</h2>
 <p>Enqueue in the mutation that creates the obligation. Here, a paid invoice always has its receipt job, because both commit together.</p>
-<div class="code-block"><div class="code-head"><span>receipts.ts</span><button type="button" class="copy-button" aria-label="Copy receipts.ts">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { collection, define, fail, mutation, v } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
-<span class="kw">import</span> { queue } <span class="kw">from</span> <span class="str">"@flower-js/sdk/temporal"</span>;
+<div class="code-block"><div class="code-head"><span>receipts.ts</span><button type="button" class="copy-button" aria-label="Copy receipts.ts">Copy</button></div><pre tabindex="0"><code class="language-ts">import { collection, define, fail, mutation, v } from "@flower-js/sdk";
+import { queue } from "@flower-js/sdk/temporal";
 
-<span class="kw">const</span> invoices = collection(<span class="str">"invoices"</span>, v.object({ email: v.<span class="kw">string</span>(), paid: v.<span class="kw">boolean</span>() }));
-<span class="kw">const</span> receipts = queue(<span class="str">"receipts"</span>, {
-  payload: v.object({ invoice: v.<span class="kw">string</span>(), email: v.<span class="kw">string</span>() }),
-  lease: { defaultMs: <span class="num">10_000</span>, maxMs: <span class="num">60_000</span> },
-  retry: { maxAttempts: <span class="num">5</span>, initialDelayMs: <span class="num">1_000</span>, maxDelayMs: <span class="num">60_000</span> },
+const invoices = collection("invoices", v.object({ email: v.string(), paid: v.boolean() }));
+const receipts = queue("receipts", {
+  payload: v.object({ invoice: v.string(), email: v.string() }),
+  lease: { defaultMs: 10_000, maxMs: 60_000 },
+  retry: { maxAttempts: 5, initialDelayMs: 1_000, maxDelayMs: 60_000 },
 });
 
-<span class="kw">const</span> pay = mutation(<span class="str">"invoice.pay"</span>, { args: v.<span class="kw">string</span>({ min: <span class="num">1</span> }) }, (ctx, id) =&gt; {
-  <span class="kw">const</span> invoice = ctx.get(invoices, id) ?? fail(<span class="str">"INVOICE_NOT_FOUND"</span>, <span class="str">`No invoice ${id}`</span>);
-  <span class="kw">if</span> (invoice.paid) <span class="kw">return</span> <span class="kw">null</span>;
-  ctx.set(invoices, id, { ...invoice, paid: <span class="kw">true</span> });
-  receipts.enqueue(ctx, <span class="str">`receipt:${id}`</span>, { invoice: id, email: invoice.email });
-  <span class="kw">return</span> <span class="kw">null</span>;
+const pay = mutation("invoice.pay", { args: v.string({ min: 1 }) }, (ctx, id) =&gt; {
+  const invoice = ctx.get(invoices, id) ?? fail("INVOICE_NOT_FOUND", `No invoice ${id}`);
+  if (invoice.paid) return null;
+  ctx.set(invoices, id, { ...invoice, paid: true });
+  receipts.enqueue(ctx, `receipt:${id}`, { invoice: id, email: invoice.email });
+  return null;
 });
 
-<span class="kw">const</span> app = define({
+const app = define({
   uses: [receipts],
-  http: { <span class="str">"invoice.pay"</span>: pay, ...receipts.http(<span class="str">"receipts"</span>) },
+  http: { "invoice.pay": pay, ...receipts.http("receipts") },
 });
-<span class="kw">export</span> <span class="kw">default</span> app;</code></pre></div>
-<div class="code-block"><div class="code-head"><span>A worker process</span><button type="button" class="copy-button" aria-label="Copy A worker process">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">await</span> runQueueWorker&lt;{ invoice: <span class="kw">string</span>; email: <span class="kw">string</span> }&gt;(client, {
-  queue: <span class="str">"receipts"</span>,
+export default app;</code></pre></div>
+<div class="code-block"><div class="code-head"><span>A worker process</span><button type="button" class="copy-button" aria-label="Copy A worker process">Copy</button></div><pre tabindex="0"><code class="language-ts">await runQueueWorker&lt;{ invoice: string; email: string }&gt;(client, {
+  queue: "receipts",
   signal: shutdown.signal,
-  work: <span class="kw">async</span> (job, signal) =&gt; {
-    <span class="kw">await</span> mailer.send(job.payload.email, { idempotencyKey: job.id, signal });
-    <span class="kw">return</span> { sent: <span class="kw">true</span> };
+  work: async (job, signal) =&gt; {
+    await mailer.send(job.payload.email, { idempotencyKey: job.id, signal });
+    return { sent: true };
   },
 });</code></pre></div>
 <ul>
@@ -82,17 +55,17 @@
 </section>
 <section id="expiry-is-a-read-rule">
 <h2>Let records expire</h2>
-<div class="code-block"><div class="code-head"><span>sessions.ts</span><button type="button" class="copy-button" aria-label="Copy sessions.ts">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { define, mutation, v } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
-<span class="kw">import</span> { expiringCollection } <span class="kw">from</span> <span class="str">"@flower-js/sdk/temporal"</span>;
+<div class="code-block"><div class="code-head"><span>sessions.ts</span><button type="button" class="copy-button" aria-label="Copy sessions.ts">Copy</button></div><pre tabindex="0"><code class="language-ts">import { define, mutation, v } from "@flower-js/sdk";
+import { expiringCollection } from "@flower-js/sdk/temporal";
 
-<span class="kw">const</span> sessions = expiringCollection(<span class="str">"sessions"</span>, {
-  expiration: { afterUpdateMs: <span class="num">60_000</span> },
-  value: v.object({ user: v.<span class="kw">string</span>() }),
+const sessions = expiringCollection("sessions", {
+  expiration: { afterUpdateMs: 60_000 },
+  value: v.object({ user: v.string() }),
 });
-<span class="kw">const</span> touch = mutation(<span class="str">"session.touch"</span>, { args: v.<span class="kw">string</span>({ min: <span class="num">1</span> }) }, (ctx, id) =&gt;
-  sessions.set(ctx, id, sessions.get(ctx, id) ?? { user: <span class="str">"guest"</span> }));
+const touch = mutation("session.touch", { args: v.string({ min: 1 }) }, (ctx, id) =&gt;
+  sessions.set(ctx, id, sessions.get(ctx, id) ?? { user: "guest" }));
 
-<span class="kw">export</span> <span class="kw">default</span> define({ uses: [sessions], http: { <span class="str">"session.touch"</span>: touch } });</code></pre></div>
+export default define({ uses: [sessions], http: { "session.touch": touch } });</code></pre></div>
 <p>A record is hidden once <code>ctx.now() &gt;= expiresAt</code>, and a maintenance task deletes it soon after. <code>entry</code> returns the value with its timestamps.</p>
 <div class="table-wrap"><table><caption class="sr-only">Expiration policies</caption><thead><tr><th>Policy passed to <code>set</code></th><th>Meaning</th></tr></thead><tbody><tr><td><code>{ afterCreationMs: 10_000 }</code></td><td>Expires from its original live creation time.</td></tr><tr><td><code>{ afterUpdateMs: 60_000 }</code></td><td>Restarts the lifetime on each update.</td></tr><tr><td><code>{ at: epochMilliseconds }</code></td><td>Uses an absolute deadline chosen by your code.</td></tr><tr><td><code>null</code></td><td>Does not expire.</td></tr></tbody></table></div>
 <ul>
@@ -101,12 +74,3 @@
 <li>Keep node clocks in sync. <code>ctx.now()</code> is fixed per evaluation, and commit time counts against leases and lifetimes.</li>
 </ul>
 </section>
-<!-- content:end -->
-</div>
-<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../guide/timers.html"><small>Previous · Guide</small>Scheduled logic</a><a rel="next" href="../guide/workers.html"><small>Next · Guide</small>External workers</a></nav>
-</main>
-</div>
-<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/xmit-dev/flower">Source ↗</a></div></div></div>
-<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
-</body>
-</html>

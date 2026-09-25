@@ -1,30 +1,3 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#f8f5ec">
-<meta name="description" content="Reference for Flower schemas (v), validation errors, fail() and the built-in failure codes.">
-<meta property="og:title" content="Schemas &amp; failures · Flower">
-<meta property="og:description" content="Reference for Flower schemas (v), validation errors, fail() and the built-in failure codes.">
-<meta property="og:type" content="website">
-<meta property="og:url" content="https://flower.js.org/reference/schemas.html">
-<link rel="canonical" href="https://flower.js.org/reference/schemas.html">
-<title>Schemas &amp; failures · Flower</title>
-<link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
-<link rel="stylesheet" href="../site.css?v=fd4ad318734f">
-<script src="../site.js?v=3184f0662fa5" defer></script>
-</head>
-<body class="doc-page">
-<a class="skip-link" href="#main">Skip to content</a>
-<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/" aria-current="page">Reference</a><a class="site-repository" href="https://github.com/xmit-dev/flower">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
-<div class="documentation">
-<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/components.html"><span>04</span>Components & tasks</a></li><li><a href="../guide/methods.html"><span>05</span>Methods & retries</a></li><li><a href="../guide/access.html"><span>06</span>Access control</a></li><li><a href="../guide/reads.html"><span>07</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>08</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>09</span>Queues & expiry</a></li><li><a href="../guide/workers.html"><span>10</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>11</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>12</span>Crypto & tokens</a></li><li><a href="../guide/passkeys.html"><span>13</span>Passkeys</a></li><li><a href="../guide/testing.html"><span>14</span>Testing</a></li><li><a href="../guide/deployments.html"><span>15</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li class="current"><a href="#top" aria-current="page"><span>03</span>Schemas & failures</a><ol id="section-nav" aria-label="On this page"><li><a href="#schemas">Schemas</a></li><li><a href="#failures">fail()</a></li><li><a href="#codes">Built-in codes</a></li></ol></li><li><a href="../reference/definitions.html"><span>04</span>Contexts & definitions</a></li><li><a href="../reference/components.html"><span>05</span>Components & tasks</a></li><li><a href="../reference/client.html"><span>06</span>Client & transports</a></li><li><a href="../reference/time.html"><span>07</span>Queues, expiry & timers</a></li><li><a href="../reference/workers.html"><span>08</span>External values & workers</a></li><li><a href="../reference/testing.html"><span>09</span>Testing</a></li><li><a href="../reference/crypto.html"><span>10</span>Crypto & passkeys</a></li><li><a href="../reference/keys.html"><span>11</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>12</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>13</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>14</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>15</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>16</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Clear contracts.<br>Honest limits.<br>Room to grow.</p></div></aside>
-<main id="main" tabindex="-1">
-<header class="page-intro" id="top"><p class="eyebrow">Reference · 03</p><h1>Schemas and failures.</h1><p class="lead">Validators whose types flow into methods, records and clients, and the structured failures callers receive.</p></header>
-<div class="page-content">
-<!-- content:start -->
 <section id="schemas" data-toc="Schemas">
 <h2>Schemas</h2>
 <p><code>v</code> builds runtime validators. Their types flow into method arguments, records, keys, queue payloads and clients. Import it from <code>@flower-js/sdk</code>.</p>
@@ -55,16 +28,16 @@
 <tr><th scope="row"><code data-api-symbol="ValidationError">ValidationError</code></th><td>Thrown by <code>parse</code>: an <code>Error</code> with <code>reason</code> (such as <code>must be at most 4</code>), <code>path</code>, and a message that joins them: <code>lines[0].quantity: must be at most 4</code>.</td></tr>
 <tr><th scope="row"><code data-api-symbol="SchemaPath">SchemaPath</code></th><td><code>readonly (string | number)[]</code>: property names and array indexes from the root.</td></tr>
 </tbody></table></div>
-<div class="code-block"><div class="code-head"><span>Schemas outside methods</span><button class="copy-button" type="button" aria-label="Copy Schemas outside methods">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { v, ValidationError, <span class="kw">type</span> Infer } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
+<div class="code-block"><div class="code-head"><span>Schemas outside methods</span><button class="copy-button" type="button" aria-label="Copy Schemas outside methods">Copy</button></div><pre tabindex="0"><code class="language-ts">import { v, ValidationError, type Infer } from "@flower-js/sdk";
 
-<span class="kw">const</span> topping = v.enum([<span class="str">"mushroom"</span>, <span class="str">"olive"</span>, <span class="str">"basil"</span>]);
-<span class="kw">const</span> pizza = v.object({ size: v.int({ min: <span class="num">20</span>, max: <span class="num">40</span> }), toppings: v.array(topping, { max: <span class="num">5</span> }) });
-<span class="kw">type</span> Pizza = Infer&lt;<span class="kw">typeof</span> pizza&gt;; <span class="comment">// { size: number; toppings: ("mushroom" | "olive" | "basil")[] }</span>
+const topping = v.enum(["mushroom", "olive", "basil"]);
+const pizza = v.object({ size: v.int({ min: 20, max: 40 }), toppings: v.array(topping, { max: 5 }) });
+type Pizza = Infer&lt;typeof pizza&gt;; // { size: number; toppings: ("mushroom" | "olive" | "basil")[] }
 
-<span class="kw">try</span> {
-  pizza.parse({ size: <span class="num">30</span>, toppings: [<span class="str">"pineapple"</span>] });
-} <span class="kw">catch</span> (error) {
-  <span class="kw">if</span> (error <span class="kw">instanceof</span> ValidationError) console.log(error.message); <span class="comment">// toppings[0]: must be one of "mushroom", "olive", "basil"</span>
+try {
+  pizza.parse({ size: 30, toppings: ["pineapple"] });
+} catch (error) {
+  if (error instanceof ValidationError) console.log(error.message); // toppings[0]: must be one of "mushroom", "olive", "basil"
 }</code></pre></div>
 <ul>
 <li>Schemas check values; they never transform them. <code>parse</code> returns its input.</li>
@@ -98,12 +71,3 @@
 <tr><th scope="row"><code>UNDECLARED_INDEX</code></th><td>Test databases only: an index read on an undeclared index. See <a href="testing.html">Testing</a>.</td></tr>
 </tbody></table></div>
 </section>
-<!-- content:end -->
-</div>
-<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../reference/data.html"><small>Previous · Reference</small>Values & collections</a><a rel="next" href="../reference/definitions.html"><small>Next · Reference</small>Contexts & definitions</a></nav>
-</main>
-</div>
-<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/xmit-dev/flower">Source ↗</a></div></div></div>
-<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
-</body>
-</html>

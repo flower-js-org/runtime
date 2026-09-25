@@ -1,71 +1,44 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#f8f5ec">
-<meta name="description" content="Define collections, schemas, derived values, queries and mutations, fail with structured errors, and choose which methods are public.">
-<meta property="og:title" content="Applications · Flower">
-<meta property="og:description" content="Define collections, schemas, derived values, queries and mutations, fail with structured errors, and choose which methods are public.">
-<meta property="og:type" content="website">
-<meta property="og:url" content="https://flower.js.org/guide/applications.html">
-<link rel="canonical" href="https://flower.js.org/guide/applications.html">
-<title>Applications · Flower</title>
-<link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
-<link rel="stylesheet" href="../site.css?v=fd4ad318734f">
-<script src="../site.js?v=3184f0662fa5" defer></script>
-</head>
-<body class="doc-page">
-<a class="skip-link" href="#main">Skip to content</a>
-<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/" aria-current="page">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/xmit-dev/flower">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
-<div class="documentation">
-<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li class="current"><a href="#top" aria-current="page"><span>02</span>Applications</a><ol id="section-nav" aria-label="On this page"><li><a href="#example">A complete example</a></li><li><a href="#schemas">Check inputs with schemas</a></li><li><a href="#keys">Typed keys and indexes</a></li><li><a href="#failures">Fail with a code</a></li><li><a href="#a-small-context-ordinary-typescript">The context</a></li><li><a href="#reuse-initialized-application-snapshots">Module setup</a></li></ol></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/components.html"><span>04</span>Components & tasks</a></li><li><a href="../guide/methods.html"><span>05</span>Methods & retries</a></li><li><a href="../guide/access.html"><span>06</span>Access control</a></li><li><a href="../guide/reads.html"><span>07</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>08</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>09</span>Queues & expiry</a></li><li><a href="../guide/workers.html"><span>10</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>11</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>12</span>Crypto & tokens</a></li><li><a href="../guide/passkeys.html"><span>13</span>Passkeys</a></li><li><a href="../guide/testing.html"><span>14</span>Testing</a></li><li><a href="../guide/deployments.html"><span>15</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/schemas.html"><span>03</span>Schemas & failures</a></li><li><a href="../reference/definitions.html"><span>04</span>Contexts & definitions</a></li><li><a href="../reference/components.html"><span>05</span>Components & tasks</a></li><li><a href="../reference/client.html"><span>06</span>Client & transports</a></li><li><a href="../reference/time.html"><span>07</span>Queues, expiry & timers</a></li><li><a href="../reference/workers.html"><span>08</span>External values & workers</a></li><li><a href="../reference/testing.html"><span>09</span>Testing</a></li><li><a href="../reference/crypto.html"><span>10</span>Crypto & passkeys</a></li><li><a href="../reference/keys.html"><span>11</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>12</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>13</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>14</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>15</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>16</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
-<main id="main" tabindex="-1">
-<header class="page-intro" id="top"><p class="eyebrow">Guide · 02</p><h1>Your code is the API.</h1><p class="lead">An app is collections of JSON records, values derived from them, and methods that read or change them. Schemas check what comes in; only the methods you list are public.</p></header>
-<div class="page-content">
-<!-- content:start -->
 <p>An application is one TypeScript module built from three pieces:</p>
 <div class="definition-grid"><article><span class="small-label">SOURCE</span><h3>collection</h3><p>Named JSON records. An optional schema checks every write.</p></article><article><span class="small-label">DEPENDENCY</span><h3>derive</h3><p>A synchronous function of records and other derived values. Always private.</p></article><article><span class="small-label">BOUNDARY</span><h3>query / mutation</h3><p>Read a snapshot, or make one atomic change. Public only if you list it in <code>http</code>.</p></article></div>
 <section id="example">
 <h2>A complete example</h2>
 <p>Save this as <code>examples/counter.ts</code>:</p>
-<div class="code-block"><div class="code-head"><span>examples/counter.ts</span><button type="button" class="copy-button" aria-label="Copy examples/counter.ts">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { collection, define, derive, fail, mutation, query, v } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
+<div class="code-block"><div class="code-head"><span>examples/counter.ts</span><button type="button" class="copy-button" aria-label="Copy examples/counter.ts">Copy</button></div><pre tabindex="0"><code class="language-ts">import { collection, define, derive, fail, mutation, query, v } from "@flower-js/sdk";
 
-<span class="kw">const</span> counterId = v.<span class="kw">string</span>({ min: <span class="num">1</span>, max: <span class="num">64</span> });
-<span class="kw">const</span> counters = collection(<span class="str">"counters"</span>, v.int({ min: <span class="num">0</span> }));
+const counterId = v.string({ min: 1, max: 64 });
+const counters = collection("counters", v.int({ min: 0 }));
 
-<span class="kw">const</span> doubled = derive(<span class="str">"counter.doubled"</span>, (ctx, id: <span class="kw">string</span>) =&gt;
-  (ctx.get(counters, id) ?? <span class="num">0</span>) * <span class="num">2</span>,
+const doubled = derive("counter.doubled", (ctx, id: string) =&gt;
+  (ctx.get(counters, id) ?? 0) * 2,
 );
 
-<span class="kw">const</span> increment = mutation(<span class="str">"internal.counter.increment"</span>, {
-  args: v.object({ id: counterId, by: v.int({ min: <span class="num">1</span>, max: <span class="num">10</span> }) }),
+const increment = mutation("internal.counter.increment", {
+  args: v.object({ id: counterId, by: v.int({ min: 1, max: 10 }) }),
 }, (ctx, { id, by }) =&gt; {
-  <span class="kw">const</span> count = (ctx.get(counters, id) ?? <span class="num">0</span>) + by;
-  <span class="kw">if</span> (count &gt; <span class="num">1_000</span>) fail(<span class="str">"COUNTER_FULL"</span>, <span class="str">"Counters stop at 1,000"</span>, { count });
+  const count = (ctx.get(counters, id) ?? 0) + by;
+  if (count &gt; 1_000) fail("COUNTER_FULL", "Counters stop at 1,000", { count });
   ctx.set(counters, id, count);
   ctx.materialize(doubled, id);
-  <span class="kw">return</span> ctx.get(doubled, id); <span class="comment">// Includes the write above.</span>
+  return ctx.get(doubled, id); // Includes the write above.
 });
 
-<span class="kw">const</span> get = query(<span class="str">"internal.counter.get"</span>, { args: counterId }, (ctx, id) =&gt; ({
-  count: ctx.get(counters, id) ?? <span class="num">0</span>,
+const get = query("internal.counter.get", { args: counterId }, (ctx, id) =&gt; ({
+  count: ctx.get(counters, id) ?? 0,
   doubled: ctx.get(doubled, id),
 }));
 
-<span class="kw">const</span> app = define({
+const app = define({
   definitions: [doubled],
-  http: { <span class="str">"counter.increment"</span>: increment, <span class="str">"counter.get"</span>: get },
+  http: { "counter.increment": increment, "counter.get": get },
 });
-<span class="kw">export</span> <span class="kw">default</span> app;</code></pre></div>
+export default app;</code></pre></div>
 <p>Deploy it and call it:</p>
-<div class="code-block"><div class="code-head"><span>Deploy and call</span><button type="button" class="copy-button" aria-label="Copy Deploy and call">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">node</span> sdk/cli.ts deploy examples/counter.ts
-<span class="kw">node</span> sdk/cli.ts call counter.increment <span class="str">'{"id":"visits","by":1}'</span> <span class="var">--request-id</span> visit-<span class="num">001</span>
-<span class="kw">node</span> sdk/cli.ts call counter.get <span class="str">'"visits"'</span>
-<span class="comment"># value: { count: 1, doubled: 2 }</span>
-<span class="kw">node</span> sdk/cli.ts call counter.increment <span class="str">'{"id":"visits","by":0}'</span>
-<span class="comment"># flower: INVALID_ARGUMENT: by: must be at least 1 {"path":["by"]}</span></code></pre></div>
+<div class="code-block"><div class="code-head"><span>Deploy and call</span><button type="button" class="copy-button" aria-label="Copy Deploy and call">Copy</button></div><pre tabindex="0"><code class="language-sh">node sdk/cli.ts deploy examples/counter.ts
+node sdk/cli.ts call counter.increment '{"id":"visits","by":1}' --request-id visit-001
+node sdk/cli.ts call counter.get '"visits"'
+# value: { count: 1, doubled: 2 }
+node sdk/cli.ts call counter.increment '{"id":"visits","by":0}'
+# flower: INVALID_ARGUMENT: by: must be at least 1 {"path":["by"]}</code></pre></div>
 <ul>
 <li>Only aliases listed in <code>http</code> are public. Everything else stays private.</li>
 <li>Aliases don't have to match internal names. Each deploy replaces the whole list.</li>
@@ -76,16 +49,16 @@
 <section id="schemas">
 <h2>Check inputs with schemas</h2>
 <p>Pass <code>args</code> to a method and Flower checks every call before your code runs. The argument type comes from the schema, so there's nothing to annotate.</p>
-<div class="code-block"><div class="code-head"><span>A schema for method arguments</span><button type="button" class="copy-button" aria-label="Copy A schema for method arguments">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">const</span> line = v.object({
-  sku: v.<span class="kw">string</span>({ pattern: /^[A-Z0-<span class="num">9</span>-]{<span class="num">3</span>,<span class="num">32</span>}$/ }),
-  quantity: v.int({ min: <span class="num">1</span>, max: <span class="num">99</span> }),
-  note: v.optional(v.<span class="kw">string</span>({ max: <span class="num">200</span> })),
+<div class="code-block"><div class="code-head"><span>A schema for method arguments</span><button type="button" class="copy-button" aria-label="Copy A schema for method arguments">Copy</button></div><pre tabindex="0"><code class="language-ts">const line = v.object({
+  sku: v.string({ pattern: /^[A-Z0-9-]{3,32}$/ }),
+  quantity: v.int({ min: 1, max: 99 }),
+  note: v.optional(v.string({ max: 200 })),
 });
-<span class="kw">const</span> place = mutation(<span class="str">"order.place"</span>, {
-  args: v.object({ id: v.<span class="kw">string</span>({ min: <span class="num">1</span> }), lines: v.array(line, { min: <span class="num">1</span>, max: <span class="num">50</span> }) }),
+const place = mutation("order.place", {
+  args: v.object({ id: v.string({ min: 1 }), lines: v.array(line, { min: 1, max: 50 }) }),
 }, (ctx, order) =&gt; {
-  <span class="comment">// order: { id: string; lines: { sku: string; quantity: number; note?: string }[] }</span>
-  <span class="kw">return</span> order.lines.length;
+  // order: { id: string; lines: { sku: string; quantity: number; note?: string }[] }
+  return order.lines.length;
 });</code></pre></div>
 <ul>
 <li>A bad call fails with <code>INVALID_ARGUMENT</code>, a readable message such as <code>lines[0].quantity: must be at least 1</code>, and <code>details: { path }</code>. Nothing runs.</li>
@@ -99,18 +72,18 @@
 <section id="keys">
 <h2>Typed keys and indexes</h2>
 <p>Keys are strings unless you give the collection a key schema. Tuple keys keep related records together, and indexes find records by field.</p>
-<div class="code-block"><div class="code-head"><span>Tuple keys and a typed index</span><button type="button" class="copy-button" aria-label="Copy Tuple keys and a typed index">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">const</span> orders = collection(<span class="str">"orders"</span>, v.object({
-  shop: v.<span class="kw">string</span>(), status: v.enum([<span class="str">"open"</span>, <span class="str">"paid"</span>]), cents: v.int({ min: <span class="num">0</span> }),
+<div class="code-block"><div class="code-head"><span>Tuple keys and a typed index</span><button type="button" class="copy-button" aria-label="Copy Tuple keys and a typed index">Copy</button></div><pre tabindex="0"><code class="language-ts">const orders = collection("orders", v.object({
+  shop: v.string(), status: v.enum(["open", "paid"]), cents: v.int({ min: 0 }),
 }))
-  .key(v.tuple([v.<span class="kw">string</span>(), v.<span class="kw">string</span>()])) <span class="comment">// [tenant, orderId]</span>
-  .index(<span class="str">"byShopStatus"</span>, [<span class="str">"shop"</span>, <span class="str">"status"</span>]);
+  .key(v.tuple([v.string(), v.string()])) // [tenant, orderId]
+  .index("byShopStatus", ["shop", "status"]);
 
-<span class="kw">const</span> openOrders = query(<span class="str">"orders.open"</span>, { args: v.<span class="kw">string</span>() }, (ctx, shop) =&gt;
-  ctx.query(orders.by(<span class="str">"byShopStatus"</span>).eq([shop, <span class="str">"open"</span>])));
-<span class="kw">const</span> tenantOrders = query(<span class="str">"orders.tenant"</span>, { args: v.<span class="kw">string</span>() }, (ctx, tenant) =&gt;
-  ctx.scan(orders, { prefix: [tenant] })); <span class="comment">// [{ key: [tenant, id], value }]</span>
+const openOrders = query("orders.open", { args: v.string() }, (ctx, shop) =&gt;
+  ctx.query(orders.by("byShopStatus").eq([shop, "open"])));
+const tenantOrders = query("orders.tenant", { args: v.string() }, (ctx, tenant) =&gt;
+  ctx.scan(orders, { prefix: [tenant] })); // [{ key: [tenant, id], value }]
 
-<span class="kw">export</span> <span class="kw">default</span> define({ collections: [orders], http: { openOrders, tenantOrders } });</code></pre></div>
+export default define({ collections: [orders], http: { openOrders, tenantOrders } });</code></pre></div>
 <ul>
 <li><code>.key()</code> and <code>.index()</code> each return a new reference. Chain them where you declare the collection and use the result everywhere.</li>
 <li>Index names and fields are checked against the record type, and so is the value you pass to <code>eq</code>.</li>
@@ -121,14 +94,14 @@
 <section id="failures">
 <h2>Fail with a code</h2>
 <p><code>fail(code, message, details?)</code> aborts the call with a failure the caller can act on. A failing mutation commits nothing.</p>
-<div class="code-block"><div class="code-head"><span>Inside a mutation</span><button type="button" class="copy-button" aria-label="Copy Inside a mutation">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">if</span> (shop.stock &lt; quantity) fail(<span class="str">"OUT_OF_STOCK"</span>, <span class="str">"Not enough dough"</span>, { stock: shop.stock });</code></pre></div>
+<div class="code-block"><div class="code-head"><span>Inside a mutation</span><button type="button" class="copy-button" aria-label="Copy Inside a mutation">Copy</button></div><pre tabindex="0"><code class="language-ts">if (shop.stock &lt; quantity) fail("OUT_OF_STOCK", "Not enough dough", { stock: shop.stock });</code></pre></div>
 <div class="code-block"><div class="code-head"><span>What an HTTP caller receives · 422</span><button type="button" class="copy-button" aria-label="Copy What an HTTP caller receives">Copy</button></div><pre tabindex="0"><code>{"error":{"code":"EVALUATION_FAILED","message":"OUT_OF_STOCK: Not enough dough",
   "failure":{"code":"OUT_OF_STOCK","message":"Not enough dough","details":{"stock":2}}}}</code></pre></div>
-<div class="code-block"><div class="code-head"><span>What the TypeScript client sees</span><button type="button" class="copy-button" aria-label="Copy What the TypeScript client sees">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">try</span> {
-  <span class="kw">await</span> client.mutate(<span class="str">"pizza.order"</span>, { id: <span class="str">"o-7"</span>, shop: <span class="str">"north"</span>, quantity: <span class="num">3</span> });
-} <span class="kw">catch</span> (error) {
-  <span class="kw">if</span> (!(error <span class="kw">instanceof</span> FlowerError) || error.failure?.code !== <span class="str">"OUT_OF_STOCK"</span>) <span class="kw">throw</span> error;
-  console.log(<span class="str">"Sold out"</span>, error.failure.details);
+<div class="code-block"><div class="code-head"><span>What the TypeScript client sees</span><button type="button" class="copy-button" aria-label="Copy What the TypeScript client sees">Copy</button></div><pre tabindex="0"><code class="language-ts">try {
+  await client.mutate("pizza.order", { id: "o-7", shop: "north", quantity: 3 });
+} catch (error) {
+  if (!(error instanceof FlowerError) || error.failure?.code !== "OUT_OF_STOCK") throw error;
+  console.log("Sold out", error.failure.details);
 }</code></pre></div>
 <ul>
 <li>Codes are <code>UPPER_SNAKE_CASE</code>; details must be JSON.</li>
@@ -157,12 +130,3 @@
 <li>To rerun module code in every callback instead, build or deploy with <code>--initialization per-invocation</code>.</li>
 </ul>
 </section>
-<!-- content:end -->
-</div>
-<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../guide/"><small>Previous · Guide</small>Get started</a><a rel="next" href="../guide/reactivity.html"><small>Next · Guide</small>Reactive values</a></nav>
-</main>
-</div>
-<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/xmit-dev/flower">Source ↗</a></div></div></div>
-<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
-</body>
-</html>

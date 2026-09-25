@@ -1,46 +1,19 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#f8f5ec">
-<meta name="description" content="Distribute fresh reads across replicas, opt into replica-local reads, use HTTP/2, and watch live queries.">
-<meta property="og:title" content="Reads &amp; live queries · Flower">
-<meta property="og:description" content="Distribute fresh reads across replicas, opt into replica-local reads, use HTTP/2, and watch live queries.">
-<meta property="og:type" content="website">
-<meta property="og:url" content="https://flower.js.org/guide/reads.html">
-<link rel="canonical" href="https://flower.js.org/guide/reads.html">
-<title>Reads &amp; live queries · Flower</title>
-<link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
-<link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
-<link rel="stylesheet" href="../site.css?v=fd4ad318734f">
-<script src="../site.js?v=3184f0662fa5" defer></script>
-</head>
-<body class="doc-page">
-<a class="skip-link" href="#main">Skip to content</a>
-<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/" aria-current="page">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/xmit-dev/flower">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
-<div class="documentation">
-<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/components.html"><span>04</span>Components & tasks</a></li><li><a href="../guide/methods.html"><span>05</span>Methods & retries</a></li><li><a href="../guide/access.html"><span>06</span>Access control</a></li><li class="current"><a href="#top" aria-current="page"><span>07</span>Reads & live queries</a><ol id="section-nav" aria-label="On this page"><li><a href="#replica-reads">Spread reads across replicas</a></li><li><a href="#choose-replica-local-reads-in">Replica-local reads</a></li><li><a href="#use-http-2-from-node">Use HTTP/2 from Node.js</a></li><li><a href="#live-queries">Watch live queries</a></li></ol></li><li><a href="../guide/timers.html"><span>08</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>09</span>Queues & expiry</a></li><li><a href="../guide/workers.html"><span>10</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>11</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>12</span>Crypto & tokens</a></li><li><a href="../guide/passkeys.html"><span>13</span>Passkeys</a></li><li><a href="../guide/testing.html"><span>14</span>Testing</a></li><li><a href="../guide/deployments.html"><span>15</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/schemas.html"><span>03</span>Schemas & failures</a></li><li><a href="../reference/definitions.html"><span>04</span>Contexts & definitions</a></li><li><a href="../reference/components.html"><span>05</span>Components & tasks</a></li><li><a href="../reference/client.html"><span>06</span>Client & transports</a></li><li><a href="../reference/time.html"><span>07</span>Queues, expiry & timers</a></li><li><a href="../reference/workers.html"><span>08</span>External values & workers</a></li><li><a href="../reference/testing.html"><span>09</span>Testing</a></li><li><a href="../reference/crypto.html"><span>10</span>Crypto & passkeys</a></li><li><a href="../reference/keys.html"><span>11</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>12</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>13</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>14</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>15</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>16</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
-<main id="main" tabindex="-1">
-<header class="page-intro" id="top"><p class="eyebrow">Guide · 07</p><h1>Read from any replica.</h1><p class="lead">Spread queries across replicas, choose between fresh and fast reads, and watch values change live.</p></header>
-<div class="page-content">
-<!-- content:start -->
 <section id="replica-reads">
 <h2>Spread reads across replicas</h2>
 <p>Give the client a list of <code>queryUrls</code> to run queries and watches on every node. Reads stay fresh by default: each one is confirmed with a quorum, so it needs a working majority.</p>
-<div class="code-block"><div class="code-head"><span>client-replicas.ts</span><button type="button" class="copy-button" aria-label="Copy client-replicas.ts">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { FlowerClient } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
-<span class="kw">import</span> <span class="kw">type</span> counter <span class="kw">from</span> <span class="str">"./counter.ts"</span>;
+<div class="code-block"><div class="code-head"><span>client-replicas.ts</span><button type="button" class="copy-button" aria-label="Copy client-replicas.ts">Copy</button></div><pre tabindex="0"><code class="language-ts">import { FlowerClient } from "@flower-js/sdk";
+import type counter from "./counter.ts";
 
-<span class="kw">const</span> client = <span class="kw">new</span> FlowerClient&lt;<span class="kw">typeof</span> counter&gt;(<span class="str">"http://127.0.0.1:7101"</span>, {
+const client = new FlowerClient&lt;typeof counter&gt;("http://127.0.0.1:7101", {
   queryUrls: [
-    <span class="str">"http://127.0.0.1:7101"</span>,
-    <span class="str">"http://127.0.0.1:7102"</span>,
-    <span class="str">"http://127.0.0.1:7103"</span>,
+    "http://127.0.0.1:7101",
+    "http://127.0.0.1:7102",
+    "http://127.0.0.1:7103",
   ],
 });
-<span class="kw">const</span> [visits, clicks] = <span class="kw">await</span> Promise.all([
-  client.query(<span class="str">"counter.get"</span>, <span class="str">"visits"</span>),
-  client.query(<span class="str">"counter.get"</span>, <span class="str">"clicks"</span>),
+const [visits, clicks] = await Promise.all([
+  client.query("counter.get", "visits"),
+  client.query("counter.get", "clicks"),
 ]);
 console.log(visits.value.count, clicks.value.count);</code></pre></div>
 <ul>
@@ -60,10 +33,10 @@ console.log(visits.value.count, clicks.value.count);</code></pre></div>
 <section id="choose-replica-local-reads-in" data-toc="Replica-local reads">
 <h2>Allow stale reads (opt in)</h2>
 <p>If a query can tolerate lag, declare it <code>replica-local</code>. It then reads the node's own data without asking a quorum, and keeps working during a network partition.</p>
-<div class="code-block"><div class="code-head"><span>Application · optional local read</span><button type="button" class="copy-button" aria-label="Copy optional local read">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">const</span> getLocal = query(<span class="str">"internal.counter.local"</span>, {
-  args: v.<span class="kw">string</span>({ min: <span class="num">1</span> }), consistency: <span class="str">"replica-local"</span>,
-}, (ctx, id) =&gt; ctx.get(counters, id) ?? <span class="num">0</span>);
-<span class="comment">// Expose it: define({ http: { "counter.local": getLocal } }).</span></code></pre></div>
+<div class="code-block"><div class="code-head"><span>Application · optional local read</span><button type="button" class="copy-button" aria-label="Copy optional local read">Copy</button></div><pre tabindex="0"><code class="language-ts">const getLocal = query("internal.counter.local", {
+  args: v.string({ min: 1 }), consistency: "replica-local",
+}, (ctx, id) =&gt; ctx.get(counters, id) ?? 0);
+// Expose it: define({ http: { "counter.local": getLocal } }).</code></pre></div>
 <div class="note"><span class="note-mark" aria-hidden="true">↳</span><p><strong>Replica-local reads can be stale, with no bound.</strong> Data, code and the list of public methods may all lag. Two calls on different nodes can return revisions that go backwards.</p></div>
 <ul>
 <li>The policy lives in the application. HTTP callers can't change it.</li>
@@ -75,21 +48,21 @@ console.log(visits.value.count, clicks.value.count);</code></pre></div>
 <section id="use-http-2-from-node">
 <h2>Use HTTP/2 from Node.js</h2>
 <p>Use the HTTP/2 transport to send many requests over one connection per node.</p>
-<div class="code-block"><div class="code-head"><span>client-h2.ts</span><button type="button" class="copy-button" aria-label="Copy client-h2.ts">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { FlowerClient } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
-<span class="kw">import</span> { createHttp2Transport } <span class="kw">from</span> <span class="str">"@flower-js/sdk/http2"</span>;
-<span class="kw">import</span> <span class="kw">type</span> counter <span class="kw">from</span> <span class="str">"./counter.ts"</span>;
+<div class="code-block"><div class="code-head"><span>client-h2.ts</span><button type="button" class="copy-button" aria-label="Copy client-h2.ts">Copy</button></div><pre tabindex="0"><code class="language-ts">import { FlowerClient } from "@flower-js/sdk";
+import { createHttp2Transport } from "@flower-js/sdk/http2";
+import type counter from "./counter.ts";
 
-<span class="kw">const</span> transport = createHttp2Transport({ requestTimeoutMs: <span class="num">10_000</span> });
-<span class="kw">const</span> client = <span class="kw">new</span> FlowerClient&lt;<span class="kw">typeof</span> counter&gt;(<span class="str">"http://127.0.0.1:7101"</span>, {
+const transport = createHttp2Transport({ requestTimeoutMs: 10_000 });
+const client = new FlowerClient&lt;typeof counter&gt;("http://127.0.0.1:7101", {
   fetch: transport.fetch,
 });
-<span class="kw">try</span> {
-  console.log(<span class="kw">await</span> client.mutate(<span class="str">"counter.increment"</span>, { id: <span class="str">"visits"</span>, by: <span class="num">1</span> }, {
-    requestId: <span class="str">"visit-over-h2-001"</span>,
-    signal: AbortSignal.timeout(<span class="num">5_000</span>),
+try {
+  console.log(await client.mutate("counter.increment", { id: "visits", by: 1 }, {
+    requestId: "visit-over-h2-001",
+    signal: AbortSignal.timeout(5_000),
   }));
-} <span class="kw">finally</span> {
-  <span class="kw">await</span> transport.close();
+} finally {
+  await transport.close();
 }</code></pre></div>
 <ul>
 <li>Import it from <code>@flower-js/sdk/http2</code>. It works in Node.js only.</li>
@@ -99,22 +72,22 @@ console.log(visits.value.count, clicks.value.count);</code></pre></div>
 <li><strong>Cancelling doesn't undo a mutation that already committed.</strong> After an uncertain result, retry with the same request ID.</li>
 </ul>
 <p>The server port speaks HTTP/1.1 and cleartext HTTP/2 (<code>h2c</code>). To check it with curl:</p>
-<div class="code-block"><div class="code-head"><span>With an HTTP/2-enabled curl</span><button type="button" class="copy-button" aria-label="Copy With an HTTP/2-enabled curl">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">curl</span> <span class="var">--http2-prior-knowledge</span> <span class="var">-i</span> http://<span class="num">127</span>.<span class="num">0</span>.<span class="num">0</span>.<span class="num">1</span>:<span class="num">7101</span>/health</code></pre></div>
+<div class="code-block"><div class="code-head"><span>With an HTTP/2-enabled curl</span><button type="button" class="copy-button" aria-label="Copy With an HTTP/2-enabled curl">Copy</button></div><pre tabindex="0"><code class="language-sh">curl --http2-prior-knowledge -i http://127.0.0.1:7101/health</code></pre></div>
 <p>For TLS, set <code>FLOWER_TLS_CERT_FILE</code>, <code>FLOWER_TLS_KEY_FILE</code> and <code>FLOWER_TLS_CA_FILE</code>. The transport's optional <code>ca</code> option adds trusted roots; certificate checks can't be turned off.</p>
 </section>
 <section id="live-queries">
 <h2>Watch live queries</h2>
 <p><code>client.subscribe</code> gives you a query's value now and again every time it changes, and keeps going through disconnects.</p>
-<div class="code-block"><div class="code-head"><span>One query, kept current</span><button type="button" class="copy-button" aria-label="Copy One query, kept current">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">const</span> stop = <span class="kw">new</span> AbortController();
-<span class="kw">for</span> <span class="kw">await</span> (<span class="kw">const</span> { value, revision, reset } <span class="kw">of</span> client.subscribe(<span class="str">"counter.get"</span>, <span class="str">"visits"</span>, {
+<div class="code-block"><div class="code-head"><span>One query, kept current</span><button type="button" class="copy-button" aria-label="Copy One query, kept current">Copy</button></div><pre tabindex="0"><code class="language-ts">const stop = new AbortController();
+for await (const { value, revision, reset } of client.subscribe("counter.get", "visits", {
   signal: stop.signal,
 })) {
-  <span class="kw">if</span> (reset) console.log(<span class="str">"fresh snapshot"</span>);
+  if (reset) console.log("fresh snapshot");
   console.log(revision, value.count);
-  <span class="comment">// Break the loop or call stop.abort() to disconnect.</span>
+  // Break the loop or call stop.abort() to disconnect.
 }
 
-<span class="kw">const</span> { value } = <span class="kw">await</span> client.waitUntil(<span class="str">"counter.get"</span>, <span class="str">"visits"</span>, (counter) =&gt; counter.count &gt;= <span class="num">10</span>);</code></pre></div>
+const { value } = await client.waitUntil("counter.get", "visits", (counter) =&gt; counter.count &gt;= 10);</code></pre></div>
 <ul>
 <li>The first update is the full value. After that the server sends only changes, and the SDK rebuilds the value for you.</li>
 <li>Updates may skip intermediate values when changes come fast. Use them for current state, not as an event log. Nothing is sent if the value doesn't change.</li>
@@ -140,12 +113,3 @@ console.log(visits.value.count, clicks.value.count);</code></pre></div>
 </div></details>
 <p>For error codes, see <a href="methods.html#failures">Handle failures</a>.</p>
 </section>
-<!-- content:end -->
-</div>
-<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../guide/access.html"><small>Previous · Guide</small>Access control</a><a rel="next" href="../guide/timers.html"><small>Next · Guide</small>Scheduled logic</a></nav>
-</main>
-</div>
-<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/xmit-dev/flower">Source ↗</a></div></div></div>
-<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
-</body>
-</html>

@@ -1,15 +1,31 @@
 # Publishing the handbook
 
-The public repository is [xmit-dev/flower](https://github.com/xmit-dev/flower). The static site is the `docs/` directory; it needs no build step or external assets. GitHub Pages serves it at [xmit-dev.github.io/flower/](https://xmit-dev.github.io/flower/) until the custom domain is activated.
+The handbook is published at [flower.xmit.dev](https://flower.xmit.dev/) from [xmit-dev/flower](https://github.com/xmit-dev/flower). [Build Awesome](https://build.awesome.me/) generates the handbook; its stable release is installed as `@11ty/eleventy`.
 
-The `Publish handbook` workflow uploads only `docs/` and deploys it to the `github-pages` environment when documentation changes reach the default branch. It can also be run manually. In repository **Settings → Pages**, select **GitHub Actions** as the publishing source.
+## Preview
 
-## flower.js.org
+```sh
+npm ci
+bin/web-preview
+```
 
-`docs/CNAME` contains exactly `flower.js.org`. This file declares the intended custom domain and also supports branch-based Pages publishing. With an Actions publishing source, GitHub requires the custom domain to be set in repository settings or through its API; the artifact's CNAME file does not configure that setting by itself. [GitHub's custom-domain instructions](https://docs.github.com/en/pages/configuring-a-custom-domain-for-your-github-pages-site/managing-a-custom-domain-for-your-github-pages-site)
+The development server generates and serves `_site/` at `http://localhost:8080/`, with live reload as you edit. `bin/web-preview` changes to the repository root and forwards arguments to Eleventy, for example `bin/web-preview --port=8081`.
 
-The JS.ORG registry needs a `flower` entry targeting `xmit-dev.github.io`. The DNS target is the account's Pages hostname, without the repository path. Follow [JS.ORG's request process](https://github.com/js-org/js.org#requesting-a-jsorg-subdomain); adding the local CNAME file does not register DNS or obtain approval.
+- Edit handbook content in `docs/`. HTML and Markdown templates use the shared layout in `docs/_includes/`.
+- `scripts/docs/pages.mjs` defines the page order, titles and navigation; `scripts/docs/render.mjs` renders the shared page chrome and highlights examples.
+- Static assets, downloadable TypeScript examples and measured benchmark data live in `docs/`. Code blocks with `data-src` include the corresponding example at build time.
+- Benchmark reports and summaries are rendered from the retained JSON in `docs/bench/`. Select a new measured run with `node scripts/publish-bench-results.mjs path/to/latest.json`; the live preview picks up the updated measurements. `node scripts/publish-bench-results.mjs --check` validates the retained data offline.
+- Commit the sources and measurement JSON in `docs/`. Generated HTML, reports, redirects and copied assets go into the Git-ignored `_site/` directory.
+- `npm run docs:check` renders and validates the site in memory, including internal links and legacy redirects. `npm run docs:build` produces a fresh `_site/` for deployment. Both work from a clean checkout after `npm ci`.
 
-After the domain is allocated, set **Settings → Pages → Custom domain** to `flower.js.org`, allow GitHub's DNS check and certificate provisioning to finish, and enable **Enforce HTTPS**. This changes routing for the project site to `https://flower.js.org/`. The published HTML already uses that canonical URL, while relative assets work at either host.
+## Deploy
 
-The initial publication uses the working default Pages URL while the JS.ORG DNS entry is absent. No DNS request has been submitted by this workflow.
+With Node.js dependencies installed and xmit configured, run:
+
+```sh
+bin/web-deploy
+```
+
+The script changes to the repository root, builds and validates the site, then runs `xmit flower.xmit.dev _site/`. The development shell (`nix develop`) supplies Node.js and xmit. Canonical URLs and `docs/CNAME` use `flower.xmit.dev`; CSS and JavaScript use plain relative URLs.
+
+The `Publish handbook` GitHub Actions workflow also builds the site before uploading `_site/` to GitHub Pages.
