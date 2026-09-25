@@ -6,7 +6,10 @@ use std::{
 use zeroize::Zeroizing;
 
 use clap::Parser;
-use flower::{consensus::Consensus, service};
+use flower::{
+    consensus::{Consensus, SharedDatabase, Storage},
+    service,
+};
 
 mod server;
 
@@ -23,20 +26,64 @@ static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 )]
 struct Args {
     /// Unique positive ID of this Raft node.
-    #[arg(long)]
-    id: u64,
+    #[arg(long, required_unless_present = "replica", conflicts_with = "replica")]
+    id: Option<u64>,
     /// HTTP/1.1 and HTTP/2 listen address; optional TLS through FLOWER_TLS_* files.
-    #[arg(long, default_value = "127.0.0.1:7101")]
-    listen: SocketAddr,
+    #[arg(long, conflicts_with = "replica")]
+    listen: Option<SocketAddr>,
     /// Address reachable by other nodes, without an http:// prefix.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "replica")]
     advertise: Option<String>,
-    /// Exclusive data directory for this node.
+    /// Host replicas of several Raft groups in this process instead, as
+    /// NAME,ID,LISTEN[,ADVERTISE]. They share one database in --data, so
+    /// their log appends share fsyncs.
+    #[arg(long, value_name = "NAME,ID,LISTEN[,ADVERTISE]", value_parser = parse_replica)]
+    replica: Vec<Replica>,
+    /// Exclusive data directory for this node, or for every hosted replica.
     #[arg(long)]
     data: PathBuf,
     /// Operator secret; use FLOWER_PEER_TOKEN for a separate peer credential.
     #[arg(long, env = "FLOWER_ADMIN_TOKEN", hide_env_values = true)]
     admin_token: String,
+}
+
+#[derive(Clone)]
+struct Replica {
+    name: String,
+    id: u64,
+    listen: SocketAddr,
+    advertise: Option<String>,
+}
+
+fn parse_replica(value: &str) -> Result<Replica, String> {
+    let parts: Vec<&str> = value.split(',').collect();
+    let (name, id, listen, advertise) = match parts[..] {
+        [name, id, listen] => (name, id, listen, None),
+        [name, id, listen, advertise] => (name, id, listen, Some(advertise.to_owned())),
+        _ => return Err("expected NAME,ID,LISTEN[,ADVERTISE]".into()),
+    };
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err("replica names use 1-64 ASCII letters, digits, '-' or '_'".into());
+    }
+    let id = id
+        .parse::<u64>()
+        .ok()
+        .filter(|id| *id > 0)
+        .ok_or("replica IDs are positive integers")?;
+    let listen = listen
+        .parse()
+        .map_err(|error| format!("listen address: {error}"))?;
+    Ok(Replica {
+        name: name.to_owned(),
+        id,
+        listen,
+        advertise,
+    })
 }
 
 #[derive(Parser)]
@@ -84,9 +131,12 @@ fn main() -> anyhow::Result<()> {
 
 async fn run() -> anyhow::Result<()> {
     let args = Args::parse();
-    anyhow::ensure!(args.id > 0, "node ID must be positive");
-    let node_id = args.id;
-    let listen = args.listen.to_string();
+    let (node_id, listen) = match (args.id, args.replica.first()) {
+        (Some(id), _) => (id, args.listen.unwrap_or(DEFAULT_LISTEN).to_string()),
+        (None, Some(replica)) => (replica.id, replica.listen.to_string()),
+        (None, None) => anyhow::bail!("--id or --replica is required"),
+    };
+    anyhow::ensure!(node_id > 0, "node ID must be positive");
     let telemetry =
         tokio::task::spawn_blocking(move || flower::telemetry::init(node_id, &listen)).await??;
     let result = run_server(args).await;
@@ -96,21 +146,106 @@ async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+const DEFAULT_LISTEN: SocketAddr = SocketAddr::V4(std::net::SocketAddrV4::new(
+    std::net::Ipv4Addr::LOCALHOST,
+    7101,
+));
+
 async fn run_server(args: Args) -> anyhow::Result<()> {
     let server_config = server::Config::from_env()?;
     flower::transport::validate_configuration()?;
     flower::evaluator::warmup()?;
     flower::service::validate_configuration()?;
-    let address = args.advertise.unwrap_or_else(|| args.listen.to_string());
-    let consensus = Consensus::open(args.id, address, args.data, args.admin_token.clone()).await?;
+    if !args.replica.is_empty() {
+        return host_replicas(args, server_config).await;
+    }
+    let id = args.id.expect("--id is required without --replica");
+    let listen = args.listen.unwrap_or(DEFAULT_LISTEN);
+    let address = args.advertise.unwrap_or_else(|| listen.to_string());
+    let consensus =
+        Consensus::open(id, address, args.data.into(), args.admin_token.clone()).await?;
     let app = service::router(consensus.clone(), args.admin_token);
-    let listener = tokio::net::TcpListener::bind(args.listen).await?;
-    tracing::info!(id = args.id, listen = %args.listen,
+    let listener = tokio::net::TcpListener::bind(listen).await?;
+    tracing::info!(id, listen = %listen,
         http2_max_streams = server_config.http2_max_streams, "Flower is listening");
     let result = server::serve(listener, app, server_config, shutdown_signal()).await;
     consensus.shutdown().await?;
     result?;
     Ok(())
+}
+
+/// Serve replicas of several Raft groups from one process and one database.
+/// Each keeps its own listener, node ID and membership; only storage, and so
+/// the disk's flushes, are shared.
+async fn host_replicas(args: Args, server_config: server::Config) -> anyhow::Result<()> {
+    let mut names = std::collections::BTreeSet::new();
+    for replica in &args.replica {
+        anyhow::ensure!(
+            names.insert(&replica.name),
+            "duplicate replica name {}",
+            replica.name
+        );
+    }
+    let data = args.data.clone();
+    let database = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        std::fs::create_dir_all(&data)?;
+        SharedDatabase::open(&data.join("flower.redb"))
+    })
+    .await??;
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let mut servers = Vec::new();
+    let mut hosted = Vec::new();
+    let opened: anyhow::Result<()> = async {
+        for replica in &args.replica {
+            let address = replica
+                .advertise
+                .clone()
+                .unwrap_or_else(|| replica.listen.to_string());
+            let storage = Storage::Shared {
+                database: database.clone(),
+                prefix: format!("{}/", replica.name),
+                directory: args.data.join(&replica.name),
+            };
+            let consensus =
+                Consensus::open(replica.id, address, storage, args.admin_token.clone()).await?;
+            hosted.push(consensus.clone());
+            let app = service::router(consensus, args.admin_token.clone());
+            let listener = tokio::net::TcpListener::bind(replica.listen).await?;
+            tracing::info!(replica = %replica.name, id = replica.id, listen = %replica.listen,
+                http2_max_streams = server_config.http2_max_streams, "Flower is listening");
+            let mut stopped = stopped.clone();
+            servers.push(tokio::spawn(server::serve(
+                listener,
+                app,
+                server_config,
+                async move {
+                    let _ = stopped.wait_for(|stop| *stop).await;
+                },
+            )));
+        }
+        Ok(())
+    }
+    .await;
+    if opened.is_ok() {
+        // Any server's failure stops them all, like a signal.
+        tokio::select! {
+            _ = shutdown_signal() => {}
+            _ = futures_util::future::select_all(servers.iter_mut()) => {}
+        }
+    }
+    let _ = stop.send(true);
+    let mut result = opened;
+    for server in servers {
+        let served = server
+            .await
+            .map_err(anyhow::Error::new)
+            .and_then(|served| served.map_err(anyhow::Error::new));
+        result = result.and(served);
+    }
+    for consensus in hosted {
+        result = result.and(consensus.shutdown().await);
+    }
+    result
 }
 
 async fn shutdown_signal() {

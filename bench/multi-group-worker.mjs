@@ -25,7 +25,24 @@ try {
     const { installMixedObserver } = await import("./profile-mixed-observer.mjs");
     observer = installMixedObserver(options.mixedProfile);
   }
-  const report = await run(options, { ready: (signal) => new Promise((resolve, reject) => {
+  const message = (type) => new Promise((resolve) => {
+    const receive = (value) => {
+      if (value?.type !== type) return;
+      process.off("message", receive);
+      resolve(value);
+    };
+    process.on("message", receive);
+  });
+  // With shared hosts the coordinator kills one; this group observes it.
+  const hostCrash = options.attach ? async (cluster) => {
+    const crash = await message("host-crash");
+    const observation = await cluster.observeHostCrash(crash.host, crash.crashedAt);
+    const restarted = message("host-restarted");
+    send({ type: "host-recovered" });
+    await restarted;
+    return cluster.observeHostRestart(crash.host, observation);
+  } : undefined;
+  const report = await run(options, { hostCrash, ready: (signal) => new Promise((resolve, reject) => {
     const cleanup = () => { process.off("message", start); process.off("disconnect", disconnected); signal.removeEventListener("abort", abort); };
     const abort = () => { cleanup(); reject(signal.reason); };
     const disconnected = () => { cleanup(); reject(new Error("Coordinator disconnected before load started")); };

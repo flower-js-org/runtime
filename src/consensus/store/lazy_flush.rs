@@ -133,11 +133,8 @@ pub(super) fn spawn(inner: Weak<Inner>, holders: Arc<persistence::Holders>, lazy
                 let Some(held) = holders.hold(&inner) else {
                     return;
                 };
-                let flushed = flush(held.store(), &lazy).await;
+                flush(held.store(), &lazy).await;
                 drop(held);
-                if !flushed {
-                    tokio::time::sleep(settings().grace).await;
-                }
             } else if inner.strong_count() == 0 {
                 return;
             }
@@ -145,50 +142,34 @@ pub(super) fn spawn(inner: Weak<Inner>, holders: Arc<persistence::Holders>, lazy
     });
 }
 
-/// Make every held append durable and complete its callback. Returns false
-/// when the flush could not start; its appends stay held.
-pub(super) async fn flush(store: &Store, lazy: &Arc<LazyFlush>) -> bool {
+/// Make every held append durable and complete its callback, with an I/O
+/// error if the flush failed. The flush joins the database's next batch, so
+/// it shares a fsync with any other replica's durable write.
+pub(super) async fn flush(store: &Store, lazy: &Arc<LazyFlush>) {
     let id = store.inner.id;
-    let drained = lazy.clone();
-    let result = store
-        .disk_profiled(StorageTrace::new(id, "leader_flush"), move |db, profile| {
-            // Under the I/O guard: every drained append committed before this.
-            let held = std::mem::take(&mut *drained.held.lock().expect("lazy flush lock"));
-            if held.is_empty() {
-                return Ok((held, Ok(())));
-            }
-            let flushed = (|| -> anyhow::Result<()> {
-                let mut transaction = db.begin_write()?;
-                transaction.set_durability(Durability::Immediate)?;
-                profile.phase(StoragePhase::Begin);
-                {
-                    // Rewrite an existing value so redb performs a real
-                    // durable commit, persisting every earlier deferred one.
-                    let mut meta = transaction.open_table(META)?;
-                    meta.insert("node_id", serde_json::to_vec(&id)?.as_slice())?;
-                }
-                profile.phase(StoragePhase::Write);
-                let result = transaction.commit();
-                profile.phase(StoragePhase::Flush);
-                result?;
+    let tables = store.inner.tables;
+    // Each held append already committed, without a flush, before it was held.
+    let held = std::mem::take(&mut *lazy.held.lock().expect("lazy flush lock"));
+    if held.is_empty() {
+        return;
+    }
+    let flushed = store
+        .batched(
+            true,
+            StorageTrace::new(id, "leader_flush"),
+            move |transaction, _| {
+                // Rewrite an existing value so redb performs a real durable
+                // commit, persisting every earlier deferred one.
+                let mut meta = transaction.open_table(tables.meta)?;
+                meta.insert("node_id", serde_json::to_vec(&id)?.as_slice())?;
                 Ok(())
-            })()
-            .map_err(|error| format!("{error:#}"));
-            Ok((held, flushed))
-        })
-        .await;
-    match result {
-        Ok((held, flushed)) => {
-            for entry in held {
-                entry
-                    .callback
-                    .log_io_completed(flushed.clone().map_err(std::io::Error::other));
-            }
-            true
-        }
-        Err(error) => {
-            tracing::error!(target: "flower::storage", error = %format!("{error:#}"), "leader log flush failed to start");
-            false
-        }
+            },
+        )
+        .await
+        .map_err(|error| format!("{error:#}"));
+    for entry in held {
+        entry
+            .callback
+            .log_io_completed(flushed.clone().map_err(std::io::Error::other));
     }
 }

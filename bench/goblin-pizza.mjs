@@ -18,7 +18,7 @@ import { ENGINES, goblinBundle } from "./guests.mjs";
 import { createRandom, Histogram, Stats, summarizeApplication } from "./metrics.mjs";
 import { BenchmarkClient, RpcError } from "./rpc.mjs";
 import { renderReport } from "./report.mjs";
-import { cpuMilliseconds, ServerCpuSamples } from "./resources.mjs";
+import { cpuMilliseconds, ServerCpuSamples, storageRates } from "./resources.mjs";
 import { runtimeSettings } from "./runtime-settings.mjs";
 import { mergeRouting, startRustDriver } from "./rust-driver.mjs";
 
@@ -39,7 +39,7 @@ async function fingerprintBinary(path, signal) {
   return { path, sha256: digest.digest("hex"), bytes: info.size, modifiedAt: info.mtime.toISOString() };
 }
 
-export async function run(options, { ready } = {}) {
+export async function run(options, { ready, hostCrash } = {}) {
   // Read comparisons before creating anything, including report output files.
   const baseline = options.baseline ? JSON.parse(await readFile(options.baseline, "utf8")) : undefined;
   const controller = new AbortController();
@@ -263,6 +263,9 @@ export async function run(options, { ready } = {}) {
       const startAt = await ready(signal);
       await sleep(Math.max(0, startAt - Date.now()));
     }
+    // Shared hosts' counters belong to every group; the coordinator reads them.
+    const storageStart = options.attach ? null : await cluster.storageCounters();
+    const storageStarted = performance.now();
     phases.load = phase = newPhase();
     loadStarted = phase.started;
     loadDeadline = loadStarted + options.duration * 1_000;
@@ -290,9 +293,14 @@ export async function run(options, { ready } = {}) {
     const customers = rustDriver.start(Math.ceil(Date.now() + loadDeadline - performance.now()));
     tasks.push(customers);
     const chaos = options.chaos ? (async () => {
-      await sleep(Math.max(0, loadDeadline - performance.now() - options.duration * 500));
-      console.log("A dragon ate the leader. Electing another goblin…");
-      const event = await cluster.crashLeaderAndRecover();
+      let event;
+      // Shared hosts crash once for every group, when the coordinator says.
+      if (hostCrash) event = await hostCrash(cluster);
+      else {
+        await sleep(Math.max(0, loadDeadline - performance.now() - options.duration * 500));
+        console.log("A dragon ate the leader. Electing another goblin…");
+        event = await cluster.crashLeaderAndRecover();
+      }
       event.elapsedMs = Date.parse(event.crashedAt) - Date.parse(report.loadStartedAt);
       console.log(`Quorum serving again after ${format(event.quorumRecoveryMs)} ms; old node restarted.`);
     })().catch((error) => { if (!signal.aborted) failed(error, "leader crash"); }) : Promise.resolve();
@@ -301,6 +309,7 @@ export async function run(options, { ready } = {}) {
     console.log(`Rush hour: ${options.duration}s of ${loadMode}; up to ${options.maxOrders} retained orders.`);
     await Promise.all([customers, chaos]);
     phase.ended = Math.max(phase.ended, performance.now());
+    if (storageStart) report.storage = storageRates(storageStart, await cluster.storageCounters(), (performance.now() - storageStarted) / 1_000);
     phases.drain = phase = newPhase();
     const drainDeadline = performance.now() + options.drain * 1_000;
     const drainSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.ceil(options.drain * 1_000))]);
@@ -440,7 +449,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const options = parseOptions(process.argv.slice(2));
     if (options.help) console.log(HELP);
     else {
-      const report = options.groups > 1
+      const report = options.groups > 1 || options.hosted
         ? await (await import("./multi-group.mjs")).runGroups(options)
         : await run(options);
       if (!report.passed) process.exitCode = 1;

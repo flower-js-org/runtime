@@ -19,7 +19,6 @@ mod timing;
 mod tests;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -49,7 +48,7 @@ pub use partitions::{
 pub use progress::Progress;
 pub use receipts::Receipts;
 pub use records::Records;
-pub use store::SnapshotData;
+pub use store::{SharedDatabase, SnapshotData, Storage};
 
 /// Application state at one committed, atomically published revision.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -409,20 +408,22 @@ pub struct Consensus {
 }
 
 impl Consensus {
+    /// Open a replica: a data directory of its own, or a `Storage::Shared`
+    /// database that it shares with the other replicas of this process.
     pub async fn open(
         id: u64,
         address: String,
-        directory: PathBuf,
+        storage: Storage,
         token: String,
     ) -> anyhow::Result<Self> {
         let peer_token = crate::transport::peer_token(&token)?;
-        Self::open_with_tokens(id, address, directory, token, peer_token).await
+        Self::open_with_tokens(id, address, storage, token, peer_token).await
     }
 
     pub async fn open_with_tokens(
         id: u64,
         address: String,
-        directory: PathBuf,
+        storage: Storage,
         token: String,
         peer_token: String,
     ) -> anyhow::Result<Self> {
@@ -456,7 +457,7 @@ impl Consensus {
             ..Config::default()
         })?;
         let network = network::Network::with_limits(&peer_token, limits.clone())?;
-        let store = store::Store::open(id, directory).await?;
+        let store = store::Store::open(id, storage).await?;
         let log_state =
             openraft::storage::RaftLogStorage::get_log_state(&mut store.clone()).await?;
         let applied = store.read_fence().ok().map(|fence| fence.applied);
@@ -572,6 +573,12 @@ impl Consensus {
     /// Local scheduling telemetry, independent of consensus correctness.
     pub fn snapshot_policy_metrics(&self) -> Value {
         self.store.snapshot_accounting().metrics(&self.limits)
+    }
+
+    /// Batched storage commits of this process's database: every replica it
+    /// hosts reports the same counters.
+    pub fn storage_metrics(&self) -> Value {
+        self.store.storage_metrics()
     }
 
     /// Service admission includes the binding envelope before collecting a

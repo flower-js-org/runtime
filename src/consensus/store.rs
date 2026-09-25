@@ -4,11 +4,18 @@
 //! (`lazy_flush`), and applied state reaches redb behind its in-memory
 //! publication (`persistence`). Disk work uses Tokio's blocking pool so fsync
 //! never blocks Raft heartbeats.
+//!
+//! A process hosting replicas of several groups keeps them in one database
+//! under per-replica table prefixes (`Storage::Shared`). Their appends and
+//! applied-state writes commit in shared batches (`shared`): one transaction,
+//! and one flush when anything in it must be durable.
 
 mod profile;
 use profile::{StoragePhase, StorageTrace};
 mod lazy_flush;
 mod persistence;
+mod shared;
+pub use shared::SharedDatabase;
 
 mod partition_storage;
 use partition_storage::*;
@@ -50,15 +57,88 @@ use super::{
     partitions::{self, PartitionState, Partitions},
 };
 
+/// Where a replica keeps its state.
+pub enum Storage {
+    /// A directory of its own, with the database `flower.redb` inside it.
+    Directory(PathBuf),
+    /// The database of the process that hosts it, shared with its other
+    /// replicas under a table prefix of its own. Snapshot transfers use
+    /// `directory`.
+    Shared {
+        database: Arc<SharedDatabase>,
+        prefix: String,
+        directory: PathBuf,
+    },
+}
+
+impl From<PathBuf> for Storage {
+    fn from(directory: PathBuf) -> Self {
+        Storage::Directory(directory)
+    }
+}
+
+impl From<&std::path::Path> for Storage {
+    fn from(directory: &std::path::Path) -> Self {
+        Storage::Directory(directory.to_owned())
+    }
+}
+
+type Table<K> = TableDefinition<'static, K, &'static [u8]>;
+type PairTable = Table<(&'static str, &'static str)>;
+
+/// One replica's tables. Replicas that share a database prefix their names;
+/// the empty prefix keeps the names of a database holding a single replica.
+#[derive(Clone, Copy)]
+pub(super) struct Tables {
+    meta: Table<&'static str>,
+    logs: Table<u64>,
+    data: Table<&'static str>,
+    requests: Table<&'static str>,
+    partition_meta: Table<&'static str>,
+    partition_data: PairTable,
+    partition_requests: PairTable,
+    snapshot_chunks: Table<u64>,
+    partition_base_data: PairTable,
+    partition_base_requests: PairTable,
+    partition_chunks: PairTable,
+}
+
+impl Tables {
+    fn new(prefix: &str) -> Self {
+        // A replica opens once per storage lifetime; its prefixed names live
+        // as long as the process.
+        let name = |table: &'static str| -> &'static str {
+            if prefix.is_empty() {
+                table
+            } else {
+                Box::leak(format!("{prefix}{table}").into_boxed_str())
+            }
+        };
+        Self {
+            meta: TableDefinition::new(name("raft_meta_v1")),
+            logs: TableDefinition::new(name("raft_logs_v1")),
+            data: TableDefinition::new(name("application_data_v2")),
+            requests: TableDefinition::new(name("application_requests_v2")),
+            partition_meta: TableDefinition::new(name("logical_partitions_v1")),
+            partition_data: TableDefinition::new(name("logical_partition_data_v1")),
+            partition_requests: TableDefinition::new(name("logical_partition_requests_v1")),
+            snapshot_chunks: TableDefinition::new(name("raft_snapshot_chunks_v1")),
+            partition_base_data: TableDefinition::new(name("partition_copy_base_data_v1")),
+            partition_base_requests: TableDefinition::new(name("partition_copy_base_requests_v1")),
+            partition_chunks: TableDefinition::new(name("partition_difference_chunks_v1")),
+        }
+    }
+}
+
+// Tests inspect a single-replica database by its unprefixed names.
+#[cfg(test)]
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("raft_meta_v1");
+#[cfg(test)]
 const LOGS: TableDefinition<u64, &[u8]> = TableDefinition::new("raft_logs_v1");
+#[cfg(test)]
 const DATA: TableDefinition<&str, &[u8]> = TableDefinition::new("application_data_v2");
+#[cfg(test)]
 const REQUESTS: TableDefinition<&str, &[u8]> = TableDefinition::new("application_requests_v2");
-const PARTITION_META: TableDefinition<&str, &[u8]> = TableDefinition::new("logical_partitions_v1");
-const PARTITION_DATA: TableDefinition<(&str, &str), &[u8]> =
-    TableDefinition::new("logical_partition_data_v1");
-const PARTITION_REQUESTS: TableDefinition<(&str, &str), &[u8]> =
-    TableDefinition::new("logical_partition_requests_v1");
 const STATE_META: &str = "state_v4";
 const PREVIOUS_STATE_META: &str = "state_v3";
 const LEGACY_STATE_META: &str = "state_v2";
@@ -183,30 +263,84 @@ fn publish(lock: &PublishedLock<Published>, state: &StoredState) {
     drop(previous);
 }
 
-type AppendingLogs = Arc<PublishedLock<Option<Arc<Vec<Entry<TypeConfig>>>>>>;
+/// Appends submitted but not yet committed, in log order.
+type AppendingLogs = Arc<PublishedLock<Vec<Arc<Vec<Entry<TypeConfig>>>>>>;
 
-struct AppendGuard {
+/// One append readable before it commits. Removed once its batch commits
+/// (or fails), including when a storage worker panics.
+struct PendingAppend {
     logs: AppendingLogs,
-    _io: tokio::sync::OwnedMutexGuard<()>,
+    entries: Arc<Vec<Entry<TypeConfig>>>,
 }
 
-impl Drop for AppendGuard {
+impl PendingAppend {
+    fn publish(logs: &AppendingLogs, entries: Arc<Vec<Entry<TypeConfig>>>) -> Self {
+        logs.write().expect("appending log lock").push(entries.clone());
+        Self {
+            logs: logs.clone(),
+            entries,
+        }
+    }
+}
+
+impl Drop for PendingAppend {
     fn drop(&mut self) {
-        // Clear on both normal completion and a panicking storage worker,
-        // before a later operation can acquire the I/O serialization guard.
-        let previous = self.logs.write().expect("appending log lock").take();
-        drop(previous);
+        let mut logs = self.logs.write().expect("appending log lock");
+        if let Some(position) = logs.iter().position(|entries| Arc::ptr_eq(entries, &self.entries)) {
+            drop(logs.remove(position));
+        }
+    }
+}
+
+/// This replica's writes queued in shared batches but not yet committed.
+/// Batches commit in submission order, so queued writes need no further
+/// ordering among themselves; a direct transaction waits until none remain.
+#[derive(Default)]
+struct PendingWrites {
+    count: std::sync::atomic::AtomicUsize,
+    idle: tokio::sync::Notify,
+}
+
+struct PendingWrite(Arc<PendingWrites>);
+
+impl Drop for PendingWrite {
+    fn drop(&mut self) {
+        if self.0.count.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.0.idle.notify_waiters();
+        }
+    }
+}
+
+impl PendingWrites {
+    fn begin(self: &Arc<Self>) -> PendingWrite {
+        self.count.fetch_add(1, Ordering::AcqRel);
+        PendingWrite(self.clone())
+    }
+
+    async fn idle(&self) {
+        loop {
+            let idle = self.idle.notified();
+            tokio::pin!(idle);
+            idle.as_mut().enable();
+            if self.count.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            idle.await;
+        }
     }
 }
 
 struct Inner {
     id: u64,
-    db: Arc<Database>,
+    shared: Arc<SharedDatabase>,
+    tables: Tables,
     snapshot_directory: PathBuf,
     io: Arc<Mutex<()>>,
-    // One append owns `io`. Its readable suffix lets replication overlap the
-    // flush; only the completion callback establishes durability for Raft.
+    // Appends queued in shared batches. Their readable suffix lets
+    // replication overlap the flush; only the completion callback
+    // establishes durability for Raft.
     appending: AppendingLogs,
+    pending: Arc<PendingWrites>,
     // An old asynchronous builder must never replace an installed snapshot,
     // including an installation with the same log position.
     snapshot_installation: AtomicU64,
@@ -267,19 +401,24 @@ impl Drop for RaftLifetime {
 // Field order matters: release the database reference before signaling drain,
 // including during unwinding. Cancellation cannot stop a spawn_blocking task.
 struct DatabaseWork {
-    db: Arc<Database>,
+    shared: Arc<SharedDatabase>,
     _raft_lifetime: Option<Arc<RaftLifetime>>,
 }
 
 impl DatabaseWork {
     fn run<T>(self, operation: impl FnOnce(&Database) -> T) -> T {
-        operation(&self.db)
+        operation(self.shared.database())
     }
 }
 
 impl Store {
-    pub(super) async fn open(id: u64, directory: PathBuf) -> anyhow::Result<Self> {
-        let (db, state, directory, snapshot_accounting, current_snapshot) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+    pub(super) async fn open(id: u64, storage: Storage) -> anyhow::Result<Self> {
+        let (shared, tables, state, directory, snapshot_accounting, current_snapshot) = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let (shared, prefix, directory) = match storage {
+                Storage::Directory(directory) => (None, String::new(), directory),
+                Storage::Shared { database, prefix, directory } => (Some(database), prefix, directory),
+            };
+            let tables = Tables::new(&prefix);
             let directory = if directory.is_absolute() {
                 directory
             } else {
@@ -297,18 +436,25 @@ impl Store {
                 paths
             };
             std::fs::create_dir_all(&directory).context("create Raft data directory")?;
-            let db =
-                Database::create(directory.join("flower.redb")).map_err(|error| match error {
-                    redb::DatabaseError::UpgradeRequired(version) => anyhow::anyhow!(
-                        "Raft database uses unsupported legacy redb format v{version}; this release requires a current-format data directory"
-                    ),
-                    error => anyhow::Error::new(error).context("open Raft database"),
-                })?;
+            let shared = match shared {
+                Some(shared) => shared,
+                None => SharedDatabase::open(&directory.join("flower.redb"))?,
+            };
+            let db = shared.database();
+            // Hosted replicas and a lone replica never mix in one file.
+            let names: Vec<String> =
+                db.begin_read()?.list_tables()?.map(|table| table.name().to_owned()).collect();
+            if prefix.is_empty() && names.iter().any(|name| name.contains('/')) {
+                bail!("{} holds the database of several hosted replicas; start it with --replica", directory.display());
+            }
+            if !prefix.is_empty() && names.iter().any(|name| !name.contains('/')) {
+                bail!("{} holds a single replica's database; host replicas in a new data directory", directory.display());
+            }
             let mut transaction = db.begin_write()?;
             transaction.set_durability(Durability::Immediate)?;
             {
-                transaction.open_table(LOGS)?;
-                let mut meta = transaction.open_table(META)?;
+                transaction.open_table(tables.logs)?;
+                let mut meta = transaction.open_table(tables.meta)?;
                 let prior_id = meta
                     .get("node_id")?
                     .map(|value| serde_json::from_slice::<u64>(value.value()))
@@ -321,15 +467,15 @@ impl Store {
                     meta.insert("node_id", serde_json::to_vec(&id)?.as_slice())?;
                 }
             }
-            let state = load_or_migrate_application(&transaction)?;
-            let current_snapshot = recover_checkpoint(&transaction, id, &state)?;
+            let state = load_or_migrate_application(&transaction, tables)?;
+            let current_snapshot = recover_checkpoint(&transaction, tables, id, &state)?;
             transaction.commit()?;
-            let snapshot_index=read_snapshot_metadata(&db)?.and_then(|meta|meta.last_log_id.map(|id|id.index));
+            let snapshot_index=read_snapshot_metadata(db, tables)?.and_then(|meta|meta.last_log_id.map(|id|id.index));
             let applied_index=state.last_applied.map(|id|id.index);
             let mut unsnapshotted_bytes=0u128;
             if let Some(applied)=applied_index && snapshot_index.is_none_or(|snapshot|snapshot<applied) {
                 let transaction=db.begin_read()?;
-                let logs=transaction.open_table(LOGS)?;
+                let logs=transaction.open_table(tables.logs)?;
                 let start=snapshot_index.map_or(std::ops::Bound::Unbounded,std::ops::Bound::Excluded);
                 for entry in logs.range((start,std::ops::Bound::Included(applied)))? {
                     unsnapshotted_bytes=unsnapshotted_bytes.saturating_add(entry?.1.value().len() as u128);
@@ -342,7 +488,7 @@ impl Store {
             for path in directories_to_sync {
                 std::fs::File::open(path)?.sync_all()?;
             }
-            Ok((db, state, directory, snapshot_accounting, current_snapshot))
+            Ok((shared, tables, state, directory, snapshot_accounting, current_snapshot))
         })
         .await
         .context("open database worker")??;
@@ -351,10 +497,12 @@ impl Store {
         let store = Self {
             inner: Arc::new(Inner {
                 id,
-                db: Arc::new(db),
+                shared,
+                tables,
                 snapshot_directory: directory,
                 io: Arc::new(Mutex::new(())),
-                appending: Arc::new(PublishedLock::new(None)),
+                appending: Arc::new(PublishedLock::new(Vec::new())),
+                pending: Arc::default(),
                 snapshot_installation: AtomicU64::new(0),
                 current_snapshot: PublishedLock::new(current_snapshot),
                 snapshot_accounting,
@@ -375,6 +523,7 @@ impl Store {
     /// database, so it can be reopened at once. Raft's storage lifetime runs
     /// this before signaling drain.
     pub(super) async fn close(&self) -> anyhow::Result<()> {
+        self.inner.pending.idle().await;
         let persisted = self.inner.persistence.drain().await;
         lazy_flush::flush(self, &self.inner.lazy).await;
         self.inner.holders.idle().await;
@@ -407,13 +556,19 @@ impl Store {
         )
     }
 
+    /// Batched commits of this replica's database, shared with any other
+    /// replica hosted in it.
+    pub(super) fn storage_metrics(&self) -> Value {
+        self.inner.shared.metrics()
+    }
+
     pub(super) fn snapshot_accounting(&self) -> Arc<super::snapshot_policy::Accounting> {
         self.inner.snapshot_accounting.clone()
     }
 
     fn database_work(&self) -> DatabaseWork {
         DatabaseWork {
-            db: self.inner.db.clone(),
+            shared: self.inner.shared.clone(),
             _raft_lifetime: self.raft_lifetime.clone(),
         }
     }
@@ -614,6 +769,8 @@ impl Store {
         // Move the serialization guard into the blocking task. Even cancellation
         // of an awaiting Raft future cannot let a later I/O overtake this one.
         let guard = self.inner.io.clone().lock_owned().await;
+        // A direct transaction follows every write already queued in batches.
+        self.inner.pending.idle().await;
         profile.phase(StoragePhase::IoQueue);
         let work = self.database_work();
         tokio::task::spawn_blocking(move || {
@@ -629,6 +786,34 @@ impl Store {
         })
         .await
         .context("Raft storage worker")?
+    }
+
+    /// Stage a write into the shared database's next batch, in this replica's
+    /// storage order. It is queued under the order guard, which is released
+    /// as soon as it is queued: later writes queue behind it, and direct
+    /// transactions wait until it has committed.
+    async fn batched(
+        &self,
+        durable: bool,
+        mut profile: StorageTrace,
+        write: impl FnMut(&WriteTransaction, &mut StorageTrace) -> anyhow::Result<()> + Send + 'static,
+    ) -> anyhow::Result<()> {
+        let guard = self.inner.io.clone().lock_owned().await;
+        profile.phase(StoragePhase::IoQueue);
+        let pending = self.inner.pending.begin();
+        let submitted = self
+            .inner
+            .shared
+            .submit(durable, profile, self.raft_lifetime.clone(), write);
+        drop(guard);
+        // Count it as pending until it commits, even if this caller is cancelled.
+        tokio::spawn(async move {
+            let result = submitted.committed().await;
+            drop(pending);
+            result
+        })
+        .await
+        .context("Raft storage batch")?
     }
 
     async fn read_disk<T, F>(&self, operation: F) -> anyhow::Result<T>
@@ -659,51 +844,68 @@ impl Store {
         );
         profile.entries(&entries);
         profile.phase(StoragePhase::Prepare);
-        // Acquire before publishing or spawning: appends, votes, truncation,
+        // Acquire before publishing or submitting: appends, votes, truncation,
         // purge and application retain their storage order on cancellation.
         let guard = self.inner.io.clone().lock_owned().await;
         profile.phase(StoragePhase::IoQueue);
         let entries = Arc::new(entries);
-        let appending = self.inner.appending.clone();
-        *appending.write().expect("appending log lock") = Some(entries.clone());
-        let guard = AppendGuard {
-            logs: appending,
-            _io: guard,
-        };
-        let work = self.database_work();
-        tokio::task::spawn_blocking(move || {
-            work.run(|db| {
-                let span = profile.span();
-                let _entered = span.enter();
-                profile.phase(StoragePhase::BlockingQueue);
-                let result = (|| {
-                    let mut transaction = db.begin_write()?;
-                    transaction.set_durability(durability)?;
-                    profile.phase(StoragePhase::Begin);
-                    {
-                        let mut table = transaction.open_table(LOGS)?;
-                        for entry in entries.iter() {
-                            table.insert(entry.log_id.index, profile.encode(entry)?.as_slice())?;
-                        }
-                    }
-                    profile.phase(StoragePhase::Write);
-                    let result = transaction.commit();
-                    profile.phase(StoragePhase::Flush);
-                    result?;
-                    Ok(())
-                })();
-                // Log readers pair the buffer with an MVCC snapshot under
-                // this lock, preventing an old snapshot with an empty buffer.
-                drop(guard);
-                profile.report(result.is_ok());
-                result
+        let appended = PendingAppend::publish(&self.inner.appending, entries.clone());
+        let pending = self.inner.pending.begin();
+        let shared = self.inner.shared.clone();
+        let tables = self.inner.tables;
+        let lifetime = self.raft_lifetime.clone();
+        // The append joins the next batch of every replica sharing this
+        // database; a durable append shares that batch's one flush. Encode
+        // first: batches stage one at a time, so staging only copies bytes.
+        // Once queued, the next append may follow at once; it cannot commit
+        // before this one.
+        tokio::spawn(async move {
+            let encoded = tokio::task::spawn_blocking(move || {
+                let encoded = entries
+                    .iter()
+                    .map(|entry| Ok((entry.log_id.index, profile.encode(entry)?)))
+                    .collect::<anyhow::Result<Vec<_>>>();
+                (encoded, profile)
             })
+            .await;
+            let submitted = match encoded {
+                Ok((Ok(encoded), profile)) => Ok(shared.submit(
+                    !deferred,
+                    profile,
+                    lifetime,
+                    move |transaction, _| {
+                        let mut table = transaction.open_table(tables.logs)?;
+                        for (index, entry) in &encoded {
+                            table.insert(*index, entry.as_slice())?;
+                        }
+                        Ok(())
+                    },
+                )),
+                Ok((Err(error), profile)) => {
+                    profile.report(false);
+                    Err(error)
+                }
+                Err(error) => Err(anyhow::Error::new(error).context("Raft append encoder")),
+            };
+            drop(guard);
+            let result = match submitted {
+                Ok(submitted) => submitted.committed().await,
+                Err(error) => Err(error),
+            };
+            // Log readers pair the pending list with an MVCC snapshot under
+            // its lock: an append leaves the list only once committed.
+            drop(appended);
+            drop(pending);
+            result
         })
     }
 }
 
-fn load_or_migrate_application(transaction: &WriteTransaction) -> anyhow::Result<StoredState> {
-    let meta = transaction.open_table(META)?;
+fn load_or_migrate_application(
+    transaction: &WriteTransaction,
+    tables: Tables,
+) -> anyhow::Result<StoredState> {
+    let meta = transaction.open_table(tables.meta)?;
     let metadata = meta
         .get(STATE_META)?
         .or(meta.get(PREVIOUS_STATE_META)?)
@@ -713,16 +915,16 @@ fn load_or_migrate_application(transaction: &WriteTransaction) -> anyhow::Result
     if let Some(metadata) = metadata {
         // open_table() creates missing tables; reject an incomplete v2 layout
         // instead of recovering missing durable records as an empty database.
-        let tables = transaction
+        let existing = transaction
             .list_tables()?
             .map(|table| table.name().to_owned())
             .collect::<std::collections::BTreeSet<_>>();
         anyhow::ensure!(
-            tables.contains(DATA.name()) && tables.contains(REQUESTS.name()),
+            existing.contains(tables.data.name()) && existing.contains(tables.requests.name()),
             "incomplete application storage tables"
         );
         let data = transaction
-            .open_table(DATA)?
+            .open_table(tables.data)?
             .iter()?
             .map(|entry| {
                 let (key, value) = entry?;
@@ -733,7 +935,7 @@ fn load_or_migrate_application(transaction: &WriteTransaction) -> anyhow::Result
             })
             .collect::<anyhow::Result<_>>()?;
         let requests = transaction
-            .open_table(REQUESTS)?
+            .open_table(tables.requests)?
             .iter()?
             .map(|entry| {
                 let (key, value) = entry?;
@@ -751,12 +953,15 @@ fn load_or_migrate_application(transaction: &WriteTransaction) -> anyhow::Result
                 data,
                 requests,
             },
-            partitions: load_partitions(transaction)?,
+            partitions: load_partitions(transaction, tables)?,
         };
         super::retention::validate_snapshot(&state.application)?;
         drop(meta);
-        let mut meta = transaction.open_table(META)?;
-        meta.insert(STATE_META, serde_json::to_vec(&StateMetadata::from(&state))?.as_slice())?;
+        let mut meta = transaction.open_table(tables.meta)?;
+        meta.insert(
+            STATE_META,
+            serde_json::to_vec(&StateMetadata::from(&state))?.as_slice(),
+        )?;
         // Older binaries must fail before interpreting graph generations or
         // serving state without the projection recovery fence. Retire every
         // supported older layout, including the original application blob.
@@ -771,35 +976,40 @@ fn load_or_migrate_application(transaction: &WriteTransaction) -> anyhow::Result
         .transpose()?
         .unwrap_or_default();
     drop(meta);
-    replace_application(transaction, &state)?;
+    replace_application(transaction, tables, &state)?;
     Ok(state)
 }
 
 /// Whole-table replacement is reserved for migration and snapshot installation.
 /// Their metadata, data and receipts share the caller's one durable transaction.
-fn replace_application(transaction: &WriteTransaction, state: &StoredState) -> anyhow::Result<()> {
-    replace_application_profiled(transaction, state, &mut StorageTrace::default())
+fn replace_application(
+    transaction: &WriteTransaction,
+    tables: Tables,
+    state: &StoredState,
+) -> anyhow::Result<()> {
+    replace_application_profiled(transaction, tables, state, &mut StorageTrace::default())
 }
 
 fn replace_application_profiled(
     transaction: &WriteTransaction,
+    tables: Tables,
     state: &StoredState,
     profile: &mut StorageTrace,
 ) -> anyhow::Result<()> {
     super::retention::validate_snapshot(&state.application)?;
-    transaction.delete_table(DATA)?;
-    transaction.delete_table(REQUESTS)?;
-    replace_partitions(transaction, &state.partitions, profile)?;
+    transaction.delete_table(tables.data)?;
+    transaction.delete_table(tables.requests)?;
+    replace_partitions(transaction, tables, &state.partitions, profile)?;
     {
-        let mut data = transaction.open_table(DATA)?;
+        let mut data = transaction.open_table(tables.data)?;
         for (key, value) in &state.application.data {
             data.insert(key.as_str(), profile.encode(value)?.as_slice())?;
         }
-        let mut requests = transaction.open_table(REQUESTS)?;
+        let mut requests = transaction.open_table(tables.requests)?;
         for (key, value) in &state.application.requests {
             requests.insert(key.as_str(), profile.encode(value)?.as_slice())?;
         }
-        let mut meta = transaction.open_table(META)?;
+        let mut meta = transaction.open_table(tables.meta)?;
         meta.insert(
             STATE_META,
             profile.encode(&StateMetadata::from(state))?.as_slice(),
@@ -811,9 +1021,13 @@ fn replace_application_profiled(
     Ok(())
 }
 
-fn read_meta<T: DeserializeOwned>(db: &Database, key: &str) -> anyhow::Result<Option<T>> {
+fn read_meta<T: DeserializeOwned>(
+    db: &Database,
+    tables: Tables,
+    key: &str,
+) -> anyhow::Result<Option<T>> {
     let transaction = db.begin_read()?;
-    let table = transaction.open_table(META)?;
+    let table = transaction.open_table(tables.meta)?;
     let value = table
         .get(key)?
         .map(|value| serde_json::from_slice(value.value()))
@@ -1025,6 +1239,7 @@ impl RaftLogReader<TypeConfig> for Store {
     where
         RB: RangeBounds<u64> + Clone + Debug + OptionalSend,
     {
+        let tables = self.inner.tables;
         // Own the bounds before moving the work to a blocking thread.
         let start = range.start_bound().cloned();
         let end = range.end_bound().cloned();
@@ -1034,8 +1249,8 @@ impl RaftLogReader<TypeConfig> for Store {
             let transaction = db.begin_read()?;
             let pending = buffered.clone();
             drop(buffered);
-            let table = transaction.open_table(LOGS)?;
-            let Some(pending) = pending else {
+            let table = transaction.open_table(tables.logs)?;
+            if pending.is_empty() {
                 // Preserve the allocation-light disk-only path for catch-up
                 // and recovery when no append is in progress.
                 return table
@@ -1045,9 +1260,12 @@ impl RaftLogReader<TypeConfig> for Store {
                         Ok(serde_json::from_slice(bytes.value())?)
                     })
                     .collect();
-            };
+            }
+            // Later appends win: a truncation drains the list, so pending
+            // appends never overlap, but order would decide if they did.
             let mut result: BTreeMap<_, _> = pending
                 .iter()
+                .flat_map(|entries| entries.iter())
                 .filter(|entry| (start, end).contains(&entry.log_id.index))
                 .map(|entry| (entry.log_id.index, entry.clone()))
                 .collect();
@@ -1072,14 +1290,15 @@ impl RaftLogStorage<TypeConfig> for Store {
     type LogReader = Self;
 
     async fn get_log_state(&mut self) -> Result<LogState<TypeConfig>, StorageError<u64>> {
+        let tables = self.inner.tables;
         let appending = self.inner.appending.clone();
         self.read_disk(move |db| {
             let buffered = appending.read().expect("appending log lock");
             let transaction = db.begin_read()?;
             let pending = buffered.clone();
             drop(buffered);
-            let meta = transaction.open_table(META)?;
-            let logs = transaction.open_table(LOGS)?;
+            let meta = transaction.open_table(tables.meta)?;
+            let logs = transaction.open_table(tables.logs)?;
             let last_purged = meta
                 .get("last_purged")?
                 .map(|bytes| serde_json::from_slice::<LogId<u64>>(bytes.value()))
@@ -1091,9 +1310,10 @@ impl RaftLogStorage<TypeConfig> for Store {
                 .map(|(_, bytes)| serde_json::from_slice::<Entry<TypeConfig>>(bytes.value()))
                 .transpose()?;
             let buffered = pending
-                .as_ref()
-                .and_then(|entries| entries.last())
-                .map(|entry| entry.log_id);
+                .iter()
+                .filter_map(|entries| entries.last())
+                .map(|entry| entry.log_id)
+                .max_by_key(|log| log.index);
             Ok(LogState {
                 last_purged_log_id: last_purged,
                 last_log_id: last
@@ -1113,6 +1333,7 @@ impl RaftLogStorage<TypeConfig> for Store {
     }
 
     async fn save_vote(&mut self, vote: &Vote<u64>) -> Result<(), StorageError<u64>> {
+        let tables = self.inner.tables;
         let vote = *vote;
         self.disk_profiled(
             StorageTrace::new(self.inner.id, "vote"),
@@ -1123,7 +1344,7 @@ impl RaftLogStorage<TypeConfig> for Store {
                 transaction.set_durability(Durability::Immediate)?;
                 profile.phase(StoragePhase::Begin);
                 {
-                    let mut table = transaction.open_table(META)?;
+                    let mut table = transaction.open_table(tables.meta)?;
                     table.insert("vote", bytes.as_slice())?;
                 }
                 profile.phase(StoragePhase::Write);
@@ -1138,7 +1359,8 @@ impl RaftLogStorage<TypeConfig> for Store {
     }
 
     async fn read_vote(&mut self) -> Result<Option<Vote<u64>>, StorageError<u64>> {
-        self.read_disk(|db| read_meta(db, "vote"))
+        let tables = self.inner.tables;
+        self.read_disk(move |db| read_meta(db, tables, "vote"))
             .await
             .map_err(|error| io_error(ErrorSubject::Vote, ErrorVerb::Read, error))
     }
@@ -1161,12 +1383,15 @@ impl RaftLogStorage<TypeConfig> for Store {
     }
 
     async fn read_committed(&mut self) -> Result<Option<LogId<u64>>, StorageError<u64>> {
+        let tables = self.inner.tables;
         // Retain compatibility with databases written before save_committed
         // became optional. OpenRaft replays a legacy marker ahead of the applied
         // state, or raises an older marker to the durable applied position.
-        self.read_disk(|db| Ok(read_meta::<Option<LogId<u64>>>(db, "committed")?.flatten()))
-            .await
-            .map_err(|error| io_error(ErrorSubject::Logs, ErrorVerb::Read, error))
+        self.read_disk(move |db| {
+            Ok(read_meta::<Option<LogId<u64>>>(db, tables, "committed")?.flatten())
+        })
+        .await
+        .map_err(|error| io_error(ErrorSubject::Logs, ErrorVerb::Read, error))
     }
 
     async fn append<I>(
@@ -1215,6 +1440,7 @@ impl RaftLogStorage<TypeConfig> for Store {
     }
 
     async fn truncate(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
+        let tables = self.inner.tables;
         self.disk_profiled(
             StorageTrace::new(self.inner.id, "truncate"),
             move |db, profile| {
@@ -1222,7 +1448,7 @@ impl RaftLogStorage<TypeConfig> for Store {
                 transaction.set_durability(Durability::Immediate)?;
                 profile.phase(StoragePhase::Begin);
                 {
-                    let mut table = transaction.open_table(LOGS)?;
+                    let mut table = transaction.open_table(tables.logs)?;
                     let keys = table
                         .range(log_id.index..)?
                         .map(|item| item.map(|(key, _)| key.value()))
@@ -1243,6 +1469,7 @@ impl RaftLogStorage<TypeConfig> for Store {
     }
 
     async fn purge(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
+        let tables = self.inner.tables;
         // Keep the log until the state it would replay is written. This purge's
         // Immediate commit then persists that state too.
         self.inner
@@ -1257,7 +1484,7 @@ impl RaftLogStorage<TypeConfig> for Store {
                 transaction.set_durability(Durability::Immediate)?;
                 profile.phase(StoragePhase::Begin);
                 {
-                    let mut table = transaction.open_table(LOGS)?;
+                    let mut table = transaction.open_table(tables.logs)?;
                     let keys = table
                         .range(..=log_id.index)?
                         .map(|item| item.map(|(key, _)| key.value()))
@@ -1265,7 +1492,7 @@ impl RaftLogStorage<TypeConfig> for Store {
                     for key in keys {
                         table.remove(key)?;
                     }
-                    let mut meta = transaction.open_table(META)?;
+                    let mut meta = transaction.open_table(tables.meta)?;
                     meta.insert("last_purged", profile.encode(&log_id)?.as_slice())?;
                 }
                 profile.phase(StoragePhase::Write);
@@ -1295,6 +1522,7 @@ impl RaftStateMachine<TypeConfig> for Store {
         I: IntoIterator<Item = Entry<TypeConfig>> + OptionalSend,
         I::IntoIter: OptionalSend,
     {
+        let tables = self.inner.tables;
         let entries: Vec<_> = entries.into_iter().collect();
         let mut profile = StorageTrace::new(self.inner.id, "apply");
         profile.entries(&entries);
@@ -1322,7 +1550,7 @@ impl RaftStateMachine<TypeConfig> for Store {
             profile.phase(StoragePhase::BlockingQueue);
             let applied_bytes={
                 let transaction=db.begin_read()?;
-                let logs=transaction.open_table(LOGS)?;
+                let logs=transaction.open_table(tables.logs)?;
                 let mut bytes=0u128;
                 for entry in &entries {
                     // Normal Raft application reads the already encoded durable
@@ -1449,6 +1677,7 @@ impl RaftStateMachine<TypeConfig> for Store {
         meta: &SnapshotMeta<u64, BasicNode>,
         snapshot: Box<SnapshotData>,
     ) -> Result<(), StorageError<u64>> {
+        let tables = self.inner.tables;
         let mut profile = StorageTrace::new(self.inner.id, "install_snapshot");
         let mut file = (*snapshot).into_std().await.map_err(|error| {
             io_error(
@@ -1534,8 +1763,8 @@ impl RaftStateMachine<TypeConfig> for Store {
             let mut transaction = db.begin_write()?;
             transaction.set_durability(Durability::Immediate)?;
             profile.phase(StoragePhase::Begin);
-            replace_application_profiled(&transaction, &next, profile)?;
-            write_checkpoint(&transaction, &snapshot_meta, profile)?;
+            replace_application_profiled(&transaction, tables, &next, profile)?;
+            write_checkpoint(&transaction, tables, &snapshot_meta, profile)?;
             profile.phase(StoragePhase::Write);
             let result = transaction.commit();
             profile.phase(StoragePhase::Flush);
@@ -1571,6 +1800,7 @@ impl RaftStateMachine<TypeConfig> for Store {
     async fn get_current_snapshot(
         &mut self,
     ) -> Result<Option<RaftSnapshot<TypeConfig>>, StorageError<u64>> {
+        let tables = self.inner.tables;
         let image = self
             .inner
             .current_snapshot
@@ -1584,7 +1814,7 @@ impl RaftStateMachine<TypeConfig> for Store {
         // formats. The first checkpoint atomically retires that duplicate.
         let directory = self.inner.snapshot_directory.clone();
         let snapshot = self
-            .read_disk(move |db| read_snapshot(db, &directory))
+            .read_disk(move |db| read_snapshot(db, tables, &directory))
             .await
             .map_err(|error| io_error(ErrorSubject::Snapshot(None), ErrorVerb::Read, error))?;
         Ok(snapshot.map(|snapshot| RaftSnapshot {
@@ -1620,6 +1850,7 @@ impl Store {
         capture: SnapshotCapture,
         mut profile: StorageTrace,
     ) -> anyhow::Result<RaftSnapshot<TypeConfig>> {
+        let tables = self.inner.tables;
         // The checkpoint lets Raft prune the logs up to the captured state, so
         // that state must be written first. Its Immediate commit persists it.
         self.inner.persistence.drain().await?;
@@ -1642,7 +1873,7 @@ impl Store {
                 let last_applied = capture.state.last_applied;
                 let replaced =
                     inner.snapshot_installation.load(Ordering::Acquire) != capture.installation;
-                let newer = read_snapshot_metadata(db)?.is_some_and(|meta| {
+                let newer = read_snapshot_metadata(db, tables)?.is_some_and(|meta| {
                     meta.last_log_id.map(|id| id.index) > last_applied.map(|id| id.index)
                 });
                 if replaced || newer {
@@ -1651,8 +1882,8 @@ impl Store {
                 let mut transaction = db.begin_write()?;
                 transaction.set_durability(Durability::Immediate)?;
                 profile.phase(StoragePhase::Begin);
-                let meta = allocate_snapshot_meta(&transaction, inner.id, &capture.state)?;
-                write_checkpoint(&transaction, &meta, profile)?;
+                let meta = allocate_snapshot_meta(&transaction, tables, inner.id, &capture.state)?;
+                write_checkpoint(&transaction, tables, &meta, profile)?;
                 profile.phase(StoragePhase::Write);
                 // This flush makes the existing application tables durable before
                 // Raft can prune their source log entries. No full image is written.

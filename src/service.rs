@@ -1152,5 +1152,6 @@ async fn resource_metrics(
     }
     let mut metrics = app.admission.metrics();
     metrics["snapshots"] = app.consensus.snapshot_policy_metrics();
+    metrics["storage"] = app.consensus.storage_metrics();
     Ok(Json(metrics))
 }

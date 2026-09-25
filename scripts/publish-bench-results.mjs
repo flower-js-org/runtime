@@ -82,6 +82,7 @@ export function summarizePublishedRun(report) {
     recoveryMaxMs: recoveries.length ? Math.max(...recoveries) : null,
     measuredAt: report.loadEndedAt,
     cpu: report.environment?.cpu ?? "CPU not recorded",
+    hosts: report.hosts?.count ?? null,
     transport: report.options.http2 ? "HTTP/2" : "HTTP/1.1",
     guest: guestOf(report),
     guestLabel: GUEST_LABELS[guestOf(report)],
@@ -126,7 +127,7 @@ export function renderPublishedSummary(report, { root = "", workload = true, oth
 ${latencyFigure(report)}
 <p class="benchmark-policy"><strong>${local ? "Replica-local reads: lag is allowed." : "Fresh reads: quorum-confirmed per group."}</strong> ${number(run.readPercent, 1)}% reads / ${number(run.mutationPercent, 1)}% mutations · ${run.transport} · ${number(run.durationSeconds, 1)} measured seconds.</p>
 <p><strong>${run.passed ? "Run passed." : "Run failed."} ${run.auditedGroups}/${run.groups} group audits passed.</strong> ${escape(recovery)}</p>
-<p class="benchmark-context">${escape(run.cpu)}; all replicas and load generators share one machine. Completed customer calls use the union measurement window; retries, worker traffic, and explicit replays do not inflate throughput. ${local ? "Reads may be stale; mutations and audits retain fresh checks." : "Each group has its own fresh-read boundary."} Application code: ${escape(run.guestLabel)}.</p>
+<p class="benchmark-context">${escape(run.cpu)}; all replicas and load generators share one machine${run.hosts ? `, where ${run.hosts} host processes each serve one replica of every group over one shared database` : ""}. Completed customer calls use the union measurement window; retries, worker traffic, and explicit replays do not inflate throughput. ${local ? "Reads may be stale; mutations and audits retain fresh checks." : "Each group has its own fresh-read boundary."} Application code: ${escape(run.guestLabel)}.</p>
 ${others.length ? guestComparison([report, ...others], root) : ""}
 <p class="benchmark-links"><a href="${root}bench/${run.stem}.html">Charts &amp; every group →</a><a href="${root}bench/${run.stem}.json">Raw measurements ↓</a>${others.map((other) => `<a href="${root}bench/${stemOf(guestOf(other))}.html">${escape(GUEST_LABELS[guestOf(other)])} report →</a>`).join("")}${workload ? `<a href="${root}operate/benchmarks.html">Workload &amp; reproduction →</a>` : ""}</p>
 </section>`;

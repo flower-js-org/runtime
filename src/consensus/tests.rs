@@ -14,7 +14,10 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
 use super::store::Store;
-use super::{ApplyResult, Commit, CompactBatch, Consensus, RaftCommand, TypeConfig};
+use super::{
+    ApplyResult, Commit, CompactBatch, Consensus, RaftCommand, SharedDatabase, Storage, TypeConfig,
+};
+use std::sync::Arc;
 
 mod compact;
 mod deep_json;
@@ -486,19 +489,58 @@ struct Node {
     id: u64,
     address: String,
     directory: TempDir,
+    // A process hosting this replica with others: its database and prefix.
+    host: Option<(Host, String)>,
     consensus: Option<Consensus>,
     server: Option<JoinHandle<()>>,
     stop_server: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
+/// One database shared by the replicas of a simulated host process. Stopping
+/// every replica and forgetting the database closes it, as an exit would.
+#[derive(Clone)]
+struct Host {
+    path: std::path::PathBuf,
+    database: Arc<std::sync::Mutex<Option<Arc<SharedDatabase>>>>,
+}
+
+impl Host {
+    fn new(directory: &TempDir) -> Self {
+        Self {
+            path: directory.path().join("flower.redb"),
+            database: Arc::default(),
+        }
+    }
+
+    fn database(&self) -> Arc<SharedDatabase> {
+        let mut database = self.database.lock().unwrap();
+        database
+            .get_or_insert_with(|| SharedDatabase::open(&self.path).unwrap())
+            .clone()
+    }
+
+    fn forget(&self) {
+        self.database.lock().unwrap().take();
+    }
+}
+
 impl Node {
     async fn new(id: u64) -> Self {
+        Self::start_new(id, None).await
+    }
+
+    async fn hosted(id: u64, host: &Host, prefix: &str) -> Self {
+        Self::start_new(id, Some((host.clone(), prefix.into()))).await
+    }
+
+    async fn start_new(id: u64, host: Option<(Host, String)>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap().to_string();
         let mut node = Self {
             id,
             address,
             directory: tempfile::tempdir().unwrap(),
+            host,
             consensus: None,
             server: None,
             stop_server: None,
@@ -508,14 +550,17 @@ impl Node {
     }
 
     async fn start_with_listener(&mut self, listener: TcpListener) {
-        let consensus = Consensus::open(
-            self.id,
-            self.address.clone(),
-            self.directory.path().into(),
-            TEST_TOKEN.into(),
-        )
-        .await
-        .unwrap();
+        let storage = match &self.host {
+            Some((host, prefix)) => Storage::Shared {
+                database: host.database(),
+                prefix: prefix.clone(),
+                directory: self.directory.path().into(),
+            },
+            None => self.directory.path().into(),
+        };
+        let consensus = Consensus::open(self.id, self.address.clone(), storage, TEST_TOKEN.into())
+            .await
+            .unwrap();
         let router = consensus.router();
         let (stop_server, stopped) = tokio::sync::oneshot::channel();
         self.stop_server = Some(stop_server);
@@ -1388,4 +1433,97 @@ async fn distinct_peer_credentials_cannot_administer_and_operator_cannot_send_ra
     );
     consensus.shutdown().await.unwrap();
     server.abort();
+}
+
+/// Two groups on three hosts, each host serving one replica of both from one
+/// shared database: a host outage and full restart keep the groups apart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn groups_hosted_on_shared_databases_survive_host_loss_and_restart() {
+    let directories: Vec<TempDir> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+    let hosts: Vec<Host> = directories.iter().map(Host::new).collect();
+    let mut groups = Vec::new();
+    for name in ["orders/", "billing/"] {
+        let mut nodes = Vec::new();
+        for (index, host) in hosts.iter().enumerate() {
+            nodes.push(Node::hosted(index as u64 + 1, host, name).await);
+        }
+        nodes[0]
+            .raft()
+            .initialize(
+                nodes
+                    .iter()
+                    .map(|node| (node.id, node.address.clone()))
+                    .collect(),
+            )
+            .await
+            .unwrap();
+        groups.push(nodes);
+    }
+    for (group, nodes) in groups.iter().enumerate() {
+        let leader = leader(nodes).await;
+        let value = group as u64 * 10;
+        nodes[leader]
+            .raft()
+            .commit_many(vec![commit("a", 0, value + 1), commit("b", 1, value + 2)])
+            .await
+            .unwrap();
+    }
+    // Lose host 1: both groups keep serving on the other two.
+    for nodes in &mut groups {
+        nodes[0].stop().await;
+    }
+    hosts[0].forget();
+    for (group, nodes) in groups.iter().enumerate() {
+        let leader = leader(nodes).await;
+        assert_ne!(leader, 0);
+        nodes[leader]
+            .raft()
+            .commit(commit("c", 2, group as u64 * 10 + 3))
+            .await
+            .unwrap();
+    }
+    for nodes in &mut groups {
+        nodes[0].restart().await;
+    }
+    for nodes in &groups {
+        for node in nodes {
+            wait_revision(node, 3).await;
+        }
+    }
+    // Stop every host, then bring them all back.
+    for nodes in &mut groups {
+        for node in nodes.iter_mut() {
+            node.stop().await;
+        }
+    }
+    for host in &hosts {
+        host.forget();
+    }
+    for nodes in &mut groups {
+        for node in nodes.iter_mut() {
+            node.restart().await;
+        }
+    }
+    for (group, nodes) in groups.iter().enumerate() {
+        let leader = leader(nodes).await;
+        let state = nodes[leader].raft().read().await.unwrap();
+        assert_eq!(state.revision, 3);
+        assert_eq!(
+            state.data.get("source:[\"counter\",\"one\"]"),
+            Some(&json!(group as u64 * 10 + 3))
+        );
+        assert!(
+            nodes[leader]
+                .raft()
+                .commit(commit("a", 0, 1))
+                .await
+                .unwrap()
+                .duplicate
+        );
+    }
+    for nodes in &mut groups {
+        for node in nodes.iter_mut() {
+            node.stop().await;
+        }
+    }
 }

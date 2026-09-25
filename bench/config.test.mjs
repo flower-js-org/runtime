@@ -16,7 +16,7 @@ test("defaults are bounded and resolve paths from the checkout", () => {
     binary: fileURLToPath(new URL("../target/release/flower", import.meta.url)),
     json: fileURLToPath(new URL("../bench/results/latest.json", import.meta.url)),
     html: fileURLToPath(new URL("../bench/results/latest.html", import.meta.url)), baseline: null, cpuProfile: null,
-    chaos: false, http2: false, keepData: false, help: false,
+    chaos: false, hosted: false, http2: false, keepData: false, help: false,
   });
   result.duration = 123;
   assert.equal(parseOptions([]).duration, 10);
@@ -40,7 +40,7 @@ test("all numeric, text, and boolean options parse into driver fields", () => {
     driver: "rust", driverBinary: fileURLToPath(new URL("../target/release/flower-bench-driver", import.meta.url)),
     binary: resolve("a flower"), json: resolve("output report.json"),
     html: resolve("output report.html"), baseline: null, cpuProfile: null,
-    chaos: true, http2: true, keepData: true, help: false,
+    chaos: true, hosted: false, http2: true, keepData: true, help: false,
   });
   assert.equal(parseOptions(["--seed=0"]).seed, "0");
   assert.equal(parseOptions(["--initialization", "per-invocation"]).initialization, "per-invocation");

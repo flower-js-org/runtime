@@ -46,7 +46,11 @@ reports customer goodput separately from offered and driver-dropped arrivals.
   --baseline PATH            Earlier JSON report for HTML before/after comparison
   --cpu-profile PATH         macOS sample text output; initial leader, up to 10s
                              from load start at 1ms; perturbs performance
-  --chaos                    Kill a leader during load (requires 3 nodes)
+  --chaos                    Kill a leader during load (requires 3 nodes); with
+                             --hosted, kill the host leading the most groups
+  --hosted                   One server process per replica slot, hosting that
+                             replica of every group over one shared database,
+                             so all groups share its fsyncs
   --http2                    Use pooled h2c for application methods (default HTTP/1)
   --query-routing MODE       replicas (default) or leader; queries use the chosen consistency
   --read-consistency MODE     replica-local (default) or fresh for customer previews;
@@ -83,7 +87,7 @@ const NUMERIC = {
   nodes: { field: "nodes", initial: 3, min: 1, max: 3, integer: true },
 };
 
-const BOOLEAN = { chaos: "chaos", http2: "http2", "keep-data": "keepData", help: "help" };
+const BOOLEAN = { chaos: "chaos", hosted: "hosted", http2: "http2", "keep-data": "keepData", help: "help" };
 const TEXT = { seed: "seed", guest: "guest", "guest-wasm": "guestWasm", initialization: "initialization", "query-routing": "queryRouting", "read-consistency": "readConsistency", "driver-binary": "driverBinary", binary: "binary", json: "json", html: "html", baseline: "baseline", "cpu-profile": "cpuProfile" };
 const NUMBER_PATTERN = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 
@@ -104,6 +108,7 @@ function defaults() {
     baseline: null,
     cpuProfile: null,
     chaos: false,
+    hosted: false,
     http2: false,
     keepData: false,
     help: false,

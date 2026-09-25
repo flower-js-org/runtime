@@ -9,6 +9,35 @@ export function cpuMilliseconds(text) {
   return Number.isFinite(value) ? value : null;
 }
 
+/** Storage commit rates between two `/admin/resources` samples per node. A
+ * node that restarted in between (another PID, or counters that went back)
+ * is reported as unmeasured rather than partially counted. */
+export function storageRates(start, end, seconds) {
+  const nodes = {};
+  // Older servers report no busy time; count only what every node reports.
+  const reported = ["batches", "durableBatches", "stagedWrites", "busyMicros", "commitMicros"]
+    .filter((key) => Object.values(start ?? {}).every((node) => Number.isSafeInteger(node[key])));
+  const totals = Object.fromEntries(reported.map((key) => [key, 0]));
+  let complete = seconds > 0;
+  for (const [id, before] of Object.entries(start ?? {})) {
+    const after = end?.[id];
+    if (!after || after.pid !== before.pid || Object.keys(totals).some((key) =>
+      !Number.isSafeInteger(after[key]) || !Number.isSafeInteger(before[key]) || after[key] < before[key])) {
+      nodes[id] = null;
+      complete = false;
+      continue;
+    }
+    nodes[id] = {};
+    for (const key of Object.keys(totals)) {
+      totals[key] += after[key] - before[key];
+      nodes[id][`${key}PerSecond`] = (after[key] - before[key]) / seconds;
+    }
+    // The committer's share of wall time: near 1, batches queue behind it.
+    if ("busyMicros" in totals) nodes[id].busyFraction = nodes[id].busyMicrosPerSecond / 1e6;
+  }
+  return { seconds, complete, nodes, ...Object.fromEntries(Object.entries(totals).map(([key, value]) => [`${key}PerSecond`, value / seconds])) };
+}
+
 export class ServerCpuSamples {
   previous = new Map();
   totals = new Map();

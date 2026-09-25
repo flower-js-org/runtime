@@ -1,9 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { fork } from "node:child_process";
+import { execFile, fork } from "node:child_process";
 import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { setTimeout as delay } from "node:timers/promises";
+import { HostCluster } from "./cluster.mjs";
 import { Histogram, summarizeApplication } from "./metrics.mjs";
+import { cpuMilliseconds, ServerCpuSamples, storageRates } from "./resources.mjs";
 import { renderGroupsReport } from "./multi-group-report.mjs";
 
 /** Sum completed work over the union of simultaneous load intervals, never sum
@@ -109,6 +113,12 @@ export function summarizeGroups(reports, options) {
       colocatedNativeDrivers: reports.filter((report) => report.driver?.kind === "rust").length,
     } : undefined,
     runtime: reports[0]?.runtime, binary: reports[0]?.binary, driver: reports[0]?.driver, bundleHash: reports[0]?.bundleHash,
+    // Per-process storage commits summed over groups; shared hosts report theirs under `hosts`.
+    storage: reports.every((r) => r.storage) ? {
+      complete: reports.every((r) => r.storage.complete),
+      ...Object.fromEntries(["batchesPerSecond", "durableBatchesPerSecond", "stagedWritesPerSecond"].map((key) =>
+        [key, reports.reduce((total, r) => total + r.storage[key], 0)])),
+    } : undefined,
     durationMs, synchronizedOverlapMs, startSkewMs: validWindows ? Math.max(...starts) - Math.min(...starts) : null,
     loadStartedAt: start === null ? null : new Date(start).toISOString(), loadEndedAt: end === null ? null : new Date(end).toISOString(),
     offeredLoad:{mode:options.offeredRate>0?"open-loop":"closed-loop",ratePerGroup:options.offeredRate??0,groups:options.groups,...offeredTotals,schedulingLagMs:schedulingLag.snapshot()},
@@ -208,10 +218,39 @@ export function createProcessCleanup({ kill = process.kill.bind(process), platfo
   return { track, stop, finish, errors };
 }
 
+/** Sample shared hosts' CPU once a second while `inLoad()`. */
+function sampleHosts(hosts, inLoad) {
+  const samples = new ServerCpuSamples();
+  let stopped = false;
+  const task = (async () => {
+    while (!stopped) {
+      const pids = hosts.pids;
+      if (pids.length) {
+        try {
+          const sampledAt = performance.now();
+          const phase = inLoad() ? "load" : "outside";
+          const { stdout } = await promisify(execFile)("ps", ["-o", "pid=,time=", "-p", pids.map(({ pid }) => pid).join(",")], { timeout: 2_000 });
+          for (const line of stdout.trim().split("\n")) {
+            const [pid, time] = line.trim().split(/\s+/);
+            const host = pids.find((entry) => entry.pid === Number(pid));
+            const cpuMs = cpuMilliseconds(time ?? "");
+            if (host && cpuMs !== null) samples.record(host.id, host.pid, cpuMs, sampledAt, phase);
+          }
+        } catch { /* A host exiting between listing and sampling. */ }
+      }
+      await delay(1_000);
+    }
+  })();
+  return { samples, stop: async () => { stopped = true; await task; } };
+}
+
 export async function runGroups(options) {
   const directory = resolve(dirname(options.json), basename(options.json).replace(/\.json$/i, "") + "-groups");
   await mkdir(directory, { recursive: true });
   const children = [];
+  let hosts = null;
+  let hostSampler = null;
+  let hostChaos = Promise.resolve();
   const runId = randomUUID();
   let stopping = false;
   const cleanup = createProcessCleanup();
@@ -246,20 +285,27 @@ export async function runGroups(options) {
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   try {
+    if (options.hosted) {
+      hosts = new HostCluster(options);
+      await hosts.start();
+      console.log(`${options.nodes} host processes serve ${options.groups} groups over one shared database each.`);
+    }
     for (let group = 0; group < options.groups; group++) {
-      const childOptions = { ...options, groups: 1, runId,
+      const childOptions = { ...options, groups: 1, runId, ...(hosts ? { attach: hosts.attachment(group) } : {}),
         ...(options.otelCapture ? { otelCapture: { ...options.otelCapture, group } } : {}),
         ...(options.mixedProfile ? { mixedProfile: { ...options.mixedProfile, group } } : {}),
         seed: `${options.seed}:group-${group}`, tenantIds: Array.from({ length: options.tenants }, (_, i) => `tenant-${group * options.tenants + i}`),
         json: resolve(directory, `group-${group}.json`), html: resolve(directory, `group-${group}.html`),
       };
       const child = fork(fileURLToPath(new URL("./multi-group-worker.mjs", import.meta.url)), [JSON.stringify(childOptions)], { detached: process.platform !== "win32", stdio: ["ignore", "inherit", "inherit", "ipc"] });
-      let readyResolve, readyReject;
+      let readyResolve, readyReject, recoveredResolve;
       const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
+      const recovered = new Promise((resolve) => { recoveredResolve = resolve; });
       const trackServer = cleanup.track(child);
       child.on("message", (message) => {
         if (message?.type === "ready") readyResolve();
         else if (message?.type === "server-process") trackServer(message.event);
+        else if (message?.type === "host-recovered") recoveredResolve();
       });
       const done = new Promise((resolve, reject) => {
         child.once("error", (error) => { readyReject(error); reject(error); });
@@ -270,18 +316,47 @@ export async function runGroups(options) {
       });
       // Install rejection handlers immediately while later children start.
       ready.catch(() => {}); done.catch(() => {});
-      children.push({ child, ready, done, options: childOptions });
+      children.push({ child, ready, done, recovered, options: childOptions });
     }
     await Promise.race([Promise.all(children.map((child) => child.ready)), interrupted]);
     if (stopping) throw new Error("Benchmark interrupted before synchronized start");
     const startAt = Date.now() + 250;
     console.log(`Starting ${options.groups} independent ${options.nodes}-node Raft groups together; ${options.groups * options.concurrency} parallel customer loops, ${options.readConsistency} reads.`);
     for (const { child } of children) child.send({ type: "start", startAt });
+    let hostStorage = Promise.resolve(null);
+    if (hosts) {
+      hostStorage = (async () => {
+        await delay(Math.max(0, startAt - Date.now()));
+        const start = await hosts.storageCounters(), started = performance.now();
+        await delay(options.duration * 1_000);
+        return storageRates(start, await hosts.storageCounters(), (performance.now() - started) / 1_000);
+      })().catch(() => null);
+      hostSampler = sampleHosts(hosts, () => Date.now() >= startAt && Date.now() <= startAt + options.duration * 1_000);
+      if (options.chaos) hostChaos = (async () => {
+        await delay(Math.max(0, startAt + options.duration * 500 - Date.now()));
+        const [host, leaders] = await hosts.busiestHost();
+        const crashedAt = new Date().toISOString();
+        await hosts.crash(host);
+        console.log(`A dragon ate host ${host}, which led ${leaders} of ${options.groups} groups…`);
+        for (const { child } of children) if (child.connected) child.send({ type: "host-crash", host, crashedAt });
+        // Restart once every group serves again, as a restarted machine would.
+        await Promise.all(children.map(({ recovered, done }) => Promise.race([recovered, done])));
+        await delay(Math.max(0, 250 - (Date.now() - Date.parse(crashedAt))));
+        await hosts.restart(host);
+        for (const { child } of children) if (child.connected) child.send({ type: "host-restarted", host });
+      })();
+    }
     const exits = await Promise.race([Promise.all(children.map((child) => child.done)), interrupted]);
+    await hostChaos;
     const reports = await Promise.all(children.map(({ options }) => readFile(options.json, "utf8").then(JSON.parse)));
     if (reports.some((report) => report.runId !== runId)) throw new Error("A group did not write a report for this run");
     const report = summarizeGroups(reports, options);
     report.runId = runId;
+    if (hosts) {
+      await hostSampler.stop();
+      report.hosts = { count: hosts.hosts.length, replicasPerHost: options.groups, serverCpuSampledLoad: hostSampler.samples.snapshot(),
+        storage: await hostStorage };
+    }
     exits.forEach(({ code, signal }, i) => {
       if (code !== 0) { report.violations.push(`Group ${i} exited with ${code ?? signal}`); report.passed = report.correctnessPassed = false; }
     });
@@ -307,6 +382,9 @@ export async function runGroups(options) {
     return report;
   } finally {
     stop();
+    await hostSampler?.stop();
+    await hostChaos.catch((error) => console.error("Host crash:", error));
+    try { await hosts?.close(); } catch (error) { console.error("Benchmark host cleanup:", error); }
     const errors = await cleanup.finish();
     for (const error of errors) console.error("Benchmark process cleanup:", error);
     // Failed permission checks must not leave this coordinator waiting forever

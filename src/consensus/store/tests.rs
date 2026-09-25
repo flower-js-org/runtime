@@ -58,7 +58,7 @@ async fn pending_append_is_readable_before_flush_but_never_acknowledged_or_appli
         .unwrap();
     // Hold the real database writer so the append cannot reach its commit.
     // MVCC readers and the pending suffix must remain available to replication.
-    let blocker = store.inner.db.begin_write().unwrap();
+    let blocker = store.inner.shared.database().begin_write().unwrap();
     let mut appender = store.clone();
     let entries = vec![
         entry(2, command("second", 1, &[], &[])),
@@ -93,7 +93,8 @@ async fn pending_append_is_readable_before_flush_but_never_acknowledged_or_appli
     assert_eq!(
         store
             .inner
-            .db
+            .shared
+            .database()
             .begin_read()
             .unwrap()
             .open_table(LOGS)
@@ -113,7 +114,7 @@ async fn pending_append_is_readable_before_flush_but_never_acknowledged_or_appli
     );
     drop(blocker);
     append.await.unwrap();
-    assert!(store.inner.appending.read().unwrap().is_none());
+    assert!(store.inner.appending.read().unwrap().is_empty());
     drop(appender);
     store.close().await.unwrap();
     drop(store);
@@ -129,7 +130,7 @@ async fn cancelled_append_still_flushes_before_truncation_and_releases_its_buffe
         .blocking_append([entry(1, command("first", 0, &[], &[]))])
         .await
         .unwrap();
-    let blocker = store.inner.db.begin_write().unwrap();
+    let blocker = store.inner.shared.database().begin_write().unwrap();
     let mut appender = store.clone();
     let mut append = Box::pin(appender.blocking_append([entry(2, command("second", 1, &[], &[]))]));
     assert!(futures_util::poll!(&mut append).is_pending());
@@ -143,7 +144,7 @@ async fn cancelled_append_still_flushes_before_truncation_and_releases_its_buffe
     assert_eq!(store.try_get_log_entries(..).await.unwrap().len(), 2);
     drop(blocker);
     truncate.await.unwrap();
-    assert!(store.inner.appending.read().unwrap().is_none());
+    assert!(store.inner.appending.read().unwrap().is_empty());
     assert_eq!(store.try_get_log_entries(..).await.unwrap().len(), 1);
     drop(appender);
     drop(truncator);
@@ -157,7 +158,7 @@ async fn cancelled_append_still_flushes_before_truncation_and_releases_its_buffe
 async fn successive_appends_share_one_buffer_and_readers_never_lose_the_suffix() {
     let directory = tempfile::tempdir().unwrap();
     let mut store = Store::open(1, directory.path().into()).await.unwrap();
-    let blocker = store.inner.db.begin_write().unwrap();
+    let blocker = store.inner.shared.database().begin_write().unwrap();
     let first = store
         .start_append(vec![entry(1, command("first", 0, &[], &[]))], Durability::Immediate)
         .await;
@@ -269,7 +270,7 @@ fn legacy_database(path: &std::path::Path, state: &StoredState) -> StoredSnapsho
 }
 
 fn snapshot_envelope(store: &Store) -> Vec<u8> {
-    let transaction = store.inner.db.begin_read().unwrap();
+    let transaction = store.inner.shared.database().begin_read().unwrap();
     let table = transaction.open_table(META).unwrap();
     table
         .get(CHECKPOINT_KEY)
@@ -281,9 +282,13 @@ fn snapshot_envelope(store: &Store) -> Vec<u8> {
 }
 
 fn has_checkpoint(store: &Store) -> bool {
-    read_meta::<SnapshotMeta<u64, BasicNode>>(&store.inner.db, CHECKPOINT_KEY)
-        .unwrap()
-        .is_some()
+    read_meta::<SnapshotMeta<u64, BasicNode>>(
+        store.inner.shared.database(),
+        Tables::new(""),
+        CHECKPOINT_KEY,
+    )
+    .unwrap()
+    .is_some()
 }
 
 #[test]
@@ -408,19 +413,23 @@ async fn legacy_snapshots_upgrade_on_build_and_binary_snapshots_survive_restart_
     let envelope = snapshot_envelope(&store);
     assert!(has_checkpoint(&store));
     assert!(
-        read_meta::<StoredSnapshot>(&store.inner.db, "snapshot")
+        read_meta::<StoredSnapshot>(store.inner.shared.database(), Tables::new(""), "snapshot")
             .unwrap()
             .is_none()
     );
-    let sequence = read_meta::<u64>(&store.inner.db, "snapshot_sequence")
-        .unwrap()
-        .unwrap();
+    let sequence = read_meta::<u64>(
+        store.inner.shared.database(),
+        Tables::new(""),
+        "snapshot_sequence",
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(sequence, 1);
 
     // Both fields use one redb transaction. An interrupted later write cannot
     // expose a replacement snapshot with the previous sequence or vice versa.
     {
-        let transaction = store.inner.db.begin_write().unwrap();
+        let transaction = store.inner.shared.database().begin_write().unwrap();
         {
             let mut table = transaction.open_table(META).unwrap();
             table.insert("snapshot_sequence", b"99".as_slice()).unwrap();
@@ -432,7 +441,12 @@ async fn legacy_snapshots_upgrade_on_build_and_binary_snapshots_survive_restart_
     }
     assert_eq!(snapshot_envelope(&store), envelope);
     assert_eq!(
-        read_meta::<u64>(&store.inner.db, "snapshot_sequence").unwrap(),
+        read_meta::<u64>(
+            store.inner.shared.database(),
+            Tables::new(""),
+            "snapshot_sequence"
+        )
+        .unwrap(),
         Some(sequence)
     );
     store.close().await.unwrap();
@@ -446,7 +460,12 @@ async fn legacy_snapshots_upgrade_on_build_and_binary_snapshots_survive_restart_
     assert_ne!(rebuilt.meta.snapshot_id, meta.snapshot_id);
     assert_eq!(snapshot_bytes(rebuilt.snapshot).await, wire);
     assert_eq!(
-        read_meta::<u64>(&reopened.inner.db, "snapshot_sequence").unwrap(),
+        read_meta::<u64>(
+            reopened.inner.shared.database(),
+            Tables::new(""),
+            "snapshot_sequence"
+        )
+        .unwrap(),
         Some(sequence + 1)
     );
 
@@ -495,7 +514,7 @@ async fn malformed_stored_snapshot_is_an_error_and_never_an_absent_snapshot() {
     let mut corrupt = original.clone();
     corrupt.pop();
     {
-        let mut transaction = store.inner.db.begin_write().unwrap();
+        let mut transaction = store.inner.shared.database().begin_write().unwrap();
         transaction.set_durability(Durability::Immediate).unwrap();
         transaction
             .open_table(META)
@@ -504,7 +523,7 @@ async fn malformed_stored_snapshot_is_an_error_and_never_an_absent_snapshot() {
             .unwrap();
         transaction.commit().unwrap();
     }
-    assert!(read_snapshot_metadata(&store.inner.db).is_err());
+    assert!(read_snapshot_metadata(store.inner.shared.database(), Tables::new("")).is_err());
     store.close().await.unwrap();
     drop(store);
     // Recovery now reads the snapshot position to reconstruct byte accounting.
@@ -522,16 +541,16 @@ async fn legacy_migration_is_atomic_preserves_raft_state_and_restarts_incrementa
     {
         let db = Database::create(directory.path().join("flower.redb")).unwrap();
         let transaction = db.begin_write().unwrap();
-        let staged = load_or_migrate_application(&transaction).unwrap();
+        let staged = load_or_migrate_application(&transaction, Tables::new("")).unwrap();
         assert_eq!(staged.application, old.application);
         transaction.abort().unwrap();
         assert!(
-            read_meta::<StateMetadata>(&db, STATE_META)
+            read_meta::<StateMetadata>(&db, Tables::new(""), STATE_META)
                 .unwrap()
                 .is_none()
         );
         assert_eq!(
-            read_meta::<StoredState>(&db, "state")
+            read_meta::<StoredState>(&db, Tables::new(""), "state")
                 .unwrap()
                 .unwrap()
                 .application,
@@ -565,7 +584,7 @@ async fn legacy_migration_is_atomic_preserves_raft_state_and_restarts_incrementa
     assert_eq!(snapshot.meta, old_snapshot.meta);
     assert_eq!(snapshot_bytes(snapshot.snapshot).await, old_snapshot.data);
     assert!(
-        read_meta::<StoredState>(&store.inner.db, "state").is_err(),
+        read_meta::<StoredState>(store.inner.shared.database(), Tables::new(""), "state").is_err(),
         "old binaries must reject the retired layout"
     );
 
@@ -682,12 +701,13 @@ async fn grouped_deltas_preserve_order_dedup_cas_and_untouched_allocations() {
         );
         assert_eq!(guard.application.data.len(), 1);
         assert_eq!(guard.application.requests.len(), 4);
-        let transaction = store.inner.db.begin_read().unwrap();
+        let transaction = store.inner.shared.database().begin_read().unwrap();
         assert_eq!(transaction.open_table(DATA).unwrap().len().unwrap(), 1);
         assert_eq!(transaction.open_table(REQUESTS).unwrap().len().unwrap(), 4);
-        let metadata = read_meta::<StateMetadata>(&store.inner.db, STATE_META)
-            .unwrap()
-            .unwrap();
+        let metadata =
+            read_meta::<StateMetadata>(store.inner.shared.database(), Tables::new(""), STATE_META)
+                .unwrap()
+                .unwrap();
         assert_eq!(metadata.revision, 5);
         assert_eq!(metadata.last_applied, Some(log_id(3)));
     }
@@ -780,11 +800,11 @@ async fn apply_publishes_before_its_write_and_cancelled_drains_still_persist_it(
     let directory = tempfile::tempdir().unwrap();
     let mut store = Store::open(1, directory.path().into()).await.unwrap();
     // Hold redb's writer lock: the apply must still complete and publish.
-    let db = store.inner.db.clone();
+    let shared = store.inner.shared.clone();
     let (ready, ready_rx) = tokio::sync::oneshot::channel();
     let (release, release_rx) = std::sync::mpsc::channel();
     let blocker = tokio::task::spawn_blocking(move || {
-        let transaction = db.begin_write().unwrap();
+        let transaction = shared.database().begin_write().unwrap();
         ready.send(()).unwrap();
         release_rx.recv().unwrap();
         transaction.abort().unwrap();
@@ -836,7 +856,7 @@ async fn write_error_rolls_back_changed_records_and_fails_later_applies() {
     const WRONG_REQUESTS: TableDefinition<&str, &str> =
         TableDefinition::new("application_requests_v2");
     {
-        let transaction = store.inner.db.begin_write().unwrap();
+        let transaction = store.inner.shared.database().begin_write().unwrap();
         transaction.delete_table(REQUESTS).unwrap();
         drop(transaction.open_table(WRONG_REQUESTS).unwrap());
         transaction.commit().unwrap();
@@ -850,21 +870,22 @@ async fn write_error_rolls_back_changed_records_and_fails_later_applies() {
     let later = entry(3, command("later", 2, &[("later", json!(3))], &[]));
     assert!(store.apply([later]).await.is_err());
     {
-        let transaction = store.inner.db.begin_read().unwrap();
+        let transaction = store.inner.shared.database().begin_read().unwrap();
         let table = transaction.open_table(DATA).unwrap();
         assert_eq!(table.len().unwrap(), 1);
         assert!(table.get("keep").unwrap().is_some());
         assert!(table.get("bad").unwrap().is_none());
-        let metadata = read_meta::<StateMetadata>(&store.inner.db, STATE_META)
-            .unwrap()
-            .unwrap();
+        let metadata =
+            read_meta::<StateMetadata>(store.inner.shared.database(), Tables::new(""), STATE_META)
+                .unwrap()
+                .unwrap();
         assert_eq!(metadata.revision, 1);
         assert_eq!(metadata.last_applied, original.last_applied);
     }
     {
-        let transaction = store.inner.db.begin_write().unwrap();
+        let transaction = store.inner.shared.database().begin_write().unwrap();
         transaction.delete_table(WRONG_REQUESTS).unwrap();
-        replace_application(&transaction, &original).unwrap();
+        replace_application(&transaction, Tables::new(""), &original).unwrap();
         transaction.commit().unwrap();
     }
     assert!(store.close().await.is_err());
@@ -887,7 +908,7 @@ async fn incomplete_v2_layout_is_rejected_without_resetting_application_state() 
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(1, directory.path().into()).await.unwrap();
     {
-        let transaction = store.inner.db.begin_write().unwrap();
+        let transaction = store.inner.shared.database().begin_write().unwrap();
         transaction.delete_table(DATA).unwrap();
         transaction.commit().unwrap();
     }
@@ -916,11 +937,11 @@ async fn storage_reads_progress_under_write_gate_and_see_only_committed_mvcc_sta
     // live redb writer with staged log/metadata changes. MVCC readers must not
     // await the gate or expose those changes before this transaction commits.
     let guard = store.inner.io.clone().lock_owned().await;
-    let db = store.inner.db.clone();
+    let shared = store.inner.shared.clone();
     let (ready, ready_rx) = tokio::sync::oneshot::channel();
     let (release, release_rx) = std::sync::mpsc::channel();
     let writer = tokio::task::spawn_blocking(move || {
-        let mut transaction = db.begin_write().unwrap();
+        let mut transaction = shared.database().begin_write().unwrap();
         transaction.set_durability(Durability::Immediate).unwrap();
         {
             let mut logs = transaction.open_table(LOGS).unwrap();
@@ -1147,14 +1168,16 @@ fn open_pausing_store(
 fn store_with_database(directory: &std::path::Path, db: Database) -> Store {
     let transaction = db.begin_write().unwrap();
     transaction.open_table(LOGS).unwrap();
-    let state = load_or_migrate_application(&transaction).unwrap();
-    let current_snapshot = recover_checkpoint(&transaction, 1, &state).unwrap();
+    let state = load_or_migrate_application(&transaction, Tables::new("")).unwrap();
+    let current_snapshot = recover_checkpoint(&transaction, Tables::new(""), 1, &state).unwrap();
     transaction.commit().unwrap();
     Store {
         inner: Arc::new(Inner {
-            appending: Arc::new(PublishedLock::new(None)),
+            appending: Arc::new(PublishedLock::new(Vec::new())),
+            pending: Default::default(),
             id: 1,
-            db: Arc::new(db),
+            shared: SharedDatabase::with_database(db),
+            tables: Tables::new(""),
             snapshot_directory: directory.to_path_buf(),
             io: Arc::new(Mutex::new(())),
             snapshot_installation: AtomicU64::new(0),
@@ -1207,7 +1230,7 @@ async fn graph_metadata_migrates_supported_layouts_atomically_and_fences_downgra
         let expected = store.snapshot().await;
         store.inner.persistence.drain().await.unwrap();
         {
-            let transaction = store.inner.db.begin_write().unwrap();
+            let transaction = store.inner.shared.database().begin_write().unwrap();
             let mut meta = transaction.open_table(META).unwrap();
             let metadata = meta.get(STATE_META).unwrap().unwrap().value().to_vec();
             meta.remove(STATE_META).unwrap();
@@ -1221,16 +1244,29 @@ async fn graph_metadata_migrates_supported_layouts_atomically_and_fences_downgra
         {
             let db = Database::create(directory.path().join("flower.redb")).unwrap();
             let transaction = db.begin_write().unwrap();
-            assert_eq!(load_or_migrate_application(&transaction).unwrap().application, expected);
+            assert_eq!(
+                load_or_migrate_application(&transaction, Tables::new(""))
+                    .unwrap()
+                    .application,
+                expected
+            );
             transaction.abort().unwrap();
-            assert!(read_meta::<StateMetadata>(&db, STATE_META).unwrap().is_none());
-            assert!(read_meta::<StateMetadata>(&db, prior).unwrap().is_some());
+            assert!(
+                read_meta::<StateMetadata>(&db, Tables::new(""), STATE_META)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                read_meta::<StateMetadata>(&db, Tables::new(""), prior)
+                    .unwrap()
+                    .is_some()
+            );
         }
         let mut store = Store::open(1, directory.path().into()).await.unwrap();
         assert_eq!(store.snapshot().await, expected);
         assert_eq!(store.applied_state().await.unwrap().0, Some(log_id(1)));
         {
-            let transaction = store.inner.db.begin_read().unwrap();
+            let transaction = store.inner.shared.database().begin_read().unwrap();
             let meta = transaction.open_table(META).unwrap();
             let current = meta.get(STATE_META).unwrap().unwrap();
             serde_json::from_slice::<StateMetadata>(current.value()).unwrap();
@@ -1253,7 +1289,7 @@ async fn retired_graph_metadata_cannot_fall_back_to_stale_supported_layout() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(1, directory.path().into()).await.unwrap();
     {
-        let transaction = store.inner.db.begin_write().unwrap();
+        let transaction = store.inner.shared.database().begin_write().unwrap();
         let mut meta = transaction.open_table(META).unwrap();
         let metadata = meta.get(STATE_META).unwrap().unwrap().value().to_vec();
         meta.remove(STATE_META).unwrap();
@@ -1335,7 +1371,10 @@ async fn log_reads_progress_during_fsync_but_append_ack_waits_for_durability() {
         .await
         .unwrap()
         .unwrap();
-    assert!(store.inner.io.try_lock().is_err());
+    // Queued in its batch: later writes may queue behind it at once, while it
+    // stays pending, readable and unacknowledged until the flush completes.
+    assert!(store.inner.io.try_lock().is_ok());
+    assert_eq!(store.inner.appending.read().unwrap().len(), 1);
     let before =
         tokio::time::timeout(Duration::from_secs(2), store.try_get_log_entries(1..3)).await;
     let acknowledged_before_flush = writer.is_finished();
@@ -1392,7 +1431,7 @@ async fn asynchronous_append_reports_flush_failure_to_raft() {
             .unwrap()
             .is_err()
     );
-    assert!(store.inner.appending.read().unwrap().is_none());
+    assert!(store.inner.appending.read().unwrap().is_empty());
     assert_eq!(store.snapshot().await.revision, 0);
 }
 
@@ -1734,7 +1773,7 @@ async fn power_loss_store(
 }
 
 fn assert_metadata_only_snapshot(store: &Store) {
-    let transaction = store.inner.db.begin_read().unwrap();
+    let transaction = store.inner.shared.database().begin_read().unwrap();
     let table = transaction.open_table(META).unwrap();
     assert!(table.get("snapshot").unwrap().is_none());
     assert!(table.get(CHECKPOINT_KEY).unwrap().unwrap().value().len() < 1024);
@@ -1768,10 +1807,14 @@ async fn metadata_checkpoints_recover_after_power_loss_before_and_after_log_prun
     store.save_vote(&Vote::new_committed(3, 1)).await.unwrap();
     let advanced_projection = durable.lock().unwrap().clone();
     assert_eq!(
-        read_meta::<SnapshotMeta<u64, BasicNode>>(&store.inner.db, CHECKPOINT_KEY)
-            .unwrap()
-            .unwrap()
-            .last_log_id,
+        read_meta::<SnapshotMeta<u64, BasicNode>>(
+            store.inner.shared.database(),
+            Tables::new(""),
+            CHECKPOINT_KEY
+        )
+        .unwrap()
+        .unwrap()
+        .last_log_id,
         Some(log_id(1))
     );
     // Snapshot construction flushes the existing projection; pruning and the
@@ -1893,7 +1936,7 @@ async fn checkpoint_ahead_of_durable_application_state_fails_closed_on_restart()
     let mut store = Store::open(1, directory.path().into()).await.unwrap();
     let mut meta = store.build_snapshot().await.unwrap().meta;
     meta.last_log_id = Some(log_id(99));
-    let transaction = store.inner.db.begin_write().unwrap();
+    let transaction = store.inner.shared.database().begin_write().unwrap();
     transaction
         .open_table(META)
         .unwrap()
@@ -1906,4 +1949,224 @@ async fn checkpoint_ahead_of_durable_application_state_fails_closed_on_restart()
     store.close().await.unwrap();
     drop(store);
     assert!(Store::open(1, directory.path().into()).await.is_err());
+}
+
+fn shared_storage(
+    shared: &Arc<SharedDatabase>,
+    directory: &std::path::Path,
+    prefix: &str,
+) -> Storage {
+    Storage::Shared {
+        database: shared.clone(),
+        prefix: prefix.into(),
+        directory: directory.join(prefix.trim_end_matches('/')),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicas_sharing_a_database_keep_separate_logs_and_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("flower.redb");
+    {
+        let shared = SharedDatabase::open(&path).unwrap();
+        // Replicas of different groups may reuse node IDs.
+        let mut first = Store::open(1, shared_storage(&shared, directory.path(), "a/"))
+            .await
+            .unwrap();
+        let mut second = Store::open(1, shared_storage(&shared, directory.path(), "b/"))
+            .await
+            .unwrap();
+        first
+            .blocking_append([entry(1, command("first", 0, &[("key", json!("a"))], &[]))])
+            .await
+            .unwrap();
+        second
+            .blocking_append([
+                entry(1, command("one", 0, &[("key", json!("b"))], &[])),
+                entry(2, command("two", 1, &[("other", json!(2))], &[])),
+            ])
+            .await
+            .unwrap();
+        first
+            .apply([entry(1, command("first", 0, &[("key", json!("a"))], &[]))])
+            .await
+            .unwrap();
+        second
+            .apply([
+                entry(1, command("one", 0, &[("key", json!("b"))], &[])),
+                entry(2, command("two", 1, &[("other", json!(2))], &[])),
+            ])
+            .await
+            .unwrap();
+        first.close().await.unwrap();
+        second.close().await.unwrap();
+    }
+    let shared = SharedDatabase::open(&path).unwrap();
+    let mut first = Store::open(1, shared_storage(&shared, directory.path(), "a/"))
+        .await
+        .unwrap();
+    let mut second = Store::open(1, shared_storage(&shared, directory.path(), "b/"))
+        .await
+        .unwrap();
+    assert_eq!(
+        first.get_log_state().await.unwrap().last_log_id,
+        Some(log_id(1))
+    );
+    assert_eq!(
+        second.get_log_state().await.unwrap().last_log_id,
+        Some(log_id(2))
+    );
+    let (first, second) = (first.snapshot().await, second.snapshot().await);
+    assert_eq!(first.data.get("key"), Some(&json!("a")));
+    assert_eq!(first.data.get("other"), None);
+    assert_eq!(second.data.get("key"), Some(&json!("b")));
+    assert_eq!(second.data.get("other"), Some(&json!(2)));
+    // A replica's own directory still refuses another node ID.
+    assert!(
+        Store::open(2, shared_storage(&shared, directory.path(), "a/"))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_durable_writes_share_a_flush_and_failures_stay_isolated() {
+    const PROBE: TableDefinition<&str, u64> = TableDefinition::new("probe");
+    let directory = tempfile::tempdir().unwrap();
+    let shared = SharedDatabase::open(&directory.path().join("flower.redb")).unwrap();
+    // Hold redb's writer so every submission queues behind the first batch.
+    let (ready, ready_rx) = tokio::sync::oneshot::channel();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let blocker = {
+        let shared = shared.clone();
+        tokio::task::spawn_blocking(move || {
+            let transaction = shared.database().begin_write().unwrap();
+            ready.send(()).unwrap();
+            release_rx.recv().unwrap();
+            transaction.abort().unwrap();
+        })
+    };
+    ready_rx.await.unwrap();
+    let writes: Vec<_> = (0..16u64)
+        .map(|index| {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                shared
+                    .submit(
+                        true,
+                        StorageTrace::default(),
+                        None,
+                        move |transaction, _| {
+                            let mut table = transaction.open_table(PROBE)?;
+                            table.insert(format!("key-{index}").as_str(), index)?;
+                            // A failure after a partial write must leave nothing behind.
+                            anyhow::ensure!(index != 7, "write 7 fails");
+                            Ok(())
+                        },
+                    )
+                    .committed()
+                    .await
+            })
+        })
+        .collect();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    release.send(()).unwrap();
+    blocker.await.unwrap();
+    for (index, write) in writes.into_iter().enumerate() {
+        let result = write.await.unwrap();
+        assert_eq!(result.is_ok(), index != 7, "write {index}: {result:?}");
+    }
+    let (batches, durable, staged) = shared.batches();
+    assert_eq!(staged, 15);
+    assert!(
+        durable <= 2 && batches == durable,
+        "{batches} batches, {durable} durable"
+    );
+    let transaction = shared.database().begin_read().unwrap();
+    let table = transaction.open_table(PROBE).unwrap();
+    assert_eq!(table.len().unwrap(), 15);
+    assert!(table.get("key-7").unwrap().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hosted_and_single_replica_databases_do_not_mix() {
+    let single = tempfile::tempdir().unwrap();
+    Store::open(1, single.path().into())
+        .await
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+    let shared = SharedDatabase::open(&single.path().join("flower.redb")).unwrap();
+    let error = Store::open(1, shared_storage(&shared, single.path(), "a/"))
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        format!("{error:#}").contains("single replica's database"),
+        "{error:#}"
+    );
+    drop(shared);
+    let hosted = tempfile::tempdir().unwrap();
+    {
+        let shared = SharedDatabase::open(&hosted.path().join("flower.redb")).unwrap();
+        Store::open(1, shared_storage(&shared, hosted.path(), "a/"))
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+    }
+    let error = Store::open(1, hosted.path().into()).await.err().unwrap();
+    assert!(format!("{error:#}").contains("--replica"), "{error:#}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_appends_publish_without_waiting_and_direct_writes_wait_for_them() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(1, directory.path().into()).await.unwrap();
+    // Hold redb's writer so queued appends cannot commit.
+    let shared = store.inner.shared.clone();
+    let (ready, ready_rx) = tokio::sync::oneshot::channel();
+    let (release, release_rx) = std::sync::mpsc::channel::<()>();
+    let blocker = tokio::task::spawn_blocking(move || {
+        let transaction = shared.database().begin_write().unwrap();
+        ready.send(()).unwrap();
+        release_rx.recv().unwrap();
+        transaction.abort().unwrap();
+    });
+    ready_rx.await.unwrap();
+    let pending = |count: usize| {
+        let store = store.clone();
+        async move {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while store.inner.appending.read().unwrap().len() != count {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap()
+        }
+    };
+    let (mut first, mut second, mut third) = (store.clone(), store.clone(), store.clone());
+    let one = tokio::spawn(async move { first.blocking_append([entry(1, command("one", 0, &[], &[]))]).await });
+    pending(1).await;
+    // The second append is published while the first cannot commit.
+    let two = tokio::spawn(async move { second.blocking_append([entry(2, command("two", 1, &[], &[]))]).await });
+    pending(2).await;
+    let mut reader = store.clone();
+    assert_eq!(reader.try_get_log_entries(1..3).await.unwrap().len(), 2);
+    assert_eq!(reader.get_log_state().await.unwrap().last_log_id, Some(log_id(2)));
+    // A truncation is a direct transaction: it waits for both queued appends.
+    let truncated = tokio::spawn(async move { third.truncate(log_id(2)).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!one.is_finished() && !two.is_finished() && !truncated.is_finished());
+    release.send(()).unwrap();
+    blocker.await.unwrap();
+    one.await.unwrap().unwrap();
+    two.await.unwrap().unwrap();
+    truncated.await.unwrap().unwrap();
+    assert!(store.inner.appending.read().unwrap().is_empty());
+    assert_eq!(reader.get_log_state().await.unwrap().last_log_id, Some(log_id(1)));
+    assert_eq!(reader.try_get_log_entries(1..3).await.unwrap().len(), 1);
 }

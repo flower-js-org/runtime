@@ -3,14 +3,6 @@ use crate::consensus::{PartitionCommand, PartitionPhase};
 use std::collections::BTreeSet;
 use std::ops::Bound;
 
-const PARTITION_BASE_DATA: TableDefinition<(&str, &str), &[u8]> =
-    TableDefinition::new("partition_copy_base_data_v1");
-const PARTITION_BASE_REQUESTS: TableDefinition<(&str, &str), &[u8]> =
-    TableDefinition::new("partition_copy_base_requests_v1");
-
-const PARTITION_CHUNKS: TableDefinition<(&str, &str), &[u8]> =
-    TableDefinition::new("partition_difference_chunks_v1");
-
 #[derive(Serialize, Deserialize)]
 struct Metadata {
     #[serde(flatten)]
@@ -41,26 +33,30 @@ pub(super) struct PartitionWrite {
     replace_chunks: bool,
 }
 
-pub(super) fn load_partitions(transaction: &WriteTransaction) -> anyhow::Result<Partitions> {
-    let tables = transaction
+pub(super) fn load_partitions(
+    transaction: &WriteTransaction,
+    tables: Tables,
+) -> anyhow::Result<Partitions> {
+    let existing = transaction
         .list_tables()?
         .map(|table| table.name().to_owned())
         .collect::<BTreeSet<_>>();
-    if tables.contains(PARTITION_META.name()) {
+    if existing.contains(tables.partition_meta.name()) {
         anyhow::ensure!(
-            tables.contains(PARTITION_DATA.name()) && tables.contains(PARTITION_REQUESTS.name()),
+            existing.contains(tables.partition_data.name())
+                && existing.contains(tables.partition_requests.name()),
             "incomplete partition storage tables"
         );
     }
     let mut states = BTreeMap::new();
-    for item in transaction.open_table(PARTITION_META)?.iter()? {
+    for item in transaction.open_table(tables.partition_meta)?.iter()? {
         let (id, bytes) = item?;
         let metadata: Metadata = serde_json::from_slice(bytes.value())?;
         let info = metadata.info;
         if metadata.base_revision.is_some() {
             anyhow::ensure!(
-                tables.contains(PARTITION_BASE_DATA.name())
-                    && tables.contains(PARTITION_BASE_REQUESTS.name()),
+                existing.contains(tables.partition_base_data.name())
+                    && existing.contains(tables.partition_base_requests.name()),
                 "incomplete partition copy base storage tables"
             );
         }
@@ -75,7 +71,7 @@ pub(super) fn load_partitions(transaction: &WriteTransaction) -> anyhow::Result<
                 .is_some_and(|manifest| manifest.kind == partitions::ExportKind::Delta)
             {
                 anyhow::ensure!(
-                    tables.contains(PARTITION_CHUNKS.name()),
+                    existing.contains(tables.partition_chunks.name()),
                     "missing partition difference staging table"
                 );
                 metadata
@@ -106,7 +102,7 @@ pub(super) fn load_partitions(transaction: &WriteTransaction) -> anyhow::Result<
             },
         );
     }
-    for item in transaction.open_table(PARTITION_DATA)?.iter()? {
+    for item in transaction.open_table(tables.partition_data)?.iter()? {
         let (key, bytes) = item?;
         let (partition, key) = key.value();
         states
@@ -116,7 +112,7 @@ pub(super) fn load_partitions(transaction: &WriteTransaction) -> anyhow::Result<
             .data
             .insert(key.into(), serde_json::from_slice(bytes.value())?);
     }
-    for item in transaction.open_table(PARTITION_REQUESTS)?.iter()? {
+    for item in transaction.open_table(tables.partition_requests)?.iter()? {
         let (key, bytes) = item?;
         let (partition, key) = key.value();
         states
@@ -126,7 +122,7 @@ pub(super) fn load_partitions(transaction: &WriteTransaction) -> anyhow::Result<
             .requests
             .insert(key.into(), serde_json::from_slice(bytes.value())?);
     }
-    for item in transaction.open_table(PARTITION_BASE_DATA)?.iter()? {
+    for item in transaction.open_table(tables.partition_base_data)?.iter()? {
         let (key, bytes) = item?;
         let (partition, key) = key.value();
         states
@@ -136,7 +132,10 @@ pub(super) fn load_partitions(transaction: &WriteTransaction) -> anyhow::Result<
             .data
             .insert(key.into(), serde_json::from_slice(bytes.value())?);
     }
-    for item in transaction.open_table(PARTITION_BASE_REQUESTS)?.iter()? {
+    for item in transaction
+        .open_table(tables.partition_base_requests)?
+        .iter()?
+    {
         let (key, bytes) = item?;
         let (partition, key) = key.value();
         states
@@ -146,7 +145,7 @@ pub(super) fn load_partitions(transaction: &WriteTransaction) -> anyhow::Result<
             .requests
             .insert(key.into(), serde_json::from_slice(bytes.value())?);
     }
-    for item in transaction.open_table(PARTITION_CHUNKS)?.iter()? {
+    for item in transaction.open_table(tables.partition_chunks)?.iter()? {
         let (key, bytes) = item?;
         let (partition, key) = key.value();
         states
@@ -165,21 +164,22 @@ pub(super) fn load_partitions(transaction: &WriteTransaction) -> anyhow::Result<
 
 pub(super) fn replace_partitions(
     transaction: &WriteTransaction,
+    tables: Tables,
     partitions: &Partitions,
     profile: &mut StorageTrace,
 ) -> anyhow::Result<()> {
-    transaction.delete_table(PARTITION_META)?;
-    transaction.delete_table(PARTITION_DATA)?;
-    transaction.delete_table(PARTITION_REQUESTS)?;
-    transaction.delete_table(PARTITION_BASE_DATA)?;
-    transaction.delete_table(PARTITION_BASE_REQUESTS)?;
-    transaction.delete_table(PARTITION_CHUNKS)?;
-    let mut metadata = transaction.open_table(PARTITION_META)?;
-    let mut data = transaction.open_table(PARTITION_DATA)?;
-    let mut requests = transaction.open_table(PARTITION_REQUESTS)?;
-    transaction.open_table(PARTITION_BASE_DATA)?;
-    transaction.open_table(PARTITION_BASE_REQUESTS)?;
-    transaction.open_table(PARTITION_CHUNKS)?;
+    transaction.delete_table(tables.partition_meta)?;
+    transaction.delete_table(tables.partition_data)?;
+    transaction.delete_table(tables.partition_requests)?;
+    transaction.delete_table(tables.partition_base_data)?;
+    transaction.delete_table(tables.partition_base_requests)?;
+    transaction.delete_table(tables.partition_chunks)?;
+    let mut metadata = transaction.open_table(tables.partition_meta)?;
+    let mut data = transaction.open_table(tables.partition_data)?;
+    let mut requests = transaction.open_table(tables.partition_requests)?;
+    transaction.open_table(tables.partition_base_data)?;
+    transaction.open_table(tables.partition_base_requests)?;
+    transaction.open_table(tables.partition_chunks)?;
     for (id, state) in partitions.iter() {
         partitions::validate_state(state)?;
         metadata.insert(
@@ -198,9 +198,10 @@ pub(super) fn replace_partitions(
                 profile.encode(value)?.as_slice(),
             )?;
         }
-        write_base(transaction, id, state.base.as_ref(), profile)?;
+        write_base(transaction, tables, id, state.base.as_ref(), profile)?;
         write_chunks(
             transaction,
+            tables,
             id,
             &state.chunks,
             true,
@@ -213,11 +214,12 @@ pub(super) fn replace_partitions(
 
 fn write_base(
     transaction: &WriteTransaction,
+    tables: Tables,
     id: &str,
     base: Option<&Snapshot>,
     profile: &mut StorageTrace,
 ) -> anyhow::Result<()> {
-    for definition in [PARTITION_BASE_DATA, PARTITION_BASE_REQUESTS] {
+    for definition in [tables.partition_base_data, tables.partition_base_requests] {
         let mut table = transaction.open_table(definition)?;
         let upper = format!("{id}\0");
         let range = (
@@ -233,8 +235,8 @@ fn write_base(
         }
     }
     if let Some(base) = base {
-        let mut data = transaction.open_table(PARTITION_BASE_DATA)?;
-        let mut receipts = transaction.open_table(PARTITION_BASE_REQUESTS)?;
+        let mut data = transaction.open_table(tables.partition_base_data)?;
+        let mut receipts = transaction.open_table(tables.partition_base_requests)?;
         for (key, value) in &base.data {
             data.insert((id, key.as_str()), profile.encode(value)?.as_slice())?;
         }
@@ -247,6 +249,7 @@ fn write_base(
 
 fn write_chunks(
     transaction: &WriteTransaction,
+    tables: Tables,
     id: &str,
     chunks: &Records,
     replace: bool,
@@ -256,7 +259,7 @@ fn write_chunks(
     if !replace && keys.is_empty() {
         return Ok(());
     }
-    let mut table = transaction.open_table(PARTITION_CHUNKS)?;
+    let mut table = transaction.open_table(tables.partition_chunks)?;
     if replace {
         let upper = format!("{id}\0");
         let range = (
@@ -287,15 +290,16 @@ fn write_chunks(
 
 pub(super) fn write_partitions(
     transaction: &WriteTransaction,
+    tables: Tables,
     writes: &BTreeMap<String, PartitionWrite>,
     profile: &mut StorageTrace,
 ) -> anyhow::Result<()> {
     if writes.is_empty() {
         return Ok(());
     }
-    let mut metadata = transaction.open_table(PARTITION_META)?;
-    let mut data = transaction.open_table(PARTITION_DATA)?;
-    let mut requests = transaction.open_table(PARTITION_REQUESTS)?;
+    let mut metadata = transaction.open_table(tables.partition_meta)?;
+    let mut data = transaction.open_table(tables.partition_data)?;
+    let mut requests = transaction.open_table(tables.partition_requests)?;
     for (id, write) in writes {
         let state = &write.state;
         if write.replace {
@@ -358,10 +362,11 @@ pub(super) fn write_partitions(
             }
         }
         if write.replace_base {
-            write_base(transaction, id, state.base.as_ref(), profile)?;
+            write_base(transaction, tables, id, state.base.as_ref(), profile)?;
         }
         write_chunks(
             transaction,
+            tables,
             id,
             &state.chunks,
             write.replace_chunks,

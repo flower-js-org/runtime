@@ -23,9 +23,9 @@ FLOWER_GOBLIN_BUNDLE=/tmp/goblin/goblin-pizza.js FLOWER_GOBLIN_WASM=/tmp/goblin/
   cargo test --release --lib guest_parity -- --ignored --nocapture
 ```
 
-Use `nix develop --command cargo …` if Rust is supplied by the development shell. The stress preset starts **eight independent three-replica groups** on this machine. Per group it runs 256 customer loops and four workers, two tenants with four stores each, a 96-order cap, one second of warmup, and 60 seconds of measured load. Every leader is killed halfway through; work drains afterward and every group receives an independent audit.
+Use `nix develop --command cargo …` if Rust is supplied by the development shell. The stress preset starts **eight independent three-replica groups** on this machine, served by three host processes: host *k* runs replica *k* of every group over one shared database (`--hosted`, below), so the groups share each fsync. Per group it runs 256 customer loops and four workers, two tenants with four stores each, a 96-order cap, one second of warmup, and 60 seconds of measured load. Halfway through, the host leading the most groups is killed, as a machine failure would take down its replica of every group; it restarts once every group serves again. Work drains afterward and every group receives an independent audit. The base command without `--hosted` runs one process and database per replica instead; see [HOSTING.md](HOSTING.md) for both measured.
 
-The preset sets adaptive batching with a **50 ms preparation ceiling**, a 1,024-request writer queue, 16 authorization/cache-probe slots, and 16 shared preparation slots per server. Writer preparation is serial because this workload repeatedly updates conflicting hot stores; independent groups and reads remain parallel. Each server uses two Tokio async workers because all 24 replicas share this host; QuickJS preparation and storage use separate blocking workers. Existing environment variables take precedence. These are scheduling/resource settings, not end-to-end latency guarantees or recommendations for every production topology.
+The preset sets adaptive batching with a **50 ms preparation ceiling**, a 1,024-request writer queue, 16 authorization/cache-probe slots, and 16 shared preparation slots per server. Writer preparation is serial because this workload repeatedly updates conflicting hot stores; independent groups and reads remain parallel. Each server uses two Tokio async workers because all 24 replicas share this host; QuickJS preparation and storage use separate blocking workers. With `--hosted`, a host process serves one replica of every group, so the preset multiplies its process-wide settings (async workers, `FLOWER_WASM_POOL_SLOTS`, `FLOWER_WASM_RECYCLE_BYTES`) by the number of groups, keeping each replica's share the same; query and preparation slots are already per replica. Existing environment variables take precedence. These are scheduling/resource settings, not end-to-end latency guarantees or recommendations for every production topology.
 
 ## Results and publication
 
@@ -62,7 +62,13 @@ npm run bench -- --help
 node tests/e2e-rust-driver.mjs
 ```
 
-`--groups` counts independent Raft groups and `--nodes` counts replicas per group (one or three). Tenants, customers, workers, and order caps are per group; stores are per tenant. `--driver-binary PATH` selects the Rust executable, defaulting to `target/release/flower-bench-driver`. The driver E2E checks real HTTP/2 pooling, replica routing, uncertain retries, receipt replay, histograms, and business accounting against a test server.
+`--groups` counts independent Raft groups and `--nodes` counts replicas per group (one or three). Tenants, customers, workers, and order caps are per group; stores are per tenant.
+
+By default every replica is its own server process with its own database, so the stress preset runs 24 processes that flush one disk independently. `--hosted` instead starts one process per replica slot: host *k* serves replica *k* of every group (`flower --replica`) over one shared database, so all of its groups' log appends share each fsync. `--chaos` then kills the host that leads the most groups halfway through the load, which every group observes at once like a machine failure; the host restarts once every group serves again. Server CPU is sampled per host by the coordinator and reported in the aggregate `hosts` field, which `compare-cpu.mjs` uses instead of per-group server counters.
+
+```sh
+npm run bench:stress -- --hosted
+``` `--driver-binary PATH` selects the Rust executable, defaulting to `target/release/flower-bench-driver`. The driver E2E checks real HTTP/2 pooling, replica routing, uncertain retries, receipt replay, histograms, and business accounting against a test server.
 
 By default each customer waits for its response before issuing more work: this is a closed-loop capacity measurement. Independent arrivals expose overload differently:
 

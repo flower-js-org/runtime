@@ -22,6 +22,19 @@ export function summarizeCpu(report) {
   if (!Array.isArray(groups) || !groups.length) throw new Error("Missing benchmark groups");
   const processes = [], issues = [];
   let completed = 0, failed = 0, reads = 0, mutations = 0;
+  const addProcess = (group, kind, id, measurement, loadDurationMs) => {
+    if (!measurement || !Number.isFinite(measurement.cpuMs) || measurement.cpuMs < 0 || !positive(measurement.sampledWallMs)
+      || measurement.sampledWallMs > loadDurationMs + 1 || !count(measurement.intervals) || measurement.intervals === 0) {
+      issues.push(`${group}/${kind}/${id}: missing or invalid CPU coverage`);
+      processes.push({ group, kind, id, available: false });
+      return;
+    }
+    const meanCores = measurement.cpuMs / measurement.sampledWallMs;
+    processes.push({ group, kind, id, available: true, observedCpuMs: measurement.cpuMs,
+      sampledWallMs: measurement.sampledWallMs, loadDurationMs,
+      intervals: measurement.intervals, coverage: measurement.sampledWallMs / loadDurationMs,
+      meanCores, estimatedLoadCpuMs: meanCores * loadDurationMs });
+  };
   for (const [index, group] of groups.entries()) {
     const application = group.application;
     if (!application?.available || !positive(application.durationMs) || !count(application.completed) || !count(application.failed)) throw new Error(`Group ${index} has no valid primary customer accounting`);
@@ -32,28 +45,20 @@ export function summarizeCpu(report) {
     reads += application.reads?.completed ?? 0;
     mutations += application.mutations?.completed ?? 0;
     const resources = group.resources ?? {}, groupName = group.name ?? `group-${index}`;
-    const add = (kind, id, measurement) => {
-      if (!measurement || !Number.isFinite(measurement.cpuMs) || measurement.cpuMs < 0 || !positive(measurement.sampledWallMs)
-        || measurement.sampledWallMs > application.durationMs + 1 || !count(measurement.intervals) || measurement.intervals === 0) {
-        issues.push(`${groupName}/${kind}/${id}: missing or invalid CPU coverage`);
-        processes.push({ group: groupName, kind, id, available: false });
-        return;
-      }
-      const meanCores = measurement.cpuMs / measurement.sampledWallMs;
-      processes.push({ group: groupName, kind, id, available: true, observedCpuMs: measurement.cpuMs,
-        sampledWallMs: measurement.sampledWallMs, loadDurationMs: application.durationMs,
-        intervals: measurement.intervals, coverage: measurement.sampledWallMs / application.durationMs,
-        meanCores, estimatedLoadCpuMs: meanCores * application.durationMs });
-    };
+    const add = (kind, id, measurement) => addProcess(groupName, kind, id, measurement, application.durationMs);
     const nodes = group.options?.nodes ?? report.options?.nodes;
     if (!count(nodes) || nodes < 1) throw new Error(`Group ${index} has no replica count`);
-    for (let node = 1; node <= nodes; node++) add("server", String(node), resources.serverCpuSampledLoad?.[node]);
+    // Shared hosts serve every group; the coordinator samples them below.
+    if (!report.hosts) for (let node = 1; node <= nodes; node++) add("server", String(node), resources.serverCpuSampledLoad?.[node]);
     add("node-controller", "node-driver", resources.nodeDriverCpuSampledLoad);
     if ((group.driver?.kind ?? report.driver?.kind ?? group.options?.driver ?? report.options?.driver) === "rust") add("rust-driver", "rust-driver", resources.nativeDriverCpuSampledLoad);
   }
   if (aggregate && (report.totals?.completed !== completed || report.totals?.failed !== failed || report.options?.groups !== groups.length)) throw new Error("Group counts disagree with aggregate customer accounting");
   const durationMs = aggregate ? report.durationMs : groups[0].application.durationMs;
   if (!positive(durationMs)) throw new Error("Invalid benchmark load duration");
+  if (report.hosts) {
+    for (let host = 1; host <= report.hosts.count; host++) addProcess("hosts", "server", String(host), report.hosts.serverCpuSampledLoad?.[host], durationMs);
+  }
   const summarize = kind => {
     const selected = processes.filter(process => kind === "all" || (kind === "drivers" ? process.kind !== "server" : process.kind === kind));
     const available = selected.length > 0 && selected.every(process => process.available);

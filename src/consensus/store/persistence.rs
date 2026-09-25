@@ -146,16 +146,16 @@ impl Persistence {
                 return;
             };
             let store = held.store();
+            let tables = store.inner.tables;
+            // No flush: the next durable batch of this database persists it.
             let result = store
-                .disk_profiled(
+                .batched(
+                    false,
                     StorageTrace::new(store.inner.id, "persist"),
-                    move |db, profile| {
-                        let mut transaction = db.begin_write()?;
-                        transaction.set_durability(Durability::None)?;
-                        profile.phase(StoragePhase::Begin);
+                    move |transaction, profile| {
                         for write in &writes {
                             {
-                                let mut data = transaction.open_table(DATA)?;
+                                let mut data = transaction.open_table(tables.data)?;
                                 for (key, value) in &write.data {
                                     match value {
                                         Some(value) => {
@@ -166,22 +166,18 @@ impl Persistence {
                                         }
                                     }
                                 }
-                                let mut requests = transaction.open_table(REQUESTS)?;
+                                let mut requests = transaction.open_table(tables.requests)?;
                                 for key in &write.deleted_requests {
                                     requests.remove(key.as_str())?;
                                 }
                                 for (key, value) in &write.requests {
                                     requests.insert(key.as_str(), value.as_slice())?;
                                 }
-                                let mut meta = transaction.open_table(META)?;
+                                let mut meta = transaction.open_table(tables.meta)?;
                                 meta.insert(STATE_META, write.metadata.as_slice())?;
                             }
-                            write_partitions(&transaction, &write.partitions, profile)?;
+                            write_partitions(transaction, tables, &write.partitions, profile)?;
                         }
-                        profile.phase(StoragePhase::Write);
-                        let result = transaction.commit();
-                        profile.phase(StoragePhase::Flush);
-                        result?;
                         Ok(())
                     },
                 )

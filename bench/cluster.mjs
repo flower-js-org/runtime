@@ -68,7 +68,10 @@ export class LocalCluster {
     this.requestTimeoutMs = positiveInteger(options.requestTimeoutMs ?? 2_000, "requestTimeoutMs");
     this.keepData = options.keepData ?? false;
     this.onProcess = options.onProcess;
-    this.adminToken = randomUUID();
+    // Replicas served by shared host processes (HostCluster): never spawned,
+    // restarted or deleted here.
+    this.attached = options.attach ?? null;
+    this.adminToken = this.attached?.adminToken ?? randomUUID();
     this.members = [];
     this.leader = null;
     this.directory = null;
@@ -91,6 +94,8 @@ export class LocalCluster {
   }
 
   get pids() {
+    // Shared hosts' CPU belongs to every group; the coordinator samples it.
+    if (this.attached) return [];
     return this.members.filter((node) => node.process && !node.process.ended)
       .map((node) => ({ id: node.id, pid: node.process.child.pid }));
   }
@@ -147,7 +152,7 @@ export class LocalCluster {
     this._assertOpen();
     if (!node.process || node.process.ended) throw new Error(`Node ${node.id} is not running`);
     const headers = {};
-    if (path.startsWith("/raft/")) headers.authorization = `Bearer ${this.adminToken}`;
+    if (path.startsWith("/raft/") || path.startsWith("/admin/")) headers.authorization = `Bearer ${this.adminToken}`;
     if (body !== undefined) headers["content-type"] = "application/json";
     const response = await fetch(node.url + path, {
       method, headers, body: body === undefined ? undefined : JSON.stringify(body),
@@ -188,6 +193,13 @@ export class LocalCluster {
     if (this._started) throw new Error("Cluster can only be started once");
     this._started = true;
     this._assertOpen();
+    if (this.attached) {
+      for (const { id, address } of this.attached.members) {
+        this.members.push({ id, address, url: `http://${address}`, process: { attached: true, ended: false, intentional: false } });
+      }
+      await this.discoverLeader();
+      return this;
+    }
     this._starting = (async () => {
       await access(this.binary, constants.X_OK);
       this.directory = await mkdtemp(join(tmpdir(), "flower-bench-"));
@@ -342,6 +354,50 @@ export class LocalCluster {
     return event;
   }
 
+  /** Each running node's batched storage commits, from /admin/resources. */
+  async storageCounters() {
+    const counters = {};
+    await Promise.all(this.members.filter((node) => this._eligible(node)).map(async (node) => {
+      try {
+        const response = await this._fetch(node, "/admin/resources");
+        if (response.ok && response.value?.storage) counters[node.id] = { pid: node.process.child?.pid ?? null, ...response.value.storage };
+      } catch { /* Unmeasured, like a restarted node. */ }
+    }));
+    return counters;
+  }
+
+  /** A shared host stopped: this group loses a replica, perhaps its leader. */
+  async observeHostCrash(hostId, crashedAt, { timeoutMs = this.startupTimeoutMs } = {}) {
+    const node = this.members.find((member) => member.id === hostId);
+    const started = performance.now() - (Date.now() - Date.parse(crashedAt));
+    const event = { oldLeader: this.leader?.id ?? null, crashedHost: hostId, crashedAt };
+    this.events.push(event);
+    node.process = { attached: true, ended: true, intentional: true };
+    if (this.leader?.id === hostId) this.leader = null;
+    this._recoveryObservation = { event, started };
+    try {
+      const next = await this.discoverLeader({ timeoutMs });
+      event.newLeader = next.id;
+      event.quorumRecoveryMs = performance.now() - started;
+    } finally { this._recoveryObservation = null; }
+    return { event, started };
+  }
+
+  /** The host is back: wait until this group's replica caught up with its leader. */
+  async observeHostRestart(hostId, { event, started }, { timeoutMs = this.startupTimeoutMs } = {}) {
+    const node = this.members.find((member) => member.id === hostId);
+    node.process = { attached: true, ended: false, intentional: false };
+    const leader = await this.discoverLeader({ timeoutMs });
+    const target = (await this.metrics(leader)).last_applied?.index ?? 0;
+    await this._until(`restarted replica ${hostId} catches up`, async (requestTimeoutMs) => {
+      const response = await this._fetch(node, "/raft/metrics", { timeoutMs: requestTimeoutMs });
+      return response.ok && response.value.last_applied?.index >= target
+        && Number(response.value.current_leader) === leader.id;
+    }, timeoutMs);
+    event.restartCatchUpMs = performance.now() - started;
+    return event;
+  }
+
   logTails() {
     return this._generations.map((runtime, index) => ({
       node: runtime.id, generation: index + 1, pid: runtime.child.pid,
@@ -368,5 +424,172 @@ export class LocalCluster {
       if (this.directory && !this.keepData) await rm(this.directory, { recursive: true, force: true });
     })();
     return this._closing;
+  }
+}
+
+/**
+ * Server processes shared by several groups: host k serves replica k of every
+ * group from one database, so their log appends share its fsyncs. Groups
+ * attach to their replicas' addresses (LocalCluster `attach`).
+ */
+export class HostCluster {
+  constructor(options = {}) {
+    this.nodeCount = options.nodes ?? 3;
+    this.groups = positiveInteger(options.groups ?? 1, "groups");
+    this.binary = resolve(options.binary ?? join(root, "target/release/flower"));
+    this.startupTimeoutMs = positiveInteger(options.startupTimeoutMs ?? 30_000, "startupTimeoutMs");
+    this.keepData = options.keepData ?? false;
+    this.onProcess = options.onProcess;
+    this.adminToken = randomUUID();
+    this.hosts = [];
+    this.directory = null;
+    this._reservations = [];
+    this._generations = [];
+    this._controller = new AbortController();
+  }
+
+  get pids() {
+    return this.hosts.filter((host) => host.process && !host.process.ended).map((host) => ({ id: host.id, pid: host.process.child.pid }));
+  }
+
+  /** One group's replicas, for LocalCluster's `attach`. */
+  attachment(group) {
+    return { adminToken: this.adminToken, members: this.hosts.map((host) => ({ id: host.id, address: host.addresses[group] })) };
+  }
+
+  _startHost(host) {
+    const replicas = host.addresses.flatMap((address, group) => ["--replica", `group-${group},${host.id},${address}`]);
+    const child = spawn(this.binary, ["--data", host.directory, ...replicas], {
+      cwd: root,
+      env: { ...process.env, FLOWER_ADMIN_TOKEN: this.adminToken, RUST_LOG: process.env.FLOWER_BENCH_LOG ?? "flower=info,openraft=warn" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const runtime = { child, id: host.id, logs: "", ended: false, intentional: false };
+    const collect = (chunk) => { runtime.logs = (runtime.logs + chunk.toString()).slice(-64_000); };
+    child.stdout.on("data", collect);
+    child.stderr.on("data", collect);
+    child.on("error", (error) => { runtime.error = error; runtime.ended = true; });
+    runtime.exited = new Promise((resolve) => child.once("close", (code, signal) => {
+      runtime.ended = true;
+      runtime.exit = { code, signal };
+      if (Number.isSafeInteger(child.pid)) this.onProcess?.({ type: "exit", pid: child.pid });
+      resolve();
+    }));
+    host.process = runtime;
+    this._generations.push(runtime);
+    if (Number.isSafeInteger(child.pid)) this.onProcess?.({ type: "spawn", pid: child.pid });
+  }
+
+  async _fetch(address, path, { method = "GET", body, timeoutMs = 2_000 } = {}) {
+    const response = await fetch(`http://${address}${path}`, {
+      method, headers: { authorization: `Bearer ${this.adminToken}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.any([this._controller.signal, AbortSignal.timeout(timeoutMs)]),
+    });
+    const text = await response.text();
+    let value;
+    try { value = JSON.parse(text); } catch { value = text; }
+    return { ok: response.ok, status: response.status, value };
+  }
+
+  async _until(label, operation) {
+    const deadline = performance.now() + this.startupTimeoutMs;
+    let last;
+    while (performance.now() < deadline) {
+      for (const host of this.hosts) {
+        if (host.process?.ended && !host.process.intentional) throw new Error(`Host ${host.id} exited: ${host.process.logs.slice(-2_000)}`);
+      }
+      try { if (await operation()) return; } catch (error) { last = error; }
+      await delay(75, undefined, { signal: this._controller.signal });
+    }
+    throw new Error(`${label} timed out${last ? `: ${last.message}` : ""}`);
+  }
+
+  async _serving(host) {
+    const results = await Promise.all(host.addresses.map(async (address) => {
+      try { return (await this._fetch(address, "/raft/metrics")).ok; } catch { return false; }
+    }));
+    return results.every(Boolean);
+  }
+
+  async start() {
+    await access(this.binary, constants.X_OK);
+    this.directory = await mkdtemp(join(tmpdir(), "flower-bench-hosts-"));
+    for (let index = 0; index < this.nodeCount; index++) {
+      const addresses = [];
+      for (let group = 0; group < this.groups; group++) {
+        const reservation = await reservePort();
+        this._reservations.push(reservation);
+        addresses.push(`127.0.0.1:${reservation.port}`);
+      }
+      this.hosts.push({ id: index + 1, addresses, directory: join(this.directory, `host-${index + 1}`) });
+    }
+    await Promise.all(this._reservations.map(releasePort));
+    for (const host of this.hosts) this._startHost(host);
+    await this._until("start all Flower hosts", async () => (await Promise.all(this.hosts.map((host) => this._serving(host)))).every(Boolean));
+    for (let group = 0; group < this.groups; group++) {
+      const members = Object.fromEntries(this.hosts.map((host) => [host.id, host.addresses[group]]));
+      const response = await this._fetch(this.hosts[0].addresses[group], "/raft/initialize", { method: "POST", body: members, timeoutMs: this.startupTimeoutMs });
+      if (!response.ok) throw new Error(`Group ${group} initialization returned HTTP ${response.status}: ${JSON.stringify(response.value)}`);
+    }
+    return this;
+  }
+
+  /** Each host's batched storage commits, shared by all of its replicas. */
+  async storageCounters() {
+    const counters = {};
+    await Promise.all(this.hosts.filter((host) => host.process && !host.process.ended).map(async (host) => {
+      try {
+        const response = await this._fetch(host.addresses[0], "/admin/resources");
+        if (response.ok && response.value?.storage) counters[host.id] = { pid: host.process.child.pid, ...response.value.storage };
+      } catch { /* Unmeasured, like a restarted host. */ }
+    }));
+    return counters;
+  }
+
+  /** The host that currently leads the most groups. */
+  async busiestHost() {
+    const leaders = new Map(this.hosts.map((host) => [host.id, 0]));
+    for (let group = 0; group < this.groups; group++) {
+      for (const host of this.hosts) {
+        try {
+          const metrics = (await this._fetch(host.addresses[group], "/raft/metrics")).value;
+          if (metrics.state === "Leader") { leaders.set(host.id, leaders.get(host.id) + 1); break; }
+        } catch { /* An unreachable replica leads nothing. */ }
+      }
+    }
+    return [...leaders].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0];
+  }
+
+  async crash(hostId) {
+    const host = this.hosts.find((candidate) => candidate.id === hostId);
+    host.process.intentional = true;
+    host.process.child.kill("SIGKILL");
+    if (!await waitForExit(host.process, 5_000)) throw new Error(`Killed host ${hostId} did not exit`);
+  }
+
+  async restart(hostId) {
+    const host = this.hosts.find((candidate) => candidate.id === hostId);
+    this._startHost(host);
+    await this._until(`restart host ${hostId}`, () => this._serving(host));
+  }
+
+  logTails() {
+    return this._generations.map((runtime, index) => ({ node: `host-${runtime.id}`, generation: index + 1, pid: runtime.child.pid,
+      exit: runtime.exit ?? null, error: runtime.error?.message ?? null, tail: runtime.logs.slice(-12_000) }));
+  }
+
+  async close() {
+    this._controller.abort(new Error("Benchmark hosts are closing"));
+    await Promise.all(this._reservations.map(releasePort));
+    await Promise.all(this._generations.map(async (runtime) => {
+      runtime.intentional = true;
+      if (!runtime.ended) runtime.child.kill("SIGTERM");
+      if (!await waitForExit(runtime, 5_000)) {
+        runtime.child.kill("SIGKILL");
+        await waitForExit(runtime, 5_000);
+      }
+    }));
+    if (this.directory && !this.keepData) await rm(this.directory, { recursive: true, force: true });
   }
 }

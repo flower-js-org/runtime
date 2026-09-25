@@ -71,7 +71,7 @@ fn projection_crash_child() {
     tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap()
         .block_on(async {
             if mode == "acknowledged" {
-                let consensus = Consensus::open(id, members[&id].clone(), directory.into(), TEST_TOKEN.into()).await.unwrap();
+                let consensus = Consensus::open(id, members[&id].clone(), std::path::PathBuf::from(directory).into(), TEST_TOKEN.into()).await.unwrap();
                 consensus.initialize(members).await.unwrap();
                 let deadline = Instant::now() + Duration::from_secs(10);
                 while consensus.read().await.is_err() {
@@ -85,7 +85,7 @@ fn projection_crash_child() {
                 // No shutdown, drop, later append, vote, or snapshot can flush apply.
                 std::process::exit(EXIT);
             }
-            let mut store = Store::open(id, directory.into()).await.unwrap();
+            let mut store = Store::open(id, std::path::PathBuf::from(directory).into()).await.unwrap();
             let membership = Entry {
                 log_id: LogId::new(CommittedLeaderId::new(1, 1), 0),
                 payload: EntryPayload::Membership(Membership::new(
@@ -277,6 +277,7 @@ async fn recovered_same_term_leader_cannot_serve_a_heartbeat_fence_before_tail_r
                 .unwrap();
         });
         nodes.push(Node {
+            host: None,
             id,
             address: members[&id].clone(),
             directory,
@@ -540,6 +541,7 @@ async fn recovery_gate_rejects_local_queries_without_quorum_then_allows_replica_
     for (index, (listener, directory)) in listeners.into_iter().zip(directories).enumerate() {
         let id = index as u64 + 1;
         let mut node = Node {
+            host: None,
             id,
             address: members[&id].clone(),
             directory,
@@ -609,6 +611,7 @@ async fn recovery_replaces_uncommitted_conflicting_suffix_before_opening_local_r
     for (index, (listener, directory)) in listeners.into_iter().zip(directories).enumerate() {
         let id = index as u64 + 1;
         let mut node = Node {
+            host: None,
             id,
             address: members[&id].clone(),
             directory,

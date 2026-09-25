@@ -11,6 +11,7 @@ use std::path::Path;
 
 pub(super) const STREAM_SNAPSHOT_MAGIC: &[u8] = b"FLOWERSNAP3\0";
 pub(super) const CHECKPOINT_KEY: &str = "snapshot_checkpoint_v1";
+#[cfg(test)]
 const SNAPSHOT_CHUNKS: TableDefinition<u64, &[u8]> =
     TableDefinition::new("raft_snapshot_chunks_v1");
 // This is an I/O buffer size, not a limit on snapshot or application size.
@@ -91,10 +92,11 @@ fn decode_chunk<'a>(
 
 pub(super) fn allocate_snapshot_meta(
     transaction: &WriteTransaction,
+    tables: Tables,
     node: u64,
     state: &StoredState,
 ) -> anyhow::Result<SnapshotMeta<u64, BasicNode>> {
-    let mut table = transaction.open_table(META)?;
+    let mut table = transaction.open_table(tables.meta)?;
     let sequence = table
         .get("snapshot_sequence")?
         .map(|v| serde_json::from_slice::<u64>(v.value()))
@@ -121,13 +123,14 @@ pub(super) fn allocate_snapshot_meta(
 
 pub(super) fn write_checkpoint(
     transaction: &WriteTransaction,
+    tables: Tables,
     meta: &SnapshotMeta<u64, BasicNode>,
     profile: &mut StorageTrace,
 ) -> anyhow::Result<()> {
     // Publication and retirement share one immediate-durability transaction.
     // The existing application tables are the recovery source, not this marker.
-    transaction.delete_table(SNAPSHOT_CHUNKS)?;
-    let mut table = transaction.open_table(META)?;
+    transaction.delete_table(tables.snapshot_chunks)?;
+    let mut table = transaction.open_table(tables.meta)?;
     table.remove("snapshot")?;
     table.insert(CHECKPOINT_KEY, profile.encode(meta)?.as_slice())?;
     Ok(())
@@ -135,11 +138,12 @@ pub(super) fn write_checkpoint(
 
 pub(super) fn recover_checkpoint(
     transaction: &WriteTransaction,
+    tables: Tables,
     node: u64,
     state: &StoredState,
 ) -> anyhow::Result<Option<SnapshotImage>> {
     let (checkpoint, purged) = {
-        let table = transaction.open_table(META)?;
+        let table = transaction.open_table(tables.meta)?;
         let checkpoint = table
             .get(CHECKPOINT_KEY)?
             .map(|v| serde_json::from_slice::<SnapshotMeta<u64, BasicNode>>(v.value()))
@@ -172,9 +176,9 @@ pub(super) fn recover_checkpoint(
     } else {
         // Later durable applies can survive a restart. Advertise exactly that
         // recovered state, never old metadata paired with a newer payload.
-        meta = allocate_snapshot_meta(transaction, node, state)?;
+        meta = allocate_snapshot_meta(transaction, tables, node, state)?;
         transaction
-            .open_table(META)?
+            .open_table(tables.meta)?
             .insert(CHECKPOINT_KEY, serde_json::to_vec(&meta)?.as_slice())?;
     }
     Ok(Some(SnapshotImage {
@@ -217,12 +221,13 @@ pub(super) fn decode_state(file: &mut File) -> anyhow::Result<StoredState> {
 #[cfg(test)]
 pub(super) fn write_snapshot(
     transaction: &WriteTransaction,
+    tables: Tables,
     snapshot: &mut DiskSnapshot,
     profile: &mut StorageTrace,
 ) -> anyhow::Result<()> {
     // Dropping the previous table and replacing it in this transaction keeps
     // committed readers on the old MVCC image until the new manifest is durable.
-    transaction.delete_table(SNAPSHOT_CHUNKS)?;
+    transaction.delete_table(tables.snapshot_chunks)?;
     let data_bytes = snapshot.data.metadata()?.len();
     anyhow::ensure!(data_bytes != 0, "empty snapshot data");
     snapshot.data.rewind()?;
@@ -232,7 +237,7 @@ pub(super) fn write_snapshot(
     let mut remaining = data_bytes;
     let mut count = 0_u64;
     {
-        let mut chunks = transaction.open_table(SNAPSHOT_CHUNKS)?;
+        let mut chunks = transaction.open_table(tables.snapshot_chunks)?;
         while remaining != 0 {
             let length = remaining.min(CHUNK_BYTES as u64) as usize;
             snapshot.data.read_exact(&mut buffer[..length])?;
@@ -253,7 +258,7 @@ pub(super) fn write_snapshot(
     let mut bytes = STREAM_SNAPSHOT_MAGIC.to_vec();
     bytes.extend_from_slice(&profile.encode(&manifest)?);
     transaction
-        .open_table(META)?
+        .open_table(tables.meta)?
         .insert("snapshot", bytes.as_slice())?;
     snapshot.data.rewind()?;
     Ok(())
@@ -261,10 +266,11 @@ pub(super) fn write_snapshot(
 
 pub(super) fn read_snapshot(
     db: &Database,
+    tables: Tables,
     directory: &Path,
 ) -> anyhow::Result<Option<DiskSnapshot>> {
     let transaction = db.begin_read()?;
-    let table = transaction.open_table(META)?;
+    let table = transaction.open_table(tables.meta)?;
     let Some(value) = table.get("snapshot")? else {
         return Ok(None);
     };
@@ -278,7 +284,7 @@ pub(super) fn read_snapshot(
                 && header.chunks == header.data_bytes.div_ceil(CHUNK_BYTES as u64),
             "invalid snapshot chunk manifest"
         );
-        let chunks = transaction.open_table(SNAPSHOT_CHUNKS)?;
+        let chunks = transaction.open_table(tables.snapshot_chunks)?;
         let mut hash = Sha256::new();
         let mut remaining = header.data_bytes;
         let mut count = 0;
@@ -329,9 +335,10 @@ pub(super) fn read_snapshot(
 
 pub(super) fn read_snapshot_metadata(
     db: &Database,
+    tables: Tables,
 ) -> anyhow::Result<Option<SnapshotMeta<u64, BasicNode>>> {
     let transaction = db.begin_read()?;
-    let table = transaction.open_table(META)?;
+    let table = transaction.open_table(tables.meta)?;
     if let Some(value) = table.get(CHECKPOINT_KEY)? {
         return Ok(Some(
             serde_json::from_slice(value.value())
@@ -439,10 +446,16 @@ mod tests {
             &mut profile,
         )
         .unwrap();
-        let transaction = store.inner.db.begin_write().unwrap();
-        let meta = allocate_snapshot_meta(&transaction, store.inner.id, &capture.state).unwrap();
+        let transaction = store.inner.shared.database().begin_write().unwrap();
+        let meta = allocate_snapshot_meta(
+            &transaction,
+            Tables::new(""),
+            store.inner.id,
+            &capture.state,
+        )
+        .unwrap();
         let mut snapshot = DiskSnapshot { meta, data };
-        write_snapshot(&transaction, &mut snapshot, &mut profile).unwrap();
+        write_snapshot(&transaction, Tables::new(""), &mut snapshot, &mut profile).unwrap();
         transaction.commit().unwrap();
         RaftSnapshot {
             meta: snapshot.meta,
@@ -503,7 +516,7 @@ mod tests {
             "Raft still transfers the original JSON stream"
         );
         let mut manifest = {
-            let transaction = store.inner.db.begin_read().unwrap();
+            let transaction = store.inner.shared.database().begin_read().unwrap();
             let meta = transaction.open_table(META).unwrap();
             let value = meta.get("snapshot").unwrap().unwrap();
             let header = &value.value()[STREAM_SNAPSHOT_MAGIC.len()..];
@@ -522,7 +535,7 @@ mod tests {
         // Recreate the exact prior FLOWERSNAP3 representation: no encoding
         // field, and raw fixed-size chunks. It must remain readable on upgrade.
         manifest.encoding = None;
-        let transaction = store.inner.db.begin_write().unwrap();
+        let transaction = store.inner.shared.database().begin_write().unwrap();
         transaction.delete_table(SNAPSHOT_CHUNKS).unwrap();
         {
             let mut chunks = transaction.open_table(SNAPSHOT_CHUNKS).unwrap();
@@ -575,7 +588,7 @@ mod tests {
         follower.install_snapshot(&meta, receiving).await.unwrap();
         assert_eq!(follower.snapshot().await, expected);
         {
-            let transaction = follower.inner.db.begin_write().unwrap();
+            let transaction = follower.inner.shared.database().begin_write().unwrap();
             transaction
                 .open_table(SNAPSHOT_CHUNKS)
                 .unwrap()
@@ -601,7 +614,7 @@ mod tests {
         assert_eq!(restored.meta, meta);
         assert_eq!(follower.snapshot().await, expected);
         // The manifest contains metadata only, regardless of image size.
-        let transaction = follower.inner.db.begin_read().unwrap();
+        let transaction = follower.inner.shared.database().begin_read().unwrap();
         let table = transaction.open_table(META).unwrap();
         assert!(table.get(CHECKPOINT_KEY).unwrap().unwrap().value().len() < 1024);
         assert!(table.get("snapshot").unwrap().is_none());
@@ -637,7 +650,7 @@ mod tests {
             .insert("large".into(), Value::String("x".repeat(CHUNK_BYTES + 100)));
         legacy_chunked_snapshot(&store, capture);
         let (manifest, original) = {
-            let transaction = store.inner.db.begin_read().unwrap();
+            let transaction = store.inner.shared.database().begin_read().unwrap();
             let meta = transaction.open_table(META).unwrap();
             let chunks = transaction.open_table(SNAPSHOT_CHUNKS).unwrap();
             (
@@ -646,7 +659,7 @@ mod tests {
             )
         };
         for mode in 0..5 {
-            let transaction = store.inner.db.begin_write().unwrap();
+            let transaction = store.inner.shared.database().begin_write().unwrap();
             {
                 let mut chunks = transaction.open_table(SNAPSHOT_CHUNKS).unwrap();
                 match mode {
@@ -684,7 +697,7 @@ mod tests {
                 store.get_current_snapshot().await.is_err(),
                 "corruption mode {mode} was accepted"
             );
-            let transaction = store.inner.db.begin_write().unwrap();
+            let transaction = store.inner.shared.database().begin_write().unwrap();
             {
                 let mut chunks = transaction.open_table(SNAPSHOT_CHUNKS).unwrap();
                 chunks.insert(0, original.as_slice()).unwrap();
