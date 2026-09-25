@@ -101,6 +101,11 @@ impl DependencyCertificate {
     pub fn allocation_cost(&self) -> usize {
         self.bytes
     }
+    /// The records and graph markers this certificate observed.
+    #[cfg(test)]
+    pub(crate) fn observed(&self) -> Vec<&str> {
+        self.checks.keys().map(String::as_str).collect()
+    }
 }
 
 /// An optimistic mutation is reusable only against the same observed values,
@@ -129,6 +134,10 @@ impl MutationCertificate {
     }
     pub fn allocation_cost(&self) -> usize {
         self.reads.allocation_cost().saturating_add(64)
+    }
+    #[cfg(test)]
+    pub(crate) fn observed(&self) -> Vec<&str> {
+        self.reads.observed()
     }
 }
 impl Engine<'_> {

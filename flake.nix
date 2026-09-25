@@ -167,7 +167,10 @@
           name = "flower-dev";
 
           packages = [
-            pkgs.rust-bin.stable.${rustVersion}.default
+            # Rust guest modules (crates/, examples/goblin-pizza-rs) build for wasm32.
+            (pkgs.rust-bin.stable.${rustVersion}.default.override {
+              targets = [ "wasm32-unknown-unknown" ];
+            })
             pkgs.nodejs_26
             pkgs.stdenv.cc
             xmit.packages.${pkgs.stdenv.hostPlatform.system}.default

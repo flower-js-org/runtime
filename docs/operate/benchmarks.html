@@ -22,10 +22,13 @@ npm run bench -- --help</code></pre></div>
 <li><strong>Reports</strong> go to <code>bench/results/</code> as JSON and HTML, with the settings and binary used.</li>
 </ul>
 <p>The base command starts one three-node group. <code>bench:stress</code> runs eight independent groups, each with its own customers, workers and leader crash. Its preset sets 256 customers per group, serial writer preparation and a 1,024-request writer queue, overriding the normal defaults. Environment variables override the preset. See the <a href="https://github.com/xmit-dev/flower/blob/main/bench/README.md">benchmark guide</a> for all options and the <a href="https://github.com/xmit-dev/flower/blob/main/bench/READS.md">measurement analysis</a> for the current result.</p>
-<p>To publish a new result to this page, run inside <code>nix develop</code>, build first and leave profiling off:</p><div class="code-block"><div class="code-head"><span>Measure independent Raft groups</span><button type="button" class="copy-button" aria-label="Copy Measure independent Raft groups">Copy</button></div><pre tabindex="0"><code class="language-sh">npm ci
+<p>The same workload also runs with the application compiled from Rust: <code>--guest wasm</code> deploys <a href="https://github.com/xmit-dev/flower/tree/main/examples/goblin-pizza-rs"><code>examples/goblin-pizza-rs</code></a>, a port that makes the same database calls and writes the same records as the TypeScript version, as a WebAssembly module instead of a QuickJS bundle.</p>
+<p>To publish new results to this page, run <code>bin/bench</code> inside <code>nix develop</code> with profiling off. It builds the server and both guests, runs the stress preset once per guest, and publishes both. The steps it runs:</p><div class="code-block"><div class="code-head"><span>Measure independent Raft groups</span><button type="button" class="copy-button" aria-label="Copy Measure independent Raft groups">Copy</button></div><pre tabindex="0"><code class="language-sh">npm ci
 cargo build --release --locked --bin flower --bin flower-bench-driver
+cargo build --release --locked -p goblin-pizza --target wasm32-unknown-unknown
 npm run bench:stress
-node scripts/publish-bench-results.mjs bench/results/latest.json
+npm run bench:stress -- --guest wasm
+node scripts/publish-bench-results.mjs bench/results/latest.json bench/results/latest-wasm.json
 node scripts/publish-bench-results.mjs --check</code></pre></div>
 <p>The publisher retains validated JSON in <code>docs/bench/</code>. The live preview and deployment build render the charts, reports and summaries from those measurements. Commit the JSON with your source changes, then use <code>bin/web-deploy</code> to publish the site.</p>
 </section>

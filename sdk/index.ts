@@ -30,7 +30,7 @@ export type { NaClKeyPair, NaClPRNG, JWTAlgorithm, JWTKey, JWTKeyFormat, JWTClai
   WebAuthnRegistrationExpectation, WebAuthnAuthenticationExpectation, WebAuthnCredential, WebAuthnRegistration, WebAuthnAuthentication } from "./crypto.ts";
 export { FlowerClient, FlowerAdmin, FlowerError, isTransient, backoff } from "./client.ts";
 export type {
-  Bundle, FlowerFetch, FlowerRequestInit, RetryPolicy, RequestOptions, MutationOptions, QueryResult, MutationResult, WatchOptions, WatchPollOptions,
+  Bundle, JavaScriptBundle, WasmBundle, FlowerFetch, FlowerRequestInit, RetryPolicy, RequestOptions, MutationOptions, QueryResult, MutationResult, WatchOptions, WatchPollOptions,
   SubscribeOptions, Update, FlowerClientOptions, DeploymentOptions, DeploymentReceipt, ControlOptions, FlowerAdminOptions, ClusterGroup,
   PartitionMovePhase, PartitionMove, PartitionPlacement, RebalanceMove, RebalancePlan, ClusterLayout, PartitionWaitOptions, KeyGenerateOptions,
   KeyRevokeOptions, SealedKeyImport, ManagedKeyCatalog, KeyCacheStats, RetryIdentity, RetentionState, RetrySession, SessionOptions, RetentionAction,

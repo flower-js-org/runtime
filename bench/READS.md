@@ -40,7 +40,7 @@ nix develop
 npm ci
 cargo build --release --locked --bin flower --bin flower-bench-driver
 FLOWER_OTEL_ENABLED=0 OTEL_SDK_DISABLED=true npm run bench:stress
-node scripts/publish-bench-results.mjs bench/results/latest.json
+node scripts/publish-bench-results.mjs bench/results/latest.json bench/results/latest-wasm.json
 node scripts/publish-bench-results.mjs --check
 ```
 

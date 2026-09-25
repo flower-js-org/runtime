@@ -53,8 +53,20 @@ wasmparser = { version = "0.259", default-features = false, features = ["std", "
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = "0.2"
 
+# Guest modules build separately for wasm32-unknown-unknown; plain cargo
+# commands at the root still select only the server.
+[workspace]
+members = ["crates/flower-sdk", "examples/goblin-pizza-rs"]
+
 [profile.release]
 lto = "thin"
+
+[profile.release.package.goblin-pizza]
+codegen-units = 1
+strip = true
+
+[profile.release.package.flower-sdk]
+codegen-units = 1
 
 # The leader's own log append does not block replication. See vendor/openraft/FLOWER.md.
 [patch.crates-io]

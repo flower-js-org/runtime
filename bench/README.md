@@ -8,20 +8,35 @@ cargo build --release --locked --bin flower --bin flower-bench-driver
 npm run bench:stress
 ```
 
+The application runs as either guest. By default it is [the TypeScript bundle](../examples/goblin-pizza.ts) on QuickJS. `--guest wasm` deploys [its Rust port](../examples/goblin-pizza-rs), built with the [`flower-sdk`](../crates/flower-sdk) crate into a WebAssembly module that implements [GUEST_ABI.md](../GUEST_ABI.md) directly. The port declares the same manifest, makes the same host calls in the same order and writes the same records, so the customer driver, workers and audit are unchanged. Build it inside `nix develop`, which provides the `wasm32-unknown-unknown` target:
+
+```sh
+cargo build --release --locked -p goblin-pizza --target wasm32-unknown-unknown
+npm run bench:stress -- --guest wasm
+```
+
+`bin/bench` builds everything, runs the stress preset once per guest and publishes both results. The ignored `guest_parity` test in [src/evaluator/guest_parity_tests.rs](../src/evaluator/guest_parity_tests.rs) drives both guests through the production evaluator at fixed clocks and requires identical results, failures, stored records, query validity and read certificates at every step:
+
+```sh
+node bench/guests.mjs /tmp/goblin
+FLOWER_GOBLIN_BUNDLE=/tmp/goblin/goblin-pizza.js FLOWER_GOBLIN_WASM=/tmp/goblin/goblin-pizza.wasm \
+  cargo test --release --lib guest_parity -- --ignored --nocapture
+```
+
 Use `nix develop --command cargo …` if Rust is supplied by the development shell. The stress preset starts **eight independent three-replica groups** on this machine. Per group it runs 256 customer loops and four workers, two tenants with four stores each, a 96-order cap, one second of warmup, and 60 seconds of measured load. Every leader is killed halfway through; work drains afterward and every group receives an independent audit.
 
 The preset sets adaptive batching with a **50 ms preparation ceiling**, a 1,024-request writer queue, 16 authorization/cache-probe slots, and 16 shared preparation slots per server. Writer preparation is serial because this workload repeatedly updates conflicting hot stores; independent groups and reads remain parallel. Each server uses two Tokio async workers because all 24 replicas share this host; QuickJS preparation and storage use separate blocking workers. Existing environment variables take precedence. These are scheduling/resource settings, not end-to-end latency guarantees or recommendations for every production topology.
 
 ## Results and publication
 
-The retained result is [results/latest.html](results/latest.html), with [raw measurements](results/latest.json) and each group's JSON/HTML under `results/latest-groups/`. [READS.md](READS.md) summarizes that run; [ARCHITECTURE.md](ARCHITECTURE.md) covers the architecture and [LIMITS.md](LIMITS.md) lists capacity controls. Keep experimental output outside the retained results directory, for example under `/tmp/`.
+The retained TypeScript result is [results/latest.html](results/latest.html), with [raw measurements](results/latest.json) and each group's JSON/HTML under `results/latest-groups/`; the Rust guest's run uses `results/latest-wasm.*` and `results/latest-wasm-groups/`. [READS.md](READS.md) summarizes a run; [ARCHITECTURE.md](ARCHITECTURE.md) covers the architecture and [LIMITS.md](LIMITS.md) lists capacity controls. Keep experimental output outside the retained results directory, for example under `/tmp/`.
 
 ```sh
-node scripts/publish-bench-results.mjs bench/results/latest.json
+node scripts/publish-bench-results.mjs bench/results/latest.json bench/results/latest-wasm.json
 node scripts/publish-bench-results.mjs --check
 ```
 
-Publication validates and retains compact measurement JSON under `docs/bench/`; commit those source files. The site generator renders the reports and homepage/handbook summaries into `_site/` from that data. Use `bin/web-preview` for live preview or `bin/web-deploy` to build and publish. The check validates the retained measurements offline; it does not rerun the workload.
+Publication validates and retains compact measurement JSON under `docs/bench/`, at `latest.json` and `latest-wasm.json` by the guest each report records; commit those source files. Without arguments, it publishes every guest's run found in `bench/results/`, and `--check` verifies every retained one. The homepage and handbook summaries lead with the TypeScript run and compare the guests beneath it. The site generator renders the reports and homepage/handbook summaries into `_site/` from that data. Use `bin/web-preview` for live preview or `bin/web-deploy` to build and publish. The check validates the retained measurements offline; it does not rerun the workload.
 
 ## Workload and accounting
 

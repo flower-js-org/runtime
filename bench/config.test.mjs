@@ -11,6 +11,7 @@ test("defaults are bounded and resolve paths from the checkout", () => {
     shops: 4, hotShops: 1, hotProbability: 0.8, maxOrders: 32,
     bakeMs: 250, leaseMs: 2_000, duplicateRate: 0.1, abandonRate: 0.1,
     pollMs: 150, requestTimeoutMs: 2_000, retryBudgetMs: 15_000, seed: "42", nodes: 3, initialization: "static", queryRouting: "replicas",
+    guest: "js", guestWasm: fileURLToPath(new URL("../target/wasm32-unknown-unknown/release/goblin_pizza.wasm", import.meta.url)),
     driver: "rust", driverBinary: fileURLToPath(new URL("../target/release/flower-bench-driver", import.meta.url)),
     binary: fileURLToPath(new URL("../target/release/flower", import.meta.url)),
     json: fileURLToPath(new URL("../bench/results/latest.json", import.meta.url)),
@@ -35,6 +36,7 @@ test("all numeric, text, and boolean options parse into driver fields", () => {
     shops: 32, hotShops: 32, hotProbability: 0, maxOrders: 10_000,
     bakeMs: 0, leaseMs: 100, duplicateRate: 1, abandonRate: 0,
     pollMs: 10, requestTimeoutMs: 60_000, retryBudgetMs: 300_000, seed: "goblin army", nodes: 3, initialization: "static", queryRouting: "leader",
+    guest: "js", guestWasm: fileURLToPath(new URL("../target/wasm32-unknown-unknown/release/goblin_pizza.wasm", import.meta.url)),
     driver: "rust", driverBinary: fileURLToPath(new URL("../target/release/flower-bench-driver", import.meta.url)),
     binary: resolve("a flower"), json: resolve("output report.json"),
     html: resolve("output report.html"), baseline: null, cpuProfile: null,
@@ -43,6 +45,13 @@ test("all numeric, text, and boolean options parse into driver fields", () => {
   assert.equal(parseOptions(["--seed=0"]).seed, "0");
   assert.equal(parseOptions(["--initialization", "per-invocation"]).initialization, "per-invocation");
   assert.throws(() => parseOptions(["--initialization", "unsafe"]), /initialization/);
+  const wasm = parseOptions(["--guest", "wasm", "--guest-wasm", "guest module.wasm"]);
+  assert.equal(wasm.guestWasm, resolve("guest module.wasm"));
+  assert.equal(wasm.json, fileURLToPath(new URL("../bench/results/latest-wasm.json", import.meta.url)));
+  assert.equal(wasm.html, fileURLToPath(new URL("../bench/results/latest-wasm.html", import.meta.url)));
+  assert.equal(parseOptions(["--guest", "wasm", "--json", "w.json"]).json, resolve("w.json"));
+  assert.throws(() => parseOptions(["--guest", "lua"]), /--guest must be js or wasm/);
+  assert.throws(() => parseOptions(["--guest", "wasm", "--initialization", "per-invocation"]), /only to the JavaScript guest/);
   assert.equal(parseOptions(["--query-routing", "replicas"]).queryRouting, "replicas");
   assert.throws(() => parseOptions(["--query-routing", "stale"]), /query-routing/);
   assert.equal(parseOptions(["--duration", "1e1"]).duration, 10);

@@ -14,7 +14,7 @@ The development server generates and serves `_site/` at `http://localhost:8080/`
 - Edit handbook content in `docs/`. HTML and Markdown templates use the shared layout in `docs/_includes/`.
 - `scripts/docs/pages.mjs` defines the page order, titles and navigation; `scripts/docs/render.mjs` renders the shared page chrome and highlights examples.
 - Static assets, downloadable TypeScript examples and measured benchmark data live in `docs/`. Code blocks with `data-src` include the corresponding example at build time.
-- Benchmark reports and summaries are rendered from the retained JSON in `docs/bench/`. Select a new measured run with `node scripts/publish-bench-results.mjs path/to/latest.json`; the live preview picks up the updated measurements. `node scripts/publish-bench-results.mjs --check` validates the retained data offline.
+- Benchmark reports and summaries are rendered from the retained JSON in `docs/bench/`. `bin/bench` measures the stress preset with the TypeScript and Rust guests and publishes both; select other measured runs with `node scripts/publish-bench-results.mjs path/to/latest.json …`, which retains each run under its guest's name (`latest.json`, `latest-wasm.json`). The live preview picks up the updated measurements. `node scripts/publish-bench-results.mjs --check` validates the retained data offline.
 - Commit the sources and measurement JSON in `docs/`. Generated HTML, reports, redirects and copied assets go into the Git-ignored `_site/` directory.
 - `npm run docs:check` renders and validates the site in memory, including internal links and legacy redirects. `npm run docs:build` produces a fresh `_site/` for deployment. Both work from a clean checkout after `npm ci`.
 

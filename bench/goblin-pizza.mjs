@@ -10,11 +10,11 @@ import { monitorEventLoopDelay } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { buildBundle } from "../sdk/bundle.ts";
 import { auditWorld } from "./audit.mjs";
 import { LocalCluster } from "./cluster.mjs";
 import { HELP, parseOptions } from "./config.mjs";
 import { startCpuProfile } from "./cpu-profile.mjs";
+import { ENGINES, goblinBundle } from "./guests.mjs";
 import { createRandom, Histogram, Stats, summarizeApplication } from "./metrics.mjs";
 import { BenchmarkClient, RpcError } from "./rpc.mjs";
 import { renderReport } from "./report.mjs";
@@ -22,7 +22,6 @@ import { cpuMilliseconds, ServerCpuSamples } from "./resources.mjs";
 import { runtimeSettings } from "./runtime-settings.mjs";
 import { mergeRouting, startRustDriver } from "./rust-driver.mjs";
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const execute = promisify(execFile);
 const methods = ["deploy", "pizza.setup", "pizza.order", "pizza.tip", "pizza.shop", "pizza.shop.local", "pizza.claim", "pizza.deliver", "pizza.world"];
 const lostLease = (error) => error instanceof RpcError && error.status === 422 && error.failure?.code === "LEASE_LOST";
@@ -82,7 +81,7 @@ export async function run(options, { ready } = {}) {
   const cpuStart = process.cpuUsage();
   const report = {
     schemaVersion: 1, runId: options.runId ?? randomUUID(), startedAt: new Date().toISOString(), options,
-    runtime: { engine: "quickjs",
+    runtime: { engine: ENGINES[options.guest ?? "js"],
       settings: runtimeSettings() },
     environment: { node: process.version, os: `${platform()} ${release()}`, arch: arch(), cpu: cpus()[0]?.model, logicalCpus: cpus().length, colocatedNodes: options.nodes },
     passed: false, timeline: [],
@@ -195,13 +194,15 @@ export async function run(options, { ready } = {}) {
   }
 
   try {
-    console.log(`Goblin Pizza Express: ${options.nodes} local nodes, ${options.concurrency} customer loops, ${options.workers} drones, ${options.http2 ? "HTTP/2 h2c" : "HTTP/1.1"} methods${options.chaos ? ", one leader crash" : ""}.`);
+    console.log(`Goblin Pizza Express (${options.guest === "wasm" ? "Rust Wasm" : "TypeScript"} guest): ${options.nodes} local nodes, ${options.concurrency} customer loops, ${options.workers} drones, ${options.http2 ? "HTTP/2 h2c" : "HTTP/1.1"} methods${options.chaos ? ", one leader crash" : ""}.`);
     report.binary = await fingerprintBinary(options.binary, signal);
     report.driver = { kind: "rust", orchestration: "node",
       binary: await fingerprintBinary(options.driverBinary, signal) };
     await cluster.start();
-    const bundle = await buildBundle(resolve(root, "examples/goblin-pizza.ts"), { initialization: options.initialization });
+    const bundle = await goblinBundle(options);
     report.bundleHash = bundle.hash;
+    report.guest = { kind: options.guest ?? "js", source: options.guest === "wasm" ? "examples/goblin-pizza-rs" : "examples/goblin-pizza.ts",
+      bytes: Buffer.byteLength(bundle.javascript ?? Buffer.from(bundle.wasm, "base64")) };
     await client.deploy(bundle);
     settings = (await client.call("pizza.setup", {
       tenants: tenantIds, storesPerTenant: options.shops, stockPerShop: options.maxOrders * 4 + 10,

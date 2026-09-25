@@ -14,7 +14,7 @@ const help = `Flower — transactional reactive values
 Usage: flower COMMAND [ARGS] [OPTIONS]
 
   build FILE [OUTPUT]         Bundle a TypeScript module to <basename>.flower.json.
-  deploy FILE                Deploy a .ts module or built .json bundle (admin).
+  deploy FILE                Deploy a .ts module, .wasm guest module or built .json bundle (admin).
   init --members ID=ADDR,...  Bootstrap an uninitialized Raft cluster once (admin).
   call NAME [JSON_ARGS]       Invoke an HTTP alias; deployed code selects its mode.
   mutate NAME [JSON_ARGS]     Invoke a named atomic mutation method.

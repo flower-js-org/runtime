@@ -14,6 +14,8 @@ pub(crate) mod staging;
 pub(crate) use rust_engine::ReactiveIndex;
 pub use rust_engine::{DependencyCertificate, MutationCertificate};
 #[cfg(test)]
+mod guest_parity_tests;
+#[cfg(test)]
 mod transactions_tests;
 mod wasm;
 mod wire;

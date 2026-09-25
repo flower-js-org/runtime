@@ -13,6 +13,8 @@
 //!
 //! FLOWER_GOBLIN_ONLY selects one method, FLOWER_GOBLIN_CALLS sets the call
 //! count, and FLOWER_MICRO_TRIVIAL=N only loops a trivial query, for sampling.
+//! FLOWER_GOBLIN_WASM=path measures the Rust guest (examples/goblin-pizza-rs)
+//! instead of the JavaScript bundle; `node bench/guests.mjs DIR` builds both.
 use super::*;
 use crate::consensus::Records;
 
@@ -34,9 +36,15 @@ fn timed(label: &str, calls: usize, mut call: impl FnMut(usize)) {
 #[test]
 #[ignore]
 fn goblin_invocation_costs() {
-    let path = std::env::var("FLOWER_GOBLIN_BUNDLE").expect("FLOWER_GOBLIN_BUNDLE");
-    let javascript = std::fs::read_to_string(path).unwrap();
-    let bundle = json!({"hash": hash(javascript.as_bytes()), "javascript": javascript});
+    let bundle = if let Ok(path) = std::env::var("FLOWER_GOBLIN_WASM") {
+        use base64::Engine as _;
+        let wasm = std::fs::read(path).unwrap();
+        json!({"hash": hash(&wasm), "wasm": base64::engine::general_purpose::STANDARD.encode(&wasm)})
+    } else {
+        let path = std::env::var("FLOWER_GOBLIN_BUNDLE").expect("FLOWER_GOBLIN_BUNDLE");
+        let javascript = std::fs::read_to_string(path).unwrap();
+        json!({"hash": hash(javascript.as_bytes()), "javascript": javascript})
+    };
     let mut data = evaluate(
         BTreeMap::new(),
         json!({"requestId":"deploy","bundle":bundle}),

@@ -1,9 +1,12 @@
 // Retain validated measurements in docs/bench/; Eleventy renders reports at build time.
 // --check verifies the retained JSON offline without rerunning the workload.
-import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
+import { access, mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
+import { summarizeCpu } from "../bench/compare-cpu.mjs";
+import { GUEST_LABELS, GUESTS, guestOf } from "../bench/guests.mjs";
 import { summarizeGroups } from "../bench/multi-group.mjs";
 import { renderGroupsReport } from "../bench/multi-group-report.mjs";
 import { renderReport } from "../bench/report.mjs";
@@ -19,6 +22,11 @@ const escape = (value) => String(value).replace(/[&<>"']/g, (character) => ({
 const finite = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
 const number = (value, digits = 0) => value.toLocaleString("en-US", { maximumFractionDigits: digits });
 const json = (value) => `${JSON.stringify(value)}\n`;
+const ms = (value) => finite(value) ? `${number(value, value < 10 ? 1 : 0)}&nbsp;ms` : "—";
+const exists = (path) => access(path).then(() => true, () => false);
+
+/** Each guest's retained run: bench/latest.* (TypeScript) and bench/latest-wasm.* (Rust). */
+export const stemOf = (guest) => guest === "js" ? "latest" : `latest-${guest}`;
 
 export function childPath(source, path) {
   if (typeof path !== "string" || !path || isAbsolute(path) || /[\\\x00-\x1f\x7f?#]/.test(path) || /^[a-z][a-z\d+.-]*:/i.test(path)) {
@@ -48,7 +56,7 @@ export function summarizePublishedRun(report) {
       typeof report.passed !== "boolean" || typeof report.correctnessPassed !== "boolean" ||
       (report.passed && !report.correctnessPassed) ||
       typeof report.binary?.sha256 !== "string" || !report.binary.sha256 ||
-      typeof report.bundleHash !== "string" || !report.bundleHash) {
+      typeof report.bundleHash !== "string" || !report.bundleHash || !GUESTS.includes(guestOf(report))) {
     throw new Error("Cannot publish an incomplete or invalid multi-group measurement");
   }
   if (report.durationMs !== Date.parse(report.loadEndedAt) - Date.parse(report.loadStartedAt) ||
@@ -75,12 +83,38 @@ export function summarizePublishedRun(report) {
     measuredAt: report.loadEndedAt,
     cpu: report.environment?.cpu ?? "CPU not recorded",
     transport: report.options.http2 ? "HTTP/2" : "HTTP/1.1",
+    guest: guestOf(report),
+    guestLabel: GUEST_LABELS[guestOf(report)],
+    stem: stemOf(guestOf(report)),
   };
 }
 
+/** Sampled server CPU per successful customer call, when the report covers every server. */
+function serverCpuPerCall(report) {
+  try { return summarizeCpu(report).servers.estimatedCpuUsPerSuccessfulCall; } catch { return null; }
+}
+
+// The same workload with the application in each guest, one column per run.
+function guestComparison(reports, root) {
+  const runs = reports.map((report) => ({ run: summarizePublishedRun(report), latency: report.latencyMs, cpu: serverCpuPerCall(report) }));
+  const row = (label, cell) => `<tr><th scope="row">${label}</th>${runs.map((entry) => `<td>${cell(entry)}</td>`).join("")}</tr>`;
+  const rows = [
+    row("Calls&nbsp;/&nbsp;s", ({ run }) => number(run.goodputRps)),
+    row("Server CPU&nbsp;/&nbsp;call", ({ cpu }) => finite(cpu) ? `${number(cpu)}&nbsp;µs` : "—"),
+    row("Reads p50 · p99", ({ latency }) => `${ms(latency.read?.p50)} · ${ms(latency.read?.p99)}`),
+    row("Writes p50 · p99", ({ latency }) => `${ms(latency.mutation?.p50)} · ${ms(latency.mutation?.p99)}`),
+    row("Group audits", ({ run }) => `${run.auditedGroups}/${run.groups}${run.passed ? "" : " · run failed"}`),
+  ].join("");
+  const heads = runs.map(({ run }) => `<th scope="col"><a href="${root}bench/${run.stem}.html">${escape(run.guestLabel)}</a></th>`).join("");
+  const binaries = new Set(reports.map((report) => report.binary.sha256));
+  return `<div class="benchmark-guests"><table><caption>The same workload with the application in each guest</caption><thead><tr><td></td>${heads}</tr></thead><tbody>${rows}</tbody></table></div>
+<p class="benchmark-context">The <a href="https://github.com/xmit-dev/flower/tree/main/examples/goblin-pizza-rs">Rust port</a> of the application makes the same host calls and writes the same records. Runs are measured one after the other${binaries.size === 1 ? " with the same server binary" : ", with different server binaries"}. Flushes to the one shared disk bound goodput here, and single runs vary by a fifth or more; server CPU per call, sampled across all replicas, is the steadier comparison.</p>`;
+}
+
 // `root` leads from the embedding page to the site root. The benchmark page
-// itself omits the link back to its own workload description.
-export function renderPublishedSummary(report, { root = "", workload = true } = {}) {
+// itself omits the link back to its own workload description. `others` are
+// the other guests' runs, compared below the headline run.
+export function renderPublishedSummary(report, { root = "", workload = true, others = [] } = {}) {
   const run = summarizePublishedRun(report);
   const local = run.readConsistency === "replica-local";
   const recovery = run.crashes === 0 ? "No injected failure in this run."
@@ -92,8 +126,9 @@ export function renderPublishedSummary(report, { root = "", workload = true } = 
 ${latencyFigure(report)}
 <p class="benchmark-policy"><strong>${local ? "Replica-local reads: lag is allowed." : "Fresh reads: quorum-confirmed per group."}</strong> ${number(run.readPercent, 1)}% reads / ${number(run.mutationPercent, 1)}% mutations · ${run.transport} · ${number(run.durationSeconds, 1)} measured seconds.</p>
 <p><strong>${run.passed ? "Run passed." : "Run failed."} ${run.auditedGroups}/${run.groups} group audits passed.</strong> ${escape(recovery)}</p>
-<p class="benchmark-context">${escape(run.cpu)}; all replicas and load generators share one machine. Completed customer calls use the union measurement window; retries, worker traffic, and explicit replays do not inflate throughput. ${local ? "Reads may be stale; mutations and audits retain fresh checks." : "Each group has its own fresh-read boundary."}</p>
-<p class="benchmark-links"><a href="${root}bench/latest.html">Charts &amp; every group →</a><a href="${root}bench/latest.json">Raw measurements ↓</a>${workload ? `<a href="${root}operate/benchmarks.html">Workload &amp; reproduction →</a>` : ""}</p>
+<p class="benchmark-context">${escape(run.cpu)}; all replicas and load generators share one machine. Completed customer calls use the union measurement window; retries, worker traffic, and explicit replays do not inflate throughput. ${local ? "Reads may be stale; mutations and audits retain fresh checks." : "Each group has its own fresh-read boundary."} Application code: ${escape(run.guestLabel)}.</p>
+${others.length ? guestComparison([report, ...others], root) : ""}
+<p class="benchmark-links"><a href="${root}bench/${run.stem}.html">Charts &amp; every group →</a><a href="${root}bench/${run.stem}.json">Raw measurements ↓</a>${others.map((other) => `<a href="${root}bench/${stemOf(guestOf(other))}.html">${escape(GUEST_LABELS[guestOf(other)])} report →</a>`).join("")}${workload ? `<a href="${root}operate/benchmarks.html">Workload &amp; reproduction →</a>` : ""}</p>
 </section>`;
 }
 
@@ -115,10 +150,10 @@ export function replaceSummary(source, summary) {
 }
 
 // Give generated reports the site's header and footer, plus report-level links.
-export function siteNavigation(html, child) {
+export function siteNavigation(html, child, stem = "latest") {
   const up = child ? "../../" : "../";
   const chrome = `<link rel="stylesheet" href="${up}chrome.css">`;
-  const links = child ? '<a href="../latest.html">All groups</a>' : '<a href="latest.json">Raw JSON</a>';
+  const links = child ? `<a href="../${stem}.html">All groups</a>` : `<a href="${stem}.json">Raw JSON</a>`;
   const withHead = html.replace("</head>", `${chrome}</head>`);
   const withHeader = withHead.replace(/(<body[^>]*>(?:<a class="skip"[^>]*>[^<]*<\/a>)?)/, `$1${siteHeader(up, "operate")}`);
   const withLinks = withHeader.replace(/(<nav\b[^>]*>)/, `$1${links}`);
@@ -129,7 +164,7 @@ export function siteNavigation(html, child) {
 
 export async function renderBenchResults(source = resolve(root, "docs/bench/latest.json")) {
   const report = JSON.parse(await readFile(source, "utf8"));
-  summarizePublishedRun(report);
+  const { stem } = summarizePublishedRun(report);
   const output = new Map();
   const published = structuredClone(report);
   const children = [];
@@ -142,13 +177,13 @@ export async function renderBenchResults(source = resolve(root, "docs/bench/late
         child.options?.readConsistency !== report.options.readConsistency || child.audit?.passed !== group.audit?.passed) {
       throw new Error(`Group ${i} does not match its aggregate report`);
     }
-    const stem = `latest-groups/group-${i}`;
-    published.groups[i].html = `${stem}.html`;
-    published.groups[i].json = `${stem}.json`;
-    output.set(`bench/${stem}.json`, json(child));
+    const path = `${stem}-groups/group-${i}`;
+    published.groups[i].html = `${path}.html`;
+    published.groups[i].json = `${path}.json`;
+    output.set(`bench/${path}.json`, json(child));
     const display = child.cpuProfile ? { ...child, cpuProfile: { ...child.cpuProfile,
       relativePath: null, outputPath: "Raw sample retained with the local benchmark artifacts" } } : child;
-    output.set(`bench/${stem}.html`, siteNavigation(renderReport(display), true));
+    output.set(`bench/${path}.html`, siteNavigation(renderReport(display), true, stem));
   }
   const reconstructed = summarizeGroups(children, report.options);
   for (const key of ["durationMs", "synchronizedOverlapMs", "startSkewMs", "loadStartedAt", "loadEndedAt",
@@ -167,17 +202,43 @@ export async function renderBenchResults(source = resolve(root, "docs/bench/late
       if (!isDeepStrictEqual(report.groups[i][key], value)) throw new Error(`Group ${i} ${key} does not match child measurements`);
     }
   }
+  if (commonGuest(children) !== guestOf(report)) throw new Error("Group guests do not match their aggregate report");
   if ((report.correctnessPassed && !reconstructed.correctnessPassed) ||
       (report.passed && children.some((child) => child.passed !== true))) {
     throw new Error("Aggregate passing verdict does not match child correctness or profiling");
   }
-  output.set("bench/latest.json", json(published));
-  output.set("bench/latest.html", siteNavigation(renderGroupsReport(published), false));
+  output.set(`bench/${stem}.json`, json(published));
+  output.set(`bench/${stem}.html`, siteNavigation(renderGroupsReport(published), false, stem));
   return output;
+}
+
+function commonGuest(children) {
+  const guests = new Set(children.map(guestOf));
+  return guests.size === 1 ? [...guests][0] : null;
+}
+
+/** Every guest's retained run in the site directory, rendered for the site build. */
+export async function renderAllBenchResults(directory = resolve(root, "docs/bench")) {
+  const output = new Map();
+  for (const guest of GUESTS) {
+    const source = resolve(directory, `${stemOf(guest)}.json`);
+    if (guest !== "js" && !(await exists(source))) continue;
+    for (const [file, content] of await renderBenchResults(source)) output.set(file, content);
+  }
+  return output;
+}
+
+/** The headline TypeScript run and every other retained guest run, for page summaries. */
+export function publishedReports(directory = resolve(root, "docs/bench")) {
+  const [report, ...others] = GUESTS.map((guest) => resolve(directory, `${stemOf(guest)}.json`))
+    .filter((source, index) => index === 0 || existsSync(source))
+    .map((source) => JSON.parse(readFileSync(source, "utf8")));
+  return { report, others };
 }
 
 export async function publishBenchResults({ source = resolve(root, "bench/results/latest.json"), site = resolve(root, "docs"), check = false } = {}) {
   const output = new Map([...(await renderBenchResults(source))].filter(([file]) => file.endsWith(".json")));
+  const stem = [...output.keys()].find((file) => /^bench\/[^/]+\.json$/.test(file)).slice("bench/".length, -".json".length);
   if (check) {
     for (const [file, content] of output) {
       if (await readFile(resolve(site, file), "utf8") !== content) throw new Error(`Published benchmark file is stale: ${file}`);
@@ -189,9 +250,9 @@ export async function publishBenchResults({ source = resolve(root, "bench/result
     }
   }
   // Remove obsolete measurements after retaining a run with fewer groups.
-  const directory = resolve(site, "bench/latest-groups");
+  const directory = resolve(site, `bench/${stem}-groups`);
   for (const file of await readdir(directory)) {
-    if (/^group-\d+\.json$/.test(file) && !output.has(`bench/latest-groups/${file}`)) {
+    if (/^group-\d+\.json$/.test(file) && !output.has(`bench/${stem}-groups/${file}`)) {
       if (check) throw new Error(`Obsolete benchmark measurement: ${file}`);
       await unlink(resolve(directory, file));
     }
@@ -203,8 +264,17 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const args = process.argv.slice(2);
   const check = args.includes("--check");
   const paths = args.filter((arg) => arg !== "--check");
-  if (paths.length > 1 || paths.some((arg) => arg.startsWith("-"))) throw new Error("Usage: node scripts/publish-bench-results.mjs [report.json] [--check]");
-  const source = paths[0] ? resolve(paths[0]) : resolve(root, check ? "docs/bench/latest.json" : "bench/results/latest.json");
-  const result = await publishBenchResults({ source, check });
-  console.log(`${check ? "Verified" : "Retained"} ${result.files} benchmark JSON files (${number(result.bytes / 1024)} KiB)`);
+  if (paths.some((arg) => arg.startsWith("-"))) throw new Error("Usage: node scripts/publish-bench-results.mjs [report.json ...] [--check]");
+  // Without paths: every guest's run in bench/results/, or, for --check, in docs/bench/.
+  const defaults = [];
+  for (const guest of GUESTS) {
+    const source = resolve(root, check ? "docs/bench" : "bench/results", `${stemOf(guest)}.json`);
+    if (await exists(source)) defaults.push(source);
+  }
+  const sources = paths.length ? paths.map((path) => resolve(path)) : defaults;
+  if (!sources.length) throw new Error("No benchmark report to publish; run bin/bench or name a report");
+  for (const source of sources) {
+    const result = await publishBenchResults({ source, check });
+    console.log(`${check ? "Verified" : "Retained"} ${result.files} benchmark JSON files (${number(result.bytes / 1024)} KiB) from ${relative(root, source)}`);
+  }
 }

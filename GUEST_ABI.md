@@ -3,7 +3,8 @@
 Application code runs as a WebAssembly *guest*. A JavaScript bundle is one kind
 of guest: the pinned `quickjs.wasm` implements this ABI by running the bundle.
 A Rust module built with the [`flower-sdk`](crates/flower-sdk) crate implements it
-directly. Rust owns everything else: the reactive graph, indexes, scans,
+directly; [`examples/goblin-pizza-rs`](examples/goblin-pizza-rs) ports the benchmark
+application that way. Rust owns everything else: the reactive graph, indexes, scans,
 caching, dependency certificates, storage and replication. A guest only runs
 one named callback per invocation and talks to the host through the imports
 below.

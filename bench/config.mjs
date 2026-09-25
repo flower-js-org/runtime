@@ -34,8 +34,14 @@ reports customer goodput separately from offered and driver-dropped arrivals.
   --seed VALUE               Reproducible workload seed (default 42)
   --nodes N                  Raft cluster size: 1 or 3 (default 3)
   --binary PATH              Flower binary (default target/release/flower)
+  --guest KIND               js (default): examples/goblin-pizza.ts on QuickJS, or
+                             wasm: its Rust port, examples/goblin-pizza-rs
+  --guest-wasm PATH          Wasm guest module (default
+                             target/wasm32-unknown-unknown/release/goblin_pizza.wasm)
   --initialization MODE      static (default) or per-invocation bundle initialization
-  --json PATH                JSON report (default bench/results/latest.json)
+                             (JavaScript guest only)
+  --json PATH                JSON report (default bench/results/latest.json;
+                             latest-wasm.json for the Wasm guest)
   --html PATH                HTML report (default JSON path with .html extension)
   --baseline PATH            Earlier JSON report for HTML before/after comparison
   --cpu-profile PATH         macOS sample text output; initial leader, up to 10s
@@ -78,20 +84,22 @@ const NUMERIC = {
 };
 
 const BOOLEAN = { chaos: "chaos", http2: "http2", "keep-data": "keepData", help: "help" };
-const TEXT = { seed: "seed", initialization: "initialization", "query-routing": "queryRouting", "read-consistency": "readConsistency", "driver-binary": "driverBinary", binary: "binary", json: "json", html: "html", baseline: "baseline", "cpu-profile": "cpuProfile" };
+const TEXT = { seed: "seed", guest: "guest", "guest-wasm": "guestWasm", initialization: "initialization", "query-routing": "queryRouting", "read-consistency": "readConsistency", "driver-binary": "driverBinary", binary: "binary", json: "json", html: "html", baseline: "baseline", "cpu-profile": "cpuProfile" };
 const NUMBER_PATTERN = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 
 function defaults() {
   return {
     ...Object.fromEntries(Object.values(NUMERIC).map(({ field, initial }) => [field, initial])),
     seed: "42",
+    guest: "js",
+    guestWasm: resolve(PROJECT_ROOT, "target/wasm32-unknown-unknown/release/goblin_pizza.wasm"),
     initialization: "static",
     queryRouting: "replicas",
     readConsistency: "replica-local",
     driver: "rust",
     driverBinary: resolve(PROJECT_ROOT, "target/release/flower-bench-driver"),
     binary: resolve(PROJECT_ROOT, "target/release/flower"),
-    json: resolve(PROJECT_ROOT, "bench/results/latest.json"),
+    json: null,
     html: null,
     baseline: null,
     cpuProfile: null,
@@ -150,10 +158,13 @@ export function parseOptions(argv) {
     if (Object.hasOwn(NUMERIC, name)) {
       const rule = NUMERIC[name];
       options[rule.field] = parseNumber(name, raw, rule);
-    } else options[TEXT[name]] = ["seed", "initialization", "query-routing", "read-consistency"].includes(name) ? raw : resolve(raw);
+    } else options[TEXT[name]] = ["seed", "guest", "initialization", "query-routing", "read-consistency"].includes(name) ? raw : resolve(raw);
   }
   if (options.help && argv.length !== 1) throw new Error("--help must be used alone");
+  if (!["js", "wasm"].includes(options.guest)) throw new Error("--guest must be js or wasm");
   if (!["static", "per-invocation"].includes(options.initialization)) throw new Error("--initialization must be static or per-invocation");
+  if (options.guest === "wasm" && options.initialization !== "static") throw new Error("--initialization applies only to the JavaScript guest");
+  options.json ??= resolve(PROJECT_ROOT, options.guest === "wasm" ? "bench/results/latest-wasm.json" : "bench/results/latest.json");
   if (!["leader", "replicas"].includes(options.queryRouting)) throw new Error("--query-routing must be leader or replicas");
   if (!["fresh", "replica-local"].includes(options.readConsistency)) throw new Error("--read-consistency must be fresh or replica-local");
   if (!Number.isSafeInteger(Math.ceil(options.offeredRate*options.duration))) throw new Error("Offered arrival count exceeds safe integer range");
@@ -168,7 +179,7 @@ export function parseOptions(argv) {
   options.html ??= options.json.replace(/\.json$/i, "") + ".html";
   if (options.html === options.json) throw new Error("--html and --json must use different files");
   if (options.baseline === options.json || options.baseline === options.html) throw new Error("Reports must not overwrite --baseline");
-  if (options.cpuProfile && [options.json, options.html, options.baseline, options.binary].includes(options.cpuProfile)) {
+  if (options.cpuProfile && [options.json, options.html, options.baseline, options.binary, options.guestWasm].includes(options.cpuProfile)) {
     throw new Error("--cpu-profile must not overwrite a report, baseline, or binary");
   }
   return options;

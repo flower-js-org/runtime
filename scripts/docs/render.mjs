@@ -2,7 +2,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { renderPublishedSummary, replaceSummary } from "../publish-bench-results.mjs";
+import { publishedReports, renderPublishedSummary, replaceSummary } from "../publish-bench-results.mjs";
 import { highlight } from "./highlight.mjs";
 import { siteFooter, siteHeader } from "./layout.mjs";
 import { groups, pages } from "./pages.mjs";
@@ -22,8 +22,8 @@ const two = (n) => String(n).padStart(2, "0");
 
 export function prepareContent(file, html) {
   if (file === "index.html" || file === "operate/benchmarks.html") {
-    const report = JSON.parse(readFileSync(resolve(docs, "bench/latest.json"), "utf8"));
-    html = replaceSummary(html, renderPublishedSummary(report, { root: prefixOf(file), workload: file === "index.html" }));
+    const { report, others } = publishedReports(resolve(docs, "bench"));
+    html = replaceSummary(html, renderPublishedSummary(report, { root: prefixOf(file), workload: file === "index.html", others }));
   }
   return highlight(includes(file, html.trim()), file);
 }

@@ -4,7 +4,11 @@ import type { ManagedKeyAlgorithm, KeyUsage } from "./keys.ts";
 import { applyWatchPatch, cloneWatchValue, controlledWatch, decodeWatchEvent, readSse, watchBudgets, WatchProtocolError } from "./watch.ts";
 import type { WatchBudgets, WatchDelta } from "./watch.ts";
 
-export interface Bundle { hash: string; javascript: string }
+export interface JavaScriptBundle { hash: string; javascript: string }
+/** A guest module implementing GUEST_ABI.md, such as one built with the Rust flower-sdk crate. */
+export interface WasmBundle { hash: string; wasm: string }
+/** SHA-256 hex of the JavaScript text, or of the module bytes base64-encoded in `wasm`. */
+export type Bundle = JavaScriptBundle | WasmBundle;
 /** The JSON POST subset used by Flower; custom transports need not implement general fetch. */
 export interface FlowerRequestInit { method: "POST"; headers: Record<string, string>; body: string; signal?: AbortSignal }
 export type FlowerFetch = (url: string, init: FlowerRequestInit) => Promise<Response>;

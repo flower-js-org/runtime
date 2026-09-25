@@ -1029,6 +1029,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "flower-sdk"
+version = "0.1.0"
+
+[[package]]
 name = "fnv"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1203,6 +1207,13 @@ dependencies = [
  "hashbrown 0.16.1",
  "indexmap",
  "stable_deref_trait",
+]
+
+[[package]]
+name = "goblin-pizza"
+version = "0.1.0"
+dependencies = [
+ "flower-sdk",
 ]
 
 [[package]]

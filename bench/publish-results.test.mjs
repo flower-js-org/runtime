@@ -5,12 +5,12 @@ import { join } from "node:path";
 import test from "node:test";
 import { Histogram, Stats } from "./metrics.mjs";
 import { summarizeGroups } from "./multi-group.mjs";
-import { childPath, publishBenchResults, renderBenchResults, renderPublishedSummary, replaceSummary } from "../scripts/publish-bench-results.mjs";
+import { childPath, publishBenchResults, publishedReports, renderAllBenchResults, renderBenchResults, renderPublishedSummary, replaceSummary } from "../scripts/publish-bench-results.mjs";
 
-function fixture() {
+function fixture(guest) {
   const stats = new Stats();
   for (let i = 0; i < 100; i++) stats.recordOperation(i < 70 ? "pizza.shop.local" : "pizza.tip", { latencyMs: i < 70 ? 5 : 12.34, ok: true });
-  const options = { groups: 1, nodes: 3, readConsistency: "replica-local", http2: true };
+  const options = { groups: 1, nodes: 3, readConsistency: "replica-local", http2: true, ...(guest ? { guest } : {}) };
   const child = {
     schemaVersion: 1, passed: true, correctnessPassed: true,
     loadStartedAt: "2026-09-24T01:00:00.000Z", loadEndedAt: "2026-09-24T01:00:00.100Z",
@@ -140,5 +140,48 @@ test("publication is deterministic, checks child identity, and excludes unrelate
     await writeFile(childFile, JSON.stringify(child));
     await assert.rejects(publishBenchResults({ source, site }), /does not match/);
     assert.equal(await readFile(publicSource, "utf8"), snapshot);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("each guest publishes beside the others and the summary compares them", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "flower-guests-"));
+  try {
+    const site = join(directory, "docs"), input = join(directory, "results");
+    await mkdir(join(input, "input-groups"), { recursive: true });
+    for (const guest of [undefined, "wasm"]) {
+      const { report: aggregate, child } = fixture(guest);
+      const stem = guest ? "latest-wasm" : "latest";
+      await writeFile(join(input, "input-groups/group-0.json"), JSON.stringify(child));
+      await writeFile(join(input, `${stem}.json`), JSON.stringify(aggregate));
+      assert.equal((await publishBenchResults({ source: join(input, `${stem}.json`), site })).files, 2);
+    }
+    assert.deepEqual((await readdir(join(site, "bench"))).sort(), ["latest-groups", "latest-wasm-groups", "latest-wasm.json", "latest.json"]);
+    assert.deepEqual((await readdir(join(site, "bench/latest-wasm-groups"))), ["group-0.json"]);
+    await publishBenchResults({ source: join(site, "bench/latest-wasm.json"), site, check: true });
+    const rendered = await renderAllBenchResults(join(site, "bench"));
+    assert.deepEqual([...rendered.keys()].sort(), [
+      "bench/latest-groups/group-0.html", "bench/latest-groups/group-0.json", "bench/latest-wasm-groups/group-0.html",
+      "bench/latest-wasm-groups/group-0.json", "bench/latest-wasm.html", "bench/latest-wasm.json", "bench/latest.html", "bench/latest.json",
+    ]);
+    assert.match(rendered.get("bench/latest-wasm-groups/group-0.html"), /href="\.\.\/latest-wasm.html">All groups/);
+    assert.match(rendered.get("bench/latest-wasm.html"), /href="latest-wasm.json">Raw JSON/);
+    assert.match(rendered.get("bench/latest-wasm.html"), /Rust compiled to Wasm/);
+    const { report, others } = publishedReports(join(site, "bench"));
+    const html = renderPublishedSummary(report, { others });
+    assert.match(html, /<caption>The same workload with the application in each guest<\/caption>/);
+    assert.match(html, /<th scope="col"><a href="bench\/latest.html">TypeScript on QuickJS<\/a><\/th><th scope="col"><a href="bench\/latest-wasm.html">Rust compiled to Wasm<\/a><\/th>/);
+    assert.match(html, /with the same server binary/);
+    assert.match(html, /<tr><th scope="row">Server CPU&nbsp;\/&nbsp;call<\/th><td>—<\/td><td>—<\/td><\/tr>/);
+    assert.match(html, /<tr><th scope="row">Group audits<\/th><td>1\/1<\/td><td>1\/1<\/td><\/tr>/);
+    assert.doesNotMatch(renderPublishedSummary(report), /each guest/);
+    const mixed = JSON.parse(await readFile(join(site, "bench/latest-wasm.json"), "utf8"));
+    mixed.options.guest = "lua";
+    assert.throws(() => renderPublishedSummary(mixed), /incomplete or invalid/);
+    const { report: wrong, child } = fixture("wasm");
+    child.options.guest = "js";
+    wrong.groups[0].json = "input-groups/group-0.json";
+    await writeFile(join(input, "input-groups/group-0.json"), JSON.stringify(child));
+    await writeFile(join(input, "wrong.json"), JSON.stringify(wrong));
+    await assert.rejects(publishBenchResults({ source: join(input, "wrong.json"), site }), /guests do not match/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
