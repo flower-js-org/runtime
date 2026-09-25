@@ -207,13 +207,15 @@ fn certificates_track_collection_and_index_phantoms_but_skip_unrelated_buckets()
     );
     assert!(!scan.valid(&data));
     assert!(empty.valid(&data));
-    assert!(!range.valid(&data));
+    // The empty page depends on its whole prefix, and only on it.
+    assert!(range.valid(&data));
     deploy(
         &mut data,
         json!({"writes":[{"collection":"items","key":"first","value":{"group":"a","value":1}}]}),
         &fixture,
     );
     assert!(!empty.valid(&data));
+    assert!(!range.valid(&data));
     let (_, present) = query(&data, "indexed", json!("a"), &fixture);
     let (_, range) = query(&data, "range", Value::Null, &fixture);
     deploy(

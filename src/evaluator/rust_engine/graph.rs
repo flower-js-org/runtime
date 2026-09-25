@@ -828,7 +828,7 @@ impl Engine<'_> {
     ) -> EngineResult<Value> {
         match self.range_rows(query) {
             Ok(scanned) => {
-                if let Some(dependency) = scanned.dependency {
+                if let Some(dependency) = scanned.dependency.id() {
                     self.observe(observed, dependency)?;
                 }
                 Ok(scanned.rows)

@@ -134,6 +134,16 @@ impl ReactiveIndex {
             return;
         }
         if let Some(marker) = dependencies::membership_marker(id) {
+            if previous.is_some() != next.is_some()
+                && let Some(keys) = dependencies::keys_marker(&marker)
+            {
+                Self::change_generation(
+                    &mut self.memberships,
+                    keys,
+                    previous.is_some(),
+                    next.is_some(),
+                );
+            }
             Self::change_generation(
                 &mut self.memberships,
                 marker,

@@ -1,12 +1,53 @@
 //! Query certificates refer to immutable allocation identities, never old payloads.
 //! Weak references prevent address reuse without retaining obsolete JSON trees.
 use super::*;
-use std::sync::Weak;
+use std::ops::Bound;
+use std::sync::{Mutex, Weak};
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 enum Stamp {
     Record(Option<Weak<Value>>),
     Marker(Option<Weak<()>>),
+    /// A declared index window: unchanged while the index marker is, or while
+    /// its entries are still the same allocations. A walk that finds them
+    /// unchanged adopts the newer marker, so later checks skip the walk.
+    Window {
+        index: String,
+        marker: Mutex<Option<Weak<()>>>,
+        lower: String,
+        upper: String,
+        entries: Vec<Weak<Value>>,
+    },
+}
+
+impl Clone for Stamp {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Record(record) => Self::Record(record.clone()),
+            Self::Marker(marker) => Self::Marker(marker.clone()),
+            Self::Window {
+                index,
+                marker,
+                lower,
+                upper,
+                entries,
+            } => Self::Window {
+                index: index.clone(),
+                marker: Mutex::new(marker.lock().expect("window marker lock").clone()),
+                lower: lower.clone(),
+                upper: upper.clone(),
+                entries: entries.clone(),
+            },
+        }
+    }
+}
+
+fn same<T>(expected: Option<&Weak<T>>, actual: Option<&Arc<T>>) -> bool {
+    match (expected, actual) {
+        (None, None) => true,
+        (Some(expected), Some(actual)) => std::ptr::eq(expected.as_ptr(), Arc::as_ptr(actual)),
+        _ => false,
+    }
 }
 #[derive(Clone, Debug, Default)]
 pub struct DependencyCertificate {
@@ -27,20 +68,34 @@ impl DependencyCertificate {
                 .get("clock")
                 .is_none_or(|value| safe_time(value, "Stored clock").is_ok())
             && self.checks.iter().all(|(id, stamp)| match stamp {
-                Stamp::Record(expected) => match (expected, data.get_shared(id)) {
-                    (None, None) => true,
-                    (Some(expected), Some(actual)) => {
-                        std::ptr::eq(expected.as_ptr(), Arc::as_ptr(actual))
+                Stamp::Record(expected) => same(expected.as_ref(), data.get_shared(id)),
+                Stamp::Marker(expected) => same(expected.as_ref(), data.reactive().generation(id)),
+                Stamp::Window {
+                    index,
+                    marker,
+                    lower,
+                    upper,
+                    entries,
+                } => {
+                    let current = data.reactive().generation(index);
+                    let mut marker = marker.lock().expect("window marker lock");
+                    if same(marker.as_ref(), current) {
+                        return true;
                     }
-                    _ => false,
-                },
-                Stamp::Marker(expected) => match (expected, data.reactive().generation(id)) {
-                    (None, None) => true,
-                    (Some(expected), Some(actual)) => {
-                        std::ptr::eq(expected.as_ptr(), Arc::as_ptr(actual))
+                    let mut found = data.range_shared::<(Bound<&str>, Bound<&str>)>((
+                        Bound::Included(lower),
+                        Bound::Excluded(upper),
+                    ));
+                    let unchanged = entries.iter().all(|expected| {
+                        found
+                            .next()
+                            .is_some_and(|(_, actual)| same(Some(expected), Some(actual)))
+                    }) && found.next().is_none();
+                    if unchanged {
+                        *marker = current.map(Arc::downgrade);
                     }
-                    _ => false,
-                },
+                    unchanged
+                }
             })
     }
     pub fn allocation_cost(&self) -> usize {
@@ -103,6 +158,47 @@ impl Engine<'_> {
         certificate.bytes = certificate.bytes.saturating_add(cost);
         certificate.checks.insert(id.to_owned(), stamp);
     }
+    /// Stamp a declared index window by the entries currently in it. Too
+    /// many entries fall back to the index marker alone.
+    pub(super) fn window_read(&mut self, marker: String, lower: &str, upper: &str) {
+        if !self.query_cacheable && !self.speculative {
+            return;
+        }
+        let Some(certificate) = self.certificate.as_ref() else {
+            return;
+        };
+        let id = format!("{WINDOW}{}", canonical_json(&json!([marker, lower, upper])));
+        if certificate.checks.contains_key(&id) {
+            return;
+        }
+        let mut cost = 192usize
+            .saturating_add(id.len())
+            .saturating_add(marker.len());
+        let mut entries = Vec::new();
+        for (_, entry) in self.base.range_shared::<(Bound<&str>, Bound<&str>)>((
+            Bound::Included(lower),
+            Bound::Excluded(upper),
+        )) {
+            cost = cost.saturating_add(16);
+            if self.total_retained_bytes().saturating_add(cost) > self.retained_limit {
+                self.marker_read(marker);
+                return;
+            }
+            entries.push(Arc::downgrade(entry));
+        }
+        let stamp = Stamp::Window {
+            marker: Mutex::new(self.base.reactive().generation(&marker).map(Arc::downgrade)),
+            index: marker,
+            lower: lower.into(),
+            upper: upper.into(),
+            entries,
+        };
+        self.retained_bytes = self.retained_bytes.saturating_add(cost);
+        let certificate = self.certificate.as_mut().expect("checked certificate");
+        certificate.bytes = certificate.bytes.saturating_add(cost);
+        certificate.checks.insert(id, stamp);
+    }
+
     fn disable_certificate(&mut self) {
         if let Some(previous) = self.certificate.take() {
             self.retained_bytes = self.retained_bytes.saturating_sub(previous.bytes);
@@ -220,6 +316,8 @@ impl Engine<'_> {
     }
 }
 
+const WINDOW: &str = "window:";
+
 /// Persistent marker identities are proportional to live members, not history.
 #[derive(Clone, Debug)]
 pub(super) struct Generation {
@@ -258,6 +356,14 @@ fn component(value: &str) -> Option<(&str, &str)> {
 pub(super) fn bucket_spec(id: &str) -> Option<(String, Vec<String>)> {
     let (spec, _) = component(id.strip_prefix("index-bucket:")?)?;
     serde_json::from_str(spec).ok()
+}
+
+/// Changes only when a collection gains or loses a key: key-ordered scans
+/// check the values of the rows they returned separately.
+pub(super) fn keys_marker(collection_marker: &str) -> Option<String> {
+    collection_marker
+        .strip_prefix("collection:")
+        .map(|collection| format!("keys:{collection}"))
 }
 
 pub(super) fn membership_marker(id: &str) -> Option<String> {

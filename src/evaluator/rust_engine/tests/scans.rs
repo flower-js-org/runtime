@@ -974,3 +974,97 @@ fn query_certificates_cover_undeclared_buckets_read_through_derivations() {
     );
     assert!(!certificate.valid(&data));
 }
+
+#[test]
+fn scan_certificates_hold_only_while_their_results_hold() {
+    let fixture = windowed_fixture();
+    let calls = [
+        ("read", json!({"limit":3})),
+        ("read", json!({"gt":"k03","lte":"k08","limit":2})),
+        (
+            "read",
+            json!({"gte":"k02","reverse":true,"offset":2,"limit":2}),
+        ),
+        (
+            "read",
+            json!({"index":"rank","prefix":["a"],"lte":4,"limit":3}),
+        ),
+        (
+            "read",
+            json!({"index":"rank","prefix":["a"],"gt":1,"reverse":true,"offset":1,"limit":2}),
+        ),
+        ("read", json!({"index":"rank","gte":"b","limit":1})),
+        ("read", json!({"index":"rank","prefix":["b",3]})),
+        ("page", json!({"prefix":["a"],"limit":2})),
+        (
+            "page",
+            json!({"prefix":["b"],"gt":2,"reverse":true,"limit":1}),
+        ),
+    ];
+    for declared in [false, true] {
+        let mut data = Records::default();
+        if declared {
+            install(&mut data, &fixture);
+        }
+        let evaluate = |data: &Records, name: &str, args: &Value| {
+            let result = run(
+                data.clone(),
+                json!({"name":name,"args":args}),
+                "query",
+                None,
+                &fixture,
+            )
+            .unwrap();
+            (result.value, result.query_certificate.unwrap())
+        };
+        let mut cached: Vec<_> = calls
+            .iter()
+            .map(|(name, args)| evaluate(&data, name, args))
+            .collect();
+        let mut state = 0x853c_49e6_748f_ea9bu64;
+        let mut next = move |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let (mut kept, mut checks) = (0, 0);
+        for step in 0..300 {
+            let key = format!("k{:02}", next(12));
+            let change = match next(6) {
+                0 => delete(&key),
+                1 => write(&key, json!(next(3))),
+                _ => {
+                    let tenant = ["a", "b"][next(2) as usize];
+                    write(
+                        &key,
+                        json!({"tenant":tenant,"score":next(7),"label":next(3)}),
+                    )
+                }
+            };
+            evaluated(&mut data, json!([change]), &fixture);
+            for ((name, args), (value, certificate)) in calls.iter().zip(&mut cached) {
+                checks += 1;
+                let (fresh, renewed) = evaluate(&data, name, args);
+                if certificate.valid(&data) {
+                    assert_eq!(
+                        value, &fresh,
+                        "declared={declared} step={step} {name} {args}"
+                    );
+                    kept += 1;
+                } else {
+                    // A failed check must not adopt the newer index marker.
+                    assert!(!certificate.valid(&data) || value == &fresh);
+                    (*value, *certificate) = (fresh, renewed);
+                }
+            }
+        }
+        // Collection- and index-wide stamps kept 5% and 10% of certificates
+        // through these writes; key membership and windows keep 21% and 66%.
+        let (share, minimum) = (kept * 100 / checks, if declared { 50 } else { 15 });
+        assert!(
+            share > minimum,
+            "declared={declared}: kept {kept} of {checks}"
+        );
+    }
+}

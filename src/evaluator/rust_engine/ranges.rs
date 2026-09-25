@@ -78,11 +78,28 @@ pub(super) fn entry(spec: &IndexSpec, key: &str, value: &Value) -> Option<String
     Some(encoded)
 }
 
-/// Rows and the dependency that determines them: a scan window, a coarse
-/// marker if no window applies, or nothing when no data can change them.
+/// Rows and what determines them.
 pub(super) struct Scanned {
     pub rows: Value,
-    pub dependency: Option<String>,
+    pub dependency: Dependency,
+}
+
+pub(super) enum Dependency {
+    /// No data can change the rows.
+    None,
+    Window(Window),
+    /// The whole index or collection, when no window applies.
+    Marker(String),
+}
+
+impl Dependency {
+    pub(super) fn id(&self) -> Option<String> {
+        match self {
+            Self::None => None,
+            Self::Window(window) => Some(window.dependency()),
+            Self::Marker(marker) => Some(marker.clone()),
+        }
+    }
 }
 
 pub(super) struct RangeQuery {
@@ -413,8 +430,37 @@ impl RangeQuery {
 }
 
 impl Engine<'_> {
+    /// Certificates validate against a snapshot, not a write. Key order
+    /// changes only with the collection's keys, and undeclared field order
+    /// with any row; a declared index stamps just its window's entries.
+    /// Returned rows are stamped individually either way.
     pub(super) fn range_rows(&mut self, query: &RangeQuery) -> EngineResult<Scanned> {
-        self.marker_read(query.dependency(self));
+        let indexed = query.indexed(self);
+        if query.source_keys {
+            let collection = collection_id(&query.collection);
+            self.marker_read(dependencies::keys_marker(&collection).expect("collection marker"));
+        } else if !indexed {
+            self.marker_read(collection_id(&query.collection));
+        }
+        let scanned = self.scan_rows(query);
+        if indexed {
+            match scanned.as_ref().map(|scanned| &scanned.dependency) {
+                Ok(Dependency::None) => {}
+                Ok(Dependency::Window(window)) => {
+                    let prefix = prefix(&query.collection, &query.fields);
+                    self.window_read(
+                        query.dependency(self),
+                        &format!("{prefix}{}", window.lower),
+                        &format!("{prefix}{}", window.upper),
+                    );
+                }
+                Ok(Dependency::Marker(_)) | Err(_) => self.marker_read(query.dependency(self)),
+            }
+        }
+        scanned
+    }
+
+    fn scan_rows(&mut self, query: &RangeQuery) -> EngineResult<Scanned> {
         if query.lower >= query.upper || query.limit == 0 {
             return Ok(Scanned {
                 rows: if query.scan {
@@ -422,7 +468,7 @@ impl Engine<'_> {
                 } else {
                     json!({"rows":[],"cursor":null})
                 },
-                dependency: None,
+                dependency: Dependency::None,
             });
         }
         let spec = IndexSpec {
@@ -652,8 +698,9 @@ impl Engine<'_> {
             .zip(found.last_key_value())
             .map(|((first, _), (last, _))| (first.as_str(), last.as_str()));
         let dependency = match query.window(examined.as_deref(), full, returned) {
-            Some(window) => window.map(|window| window.dependency()),
-            None => Some(query.dependency(self)),
+            Some(Some(window)) => Dependency::Window(window),
+            Some(None) => Dependency::None,
+            None => Dependency::Marker(query.dependency(self)),
         };
         let rows = if query.reverse {
             found.into_values().rev().collect()
