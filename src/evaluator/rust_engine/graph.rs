@@ -126,102 +126,10 @@ impl Engine<'_> {
                 "Malformed stored source key",
             ));
         }
+        // Stored reader and height records already describe the graph, so an
+        // invocation after a restart has nothing to rebuild or revalidate.
         self.graph_ready = true;
-        // Physical application rebuilds metadata independently of evaluation.
-        // Validate its pending append frontier against the previous certified
-        // snapshot before this invocation edits the graph. The shared cache
-        // belongs to this exact immutable topology, so the next commit inherits
-        // a usable baseline without storing or trusting a proof on disk.
-        self.certify_topology(true)?;
         Ok(())
-    }
-
-    fn certify_topology(&mut self, allow_full: bool) -> EngineResult<bool> {
-        if force_full_graph() {
-            return Ok(false);
-        }
-        if self.staged.reactive().validated() {
-            return Ok(true);
-        }
-        let extension = self.staged.reactive().topology.extension();
-        if extension.is_none() && !allow_full {
-            return Ok(false);
-        }
-        // A removal or changed old edge discards the append baseline. Validate
-        // that committed snapshot once before adding more roots, so publishing
-        // the next physical patch can inherit a usable baseline again.
-        let mut depths = extension
-            .as_ref()
-            .map_or_else(metadata::Depths::new, |extension| {
-                (*extension.baseline).clone()
-            });
-        // Iterate a persistent clone of the root set rather than copying its IDs.
-        let all_roots = self.staged.reactive().roots.clone();
-        let roots: Box<dyn Iterator<Item = &String>> = match &extension {
-            Some(extension) => Box::new(extension.roots.iter()),
-            None => Box::new(all_roots.keys()),
-        };
-        let appended = extension.as_ref().map(|extension| &extension.cells);
-        let mut visiting = HashSet::new();
-        for root in roots {
-            let id = format!("cell:{}", &root[5..]);
-            if self
-                .certified_depth(&id, 0, appended, &mut depths, &mut visiting)?
-                .is_none()
-            {
-                return Ok(false);
-            }
-        }
-        // Old cells were all reachable and no roots/edges were removed. Every
-        // new cell must also be reached; otherwise use the full collector.
-        if depths.len() != self.staged.reactive().cell_count() {
-            return Ok(false);
-        }
-        self.staged.reactive().mark_validated(depths);
-        Ok(true)
-    }
-
-    fn certified_depth(
-        &mut self,
-        id: &str,
-        level: usize,
-        appended: Option<&im::HashSet<String>>,
-        depths: &mut metadata::Depths,
-        visiting: &mut HashSet<String>,
-    ) -> EngineResult<Option<u8>> {
-        self.check_fatal()?;
-        if visiting.contains(id) {
-            return Ok(None);
-        }
-        if let Some(&height) = depths.get(id) {
-            return Ok((level + usize::from(height) <= 128).then_some(height));
-        }
-        if level >= 128 || appended.is_some_and(|cells| !cells.contains(id)) {
-            return Ok(None);
-        }
-        let Some(cell) = self.staged.get_shared(id).cloned() else {
-            return Ok(None);
-        };
-        graph_visit(appended.is_some());
-        visiting.insert(id.into());
-        let mut height = 1;
-        for dep in cell["deps"].as_array().expect("validated dependencies") {
-            let dep = dep.as_str().expect("validated dependency");
-            if dep.starts_with("cell:") {
-                let Some(child) =
-                    self.certified_depth(dep, level + 1, appended, depths, visiting)?
-                else {
-                    return Ok(None);
-                };
-                height = height.max(usize::from(child) + 1);
-            }
-        }
-        if level + height > 128 {
-            return Ok(None);
-        }
-        visiting.remove(id);
-        depths.insert(id.into(), height as u8);
-        Ok(Some(height as u8))
     }
 
     pub(super) fn run_preview(
@@ -249,6 +157,9 @@ impl Engine<'_> {
         let retained_bytes = self.retained_bytes;
         let graph_costs = self.graph_costs.clone();
         let graph_index_bytes = self.graph_index_bytes;
+        let graph_changes = self.graph_changes.clone();
+        let root_changes = self.root_changes.clone();
+        let staged_temporary = self.staged_temporary.clone();
         let result = self.run_preview_inner(final_preview, bundle_changed);
         if result.is_err() {
             self.staged = staged;
@@ -260,6 +171,9 @@ impl Engine<'_> {
             self.retained_bytes = retained_bytes;
             self.graph_costs = graph_costs;
             self.graph_index_bytes = graph_index_bytes;
+            self.graph_changes = graph_changes;
+            self.root_changes = root_changes;
+            self.staged_temporary = staged_temporary;
             self.graph_ready = false;
             self.rows = None;
             self.source_index_bytes = 0;
@@ -271,19 +185,10 @@ impl Engine<'_> {
 
     fn run_preview_inner(&mut self, final_preview: bool, bundle_changed: bool) -> EngineResult<()> {
         self.check_fatal()?;
-        // Source-only queries need no graph validation. Other previews share
-        // the record snapshot's persistent metadata, including its root map.
-        let mut desired = self.durable_roots.clone();
-        if !final_preview && let Some(reference) = &self.temporary_root {
-            let id = reference.root_id();
-            if !desired.contains_key(&id) {
-                desired.insert(id, Arc::new(reference.value()));
-            }
-        }
-        let stored_roots = &self.staged.reactive().roots;
-        let same_roots = desired.ptr_eq(stored_roots)
-            || (stored_roots.len() == desired.len()
-                && desired.keys().all(|id| stored_roots.contains_key(id)));
+        // Source-only queries need no graph validation. Only roots this
+        // invocation changed, or stored to read one value, are compared.
+        let (removed_roots, added_roots, temporary) = self.root_changes(final_preview);
+        let same_roots = removed_roots.is_empty() && added_roots.is_empty();
         if !self.preview_dirty && same_roots && !bundle_changed {
             return Ok(());
         }
@@ -300,12 +205,8 @@ impl Engine<'_> {
         for value in self.writes.values().flatten() {
             depth(value, 3, "INPUT_INVALID")?;
         }
-        if !same_roots {
-            for (id, value) in &desired {
-                if self.staged.get(id).is_none() {
-                    depth(value, 2, "INPUT_INVALID")?;
-                }
-            }
+        for (_, value) in &added_roots {
+            depth(value, 2, "INPUT_INVALID")?;
         }
         let before = self.staged.clone();
         self.preview = Preview::default();
@@ -399,111 +300,38 @@ impl Engine<'_> {
             }
             cursor += 1;
         }
-        let fast = same_roots
-            && !bundle_changed
-            && self.staged.reactive().validated()
-            && !force_full_graph();
-        let topology = self.staged.reactive().topology.clone();
-        if !same_roots {
-            let removed: Vec<_> = self
-                .staged
-                .reactive()
-                .roots
-                .keys()
-                .filter(|id| !desired.contains_key(*id))
-                .cloned()
-                .collect();
-            for id in removed {
-                self.remove(&id);
-            }
-            for (id, value) in &desired {
-                if self.staged.get(id).is_none() {
-                    self.put(id.clone(), (**value).clone())?;
-                }
-            }
+        for id in removed_roots {
+            self.remove(&id);
         }
+        for (id, value) in added_roots {
+            self.put(id, (*value).clone())?;
+        }
+        self.root_changes.clear();
+        self.staged_temporary = temporary;
         self.staged.reactive().validate()?;
-        let extension = (!force_full_graph())
-            .then(|| self.staged.reactive().topology.extension())
-            .flatten();
-        let roots: Vec<_> = if fast || extension.is_some() {
-            // The same UTF-16 cell ordering as the full root traversal; clean
-            // roots have no callback side effects and need not be visited.
-            let mut dirty_roots = BTreeMap::new();
-            for id in &self.preview.dirty {
-                let key = Key(id.clone());
-                if let Some(root) = self.staged.reactive().root_cells.get(&key) {
-                    dirty_roots.insert(key, root.clone());
-                }
-            }
-            if let Some(extension) = &extension {
-                for id in &extension.roots {
-                    let key = Key(format!("cell:{}", &id[5..]));
-                    if let Some(root) = self.staged.reactive().root_cells.get(&key) {
-                        dirty_roots.insert(key, root.clone());
-                    }
-                }
-            }
-            dirty_roots.into_values().collect()
-        } else {
-            self.staged
-                .reactive()
-                .root_cells
-                .values()
-                .cloned()
-                .collect()
-        };
-        for root in &roots {
-            self.ensure(root.name(), root.args())?;
-        }
-        // Derived-to-derived edges, cells and roots retain their shared proof
-        // through outcome/source-dependency changes. Pure additions certify
-        // only their frontier; other topology edits take the full collector.
-        // A callback error retains its old edges without reading those children.
-        // Any still-dirty descendant must be refreshed (or collected) before a
-        // structural proof can stand in for the full traversal.
-        let pending_dirty = self
-            .preview
-            .dirty
-            .iter()
-            .any(|id| !self.preview.complete.contains(id));
-        if pending_dirty
-            || ((!fast || !Arc::ptr_eq(&topology, &self.staged.reactive().topology))
-                && !self.certify_topology(false)?)
-        {
-            let all_roots: Vec<_> = self
-                .staged
-                .reactive()
-                .root_cells
-                .values()
-                .cloned()
-                .collect();
-            for root in &all_roots {
-                self.ensure(root.name(), root.args())?;
-            }
-            let mut depths = metadata::Depths::new();
-            let mut visiting = HashSet::new();
-            for root in &all_roots {
-                self.visit(
-                    &cell_id(root.name(), root.args()),
-                    0,
-                    &mut depths,
-                    &mut visiting,
-                )?;
-            }
-            let obsolete: Vec<_> = self
-                .staged
-                .graph_cells()
-                .map(|(id, _)| id)
-                .filter(|id| !depths.contains_key(*id))
-                .map(str::to_owned)
-                .collect();
-            for id in obsolete {
-                self.remove(&id);
-            }
-            self.staged.reactive().mark_validated(depths);
+        if bundle_changed || force_full_graph() {
+            self.traverse_graph()?;
             graph_pass(false);
         } else {
+            // The same UTF-16 cell ordering as the full root traversal; clean
+            // roots have no callback side effects and need not be visited.
+            let added = std::mem::take(&mut self.graph_changes.added_roots);
+            let mut roots = BTreeMap::new();
+            for id in self
+                .preview
+                .dirty
+                .iter()
+                .cloned()
+                .chain(added.iter().map(|id| format!("cell:{}", &id[5..])))
+            {
+                if let Some(root) = self.stored_root(&id) {
+                    roots.insert(Key(id), root);
+                }
+            }
+            for root in roots.values() {
+                self.ensure(root.name(), root.args())?;
+            }
+            self.settle_graph()?;
             graph_pass(true);
         }
         self.check_fatal()?;
@@ -828,6 +656,200 @@ impl Engine<'_> {
                 self.observe(observed, query.dependency(self))?;
                 Err(error)
             }
+        }
+    }
+
+    /// Evaluate every root and derive the graph from scratch: its stored
+    /// cells, reader records and heights must match what incremental
+    /// maintenance keeps. Deployments rebuild every cell this way, tests use
+    /// it as the reference, and a failed incremental check uses it to report
+    /// the same error as the reference.
+    fn traverse_graph(&mut self) -> EngineResult<()> {
+        let all_roots: BTreeMap<Key, metadata::Root> = self
+            .staged
+            .graph_roots()
+            .map(|(id, _)| format!("cell:{}", &id[5..]))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .filter_map(|cell| Some((Key(cell.clone()), self.stored_root(&cell)?)))
+            .collect();
+        let all_roots: Vec<_> = all_roots.into_values().collect();
+        for root in &all_roots {
+            self.ensure(root.name(), root.args())?;
+        }
+        let mut depths = metadata::Depths::new();
+        let mut visiting = HashSet::new();
+        for root in &all_roots {
+            self.visit(
+                &cell_id(root.name(), root.args()),
+                0,
+                &mut depths,
+                &mut visiting,
+            )?;
+        }
+        let obsolete: Vec<_> = self
+            .staged
+            .graph_cells()
+            .map(|(id, _)| id)
+            .filter(|id| !depths.contains_key(*id))
+            .map(str::to_owned)
+            .collect();
+        for id in obsolete {
+            self.remove(&id);
+        }
+        for (id, height) in &depths {
+            self.store_height(id, usize::from(*height));
+        }
+        self.graph_changes = GraphChanges::default();
+        Ok(())
+    }
+
+    /// Collect released cells nothing holds, then bring heights up to date.
+    /// Both run once the preview's evaluation is done, since callbacks may
+    /// move an edge away and back, or through a deeper cell, while it runs.
+    fn settle_graph(&mut self) -> EngineResult<()> {
+        let mut collected = 0usize;
+        while let Some(id) = self.graph_changes.released.pop_first() {
+            if collected % 64 == 0 {
+                self.check_fatal()?;
+            }
+            collected += 1;
+            if self.staged.contains_key(&id) && !self.held(&id) {
+                // Its reader records go too, releasing the cells it read.
+                self.remove(&id);
+            }
+        }
+        // A callback error keeps its old edges without evaluating them, so a
+        // dirty child can still be held. Evaluating it where the reference
+        // traversal would keeps callbacks in the same order.
+        if self
+            .preview
+            .dirty
+            .iter()
+            .any(|id| !self.preview.complete.contains(id) && self.staged.contains_key(id))
+        {
+            graph_visit(false);
+            return self.traverse_graph();
+        }
+        let mut pending: std::collections::VecDeque<String> =
+            std::mem::take(&mut self.graph_changes.reshaped).into();
+        let mut queued: HashSet<String> = pending.iter().cloned().collect();
+        while let Some(id) = pending.pop_front() {
+            queued.remove(&id);
+            self.check_fatal()?;
+            let Some(cell) = self.staged.get_shared(&id).cloned() else {
+                continue;
+            };
+            graph_visit(true);
+            let mut height = 1;
+            for dep in cell_edges(&cell) {
+                if !self.staged.contains_key(dep) {
+                    return self.graph_error(EngineError::new(
+                        "INPUT_INVALID",
+                        format!("Missing derived dependency {dep}"),
+                    ));
+                }
+                height = height.max(self.height(dep) + 1);
+            }
+            // A cycle raises the heights around it without bound.
+            if height > 128 {
+                return self.graph_error(EngineError::new(
+                    "EVALUATION_BUDGET",
+                    "Reactive graph depth exceeds 128",
+                ));
+            }
+            if height != self.height(&id) {
+                self.store_height(&id, height);
+                for reader in self.staged.readers(&id) {
+                    if queued.insert(reader.to_owned()) {
+                        pending.push_back(reader.to_owned());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Report what the reference traversal reports for this graph, which
+    /// names the cycle it finds first.
+    fn graph_error(&mut self, fallback: EngineError) -> EngineResult<()> {
+        graph_visit(false);
+        self.traverse_graph()?;
+        Err(fallback)
+    }
+
+    /// Roots to remove and add, in key order, and the root stored only to read
+    /// `temporary_root`. The desired set is the stored roots, with the
+    /// invocation's changes applied, plus the temporary root.
+    fn root_changes(
+        &self,
+        final_preview: bool,
+    ) -> (Vec<String>, Vec<(String, Arc<Value>)>, Option<String>) {
+        let temporary = self
+            .temporary_root
+            .as_ref()
+            .filter(|_| !final_preview)
+            .map(|reference| (reference.root_id(), reference.value()));
+        let durable = |id: &str| match self.root_changes.get(id) {
+            Some(change) => change.is_some(),
+            None => self.staged.contains_key(id) && self.staged_temporary.as_deref() != Some(id),
+        };
+        let candidates: BTreeSet<&str> = self
+            .root_changes
+            .keys()
+            .map(String::as_str)
+            .chain(self.staged_temporary.as_deref())
+            .chain(temporary.as_ref().map(|(id, _)| id.as_str()))
+            .collect();
+        let (mut removed, mut added) = (Vec::new(), Vec::new());
+        for id in candidates {
+            let wanted_temporary = temporary
+                .as_ref()
+                .is_some_and(|(temporary, _)| temporary == id);
+            let wanted = wanted_temporary || durable(id);
+            let stored = self.staged.contains_key(id);
+            if wanted && !stored {
+                let value = match self.root_changes.get(id) {
+                    Some(Some(value)) => value.clone(),
+                    _ => Arc::new(temporary.as_ref().expect("temporary root").1.clone()),
+                };
+                added.push((id.to_owned(), value));
+            } else if !wanted && stored {
+                removed.push(id.to_owned());
+            }
+        }
+        let staged_temporary = temporary.map(|(id, _)| id).filter(|id| !durable(id));
+        (removed, added, staged_temporary)
+    }
+
+    fn stored_root(&self, cell: &str) -> Option<metadata::Root> {
+        self.staged
+            .get_shared(&format!("root:{}", &cell[5..]))
+            .map(|value| metadata::Root {
+                value: value.clone(),
+            })
+    }
+
+    fn held(&self, cell: &str) -> bool {
+        self.staged.has_readers(cell) || self.staged.contains_key(&format!("root:{}", &cell[5..]))
+    }
+
+    fn height(&self, cell: &str) -> usize {
+        self.staged
+            .get(&Records::height_key(cell))
+            .and_then(Value::as_u64)
+            .map_or(1, |height| height as usize)
+    }
+
+    fn store_height(&mut self, cell: &str, height: usize) {
+        if height == self.height(cell) {
+            return;
+        }
+        let id = Records::height_key(cell);
+        if height == 1 {
+            self.delete(&id);
+        } else {
+            self.write_structure(id, json!(height));
         }
     }
 

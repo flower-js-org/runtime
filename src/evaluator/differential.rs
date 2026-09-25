@@ -41,14 +41,18 @@ for (const name of Object.keys(definitions)) {
 var __flowerBundle={default:{definitions,http}};
 "#;
 
-// Reader records are a physical index the oracle does not keep; compare the
-// logical patch, then check the index against every stored cell separately.
+// Reader and height records are physical structure the oracle does not keep;
+// compare the logical patch, then check them against every stored cell.
 fn is_reader(key: &str) -> bool {
-    key.starts_with("reader:")
+    key.starts_with("reader:") || key.starts_with("height:")
 }
 
 fn representation(value: &Evaluation) -> Value {
-    let puts: BTreeMap<_, _> = value.puts.iter().filter(|(key, _)| !is_reader(key)).collect();
+    let puts: BTreeMap<_, _> = value
+        .puts
+        .iter()
+        .filter(|(key, _)| !is_reader(key))
+        .collect();
     let deletes: Vec<_> = value.deletes.iter().filter(|key| !is_reader(key)).collect();
     json!({"puts":puts,"deletes":deletes,"value":value.value,"query_cacheable":value.query_cacheable,
         "query_clock_polled":value.query_clock_polled,"query_changes_at":value.query_changes_at})
@@ -68,8 +72,42 @@ fn assert_readers_match_cells(data: &BTreeMap<String, Value>) {
                 .map(move |dep| Records::reader_key(dep, key))
         })
         .collect();
-    let actual: BTreeSet<String> = data.keys().filter(|key| is_reader(key)).cloned().collect();
-    assert_eq!(actual, expected, "reader records must mirror cell dependencies");
+    let actual: BTreeSet<String> = data
+        .keys()
+        .filter(|key| key.starts_with("reader:"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "reader records must mirror cell dependencies"
+    );
+    fn height(data: &BTreeMap<String, Value>, cell: &str) -> u64 {
+        1 + data[cell]["deps"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|dep| dep.starts_with("cell:"))
+            .map(|dep| height(data, dep))
+            .max()
+            .unwrap_or(0)
+    }
+    let expected: BTreeMap<String, Value> = data
+        .keys()
+        .filter(|key| key.starts_with("cell:"))
+        .map(|cell| (Records::height_key(cell), height(data, cell)))
+        .filter(|(_, height)| *height > 1)
+        .map(|(key, height)| (key, json!(height)))
+        .collect();
+    let actual: BTreeMap<String, Value> = data
+        .iter()
+        .filter(|(key, _)| key.starts_with("height:"))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "height records must match cell dependencies"
+    );
 }
 
 fn compare(data: &mut BTreeMap<String, Value>, input: Value, mode: &str, now: u64) {

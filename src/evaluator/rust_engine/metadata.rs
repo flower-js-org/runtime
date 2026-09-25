@@ -1,49 +1,12 @@
 //! Structurally shared indexes derived from immutable application records.
-//! Updating source values does no graph work. Cell outcome changes keep the
-//! reachability proof when dependency topology is unchanged. Reverse edges are
-//! durable `reader:` records maintained by the engine, not derived here.
+//! Updating source values does no graph work. The graph's structure itself is
+//! durable: `reader:` records hold reverse edges and `height:` records the
+//! longest derived path below each cell, both maintained by the engine.
 
 use super::*;
-use std::sync::OnceLock;
 
+/// Heights found by a full traversal, the reference for the stored ones.
 pub(super) type Depths = im::HashMap<String, u8>;
-
-/// The proof is derived only by validation, never decoded from stored records.
-/// Append deltas retain one persistent baseline map, not a chain of historical
-/// graphs. Publishing a physical patch carries its pending frontier forward.
-#[derive(Debug)]
-pub(super) struct Topology {
-    proof: OnceLock<Arc<Depths>>,
-    extension: Option<Extension>,
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct Extension {
-    pub baseline: Arc<Depths>,
-    pub cells: im::HashSet<String>,
-    pub roots: im::OrdSet<String>,
-}
-
-impl Topology {
-    fn empty() -> Self {
-        Self {
-            proof: OnceLock::from(Arc::new(Depths::new())),
-            extension: None,
-        }
-    }
-
-    pub(super) fn extension(&self) -> Option<Extension> {
-        if let Some(proof) = self.proof.get() {
-            Some(Extension {
-                baseline: proof.clone(),
-                cells: im::HashSet::new(),
-                roots: im::OrdSet::new(),
-            })
-        } else {
-            self.extension.clone()
-        }
-    }
-}
 
 /// The selected graph's whole accounted size: what building it from nothing
 /// costs.
@@ -59,8 +22,7 @@ pub(super) fn graph_bytes(data: &Records) -> usize {
 
 /// What the index derives from one stored cell record. It is parsed again
 /// from the record whenever the record is replaced, not retained per cell.
-struct Cell<'a> {
-    deps: Vec<&'a str>,
+struct Cell {
     // Parsed `scan:` dependencies, which have no reader records.
     scans: Vec<windows::Window>,
     // The collection and fields of each `index-bucket:` dependency.
@@ -69,8 +31,8 @@ struct Cell<'a> {
     clock: bool,
 }
 
-impl<'a> Cell<'a> {
-    fn parse(id: &str, value: &'a Value) -> Self {
+impl Cell {
+    fn parse(id: &str, value: &Value) -> Self {
         let listed = value.get("deps").and_then(Value::as_array);
         let clock = listed.is_none_or(|deps| {
             deps.iter()
@@ -101,7 +63,6 @@ impl<'a> Cell<'a> {
                     .sum::<usize>(),
             );
         Self {
-            deps,
             scans,
             buckets,
             bytes,
@@ -134,14 +95,9 @@ pub(crate) struct ReactiveIndex {
     // Equality-queried field sets by collection, with their dependency counts.
     buckets: im::HashMap<String, im::HashMap<Vec<String>, usize>>,
     cell_count: usize,
-    pub(super) roots: im::OrdMap<String, Arc<Value>>,
-    pub(super) root_cells: im::OrdMap<Key, Arc<Root>>,
     invalid_cells: im::OrdMap<String, EngineError>,
     invalid_roots: im::OrdMap<String, EngineError>,
     clock_readers: usize,
-    // Complete traversals and certified append-only extensions establish this
-    // proof. Other topology edits detach it from prior snapshots.
-    pub(super) topology: Arc<Topology>,
     // Unlike the cycle proof, this also changes for source dependency edges.
     // Optimistic patches must discover the same set of reactive readers.
     pub(super) shape: Arc<()>,
@@ -156,12 +112,9 @@ impl Default for ReactiveIndex {
             scans: im::HashMap::new(),
             buckets: im::HashMap::new(),
             cell_count: 0,
-            roots: im::OrdMap::new(),
-            root_cells: im::OrdMap::new(),
             invalid_cells: im::OrdMap::new(),
             invalid_roots: im::OrdMap::new(),
             clock_readers: 0,
-            topology: Arc::new(Topology::empty()),
             shape: Arc::new(()),
             memberships: im::HashMap::new(),
         }
@@ -322,6 +275,7 @@ impl ReactiveIndex {
     }
 
     /// Stored cells of this graph, including invalid ones.
+    #[cfg(test)]
     pub(crate) fn cell_count(&self) -> usize {
         self.cell_count
     }
@@ -368,36 +322,6 @@ impl ReactiveIndex {
         Ok(())
     }
 
-    pub(super) fn validated(&self) -> bool {
-        self.topology.proof.get().is_some()
-    }
-
-    pub(super) fn mark_validated(&self, depths: Depths) {
-        let _ = self.topology.proof.set(Arc::new(depths));
-    }
-
-    fn invalidate_topology(&mut self) {
-        self.topology = Arc::new(Topology {
-            proof: OnceLock::new(),
-            extension: None,
-        });
-    }
-
-    fn append_topology(&mut self, id: &str, root: bool) {
-        let extension = self.topology.extension().map(|mut extension| {
-            if root {
-                extension.roots.insert(id.into());
-            } else {
-                extension.cells.insert(id.into());
-            }
-            extension
-        });
-        self.topology = Arc::new(Topology {
-            proof: OnceLock::new(),
-            extension,
-        });
-    }
-
     fn update_cell(
         &mut self,
         id: &str,
@@ -405,10 +329,9 @@ impl ReactiveIndex {
         next: Option<&Arc<Value>>,
         record_depth_valid: bool,
     ) {
-        let old = previous.map(|value| Cell::parse(id, value));
         let old_error = self.invalid_cells.get(id).cloned();
-        let new = next.map(|value| {
-            let error = if record_depth_valid {
+        let new_error = next.map(|value| {
+            if record_depth_valid {
                 Ok(())
             } else {
                 // Ephemeral cell outcomes may exceed the snapshot wrapper's
@@ -416,40 +339,28 @@ impl ReactiveIndex {
                 depth(&value["args"], 0, "INPUT_INVALID")
             }
             .and_then(|()| {
-                validate_cell(id, value, previous, previous.is_some() && old_error.is_none())
+                validate_cell(
+                    id,
+                    value,
+                    previous,
+                    previous.is_some() && old_error.is_none(),
+                )
             })
-            .err();
-            (Cell::parse(id, value), error)
+            .err()
         });
-        // An outcome change alone leaves every derived structure unchanged.
-        if let (Some(old), Some((new, error))) = (&old, &new)
+        // An outcome change alone leaves every derived structure unchanged,
+        // so compare dependencies before parsing either record.
+        if let (Some(previous), Some(next), Some(error)) = (previous, next, &new_error)
             && old_error == *error
-            && old.clock == new.clock
-            && old.deps == new.deps
+            && previous.get("deps") == next.get("deps")
         {
             return;
         }
+        let old = previous.map(|value| Cell::parse(id, value));
+        let new = next
+            .zip(new_error)
+            .map(|(value, error)| (Cell::parse(id, value), error));
         self.shape = Arc::new(());
-        let topology_changed = match (&old, &new) {
-            (Some(old), Some((new, error))) => {
-                old_error.is_some()
-                    || error.is_some()
-                    || !old
-                        .deps
-                        .iter()
-                        .filter(|dep| dep.starts_with("cell:"))
-                        .eq(new.deps.iter().filter(|dep| dep.starts_with("cell:")))
-            }
-            (None, None) => false,
-            _ => true,
-        };
-        if topology_changed {
-            if old.is_none() && new.as_ref().is_some_and(|(_, error)| error.is_none()) {
-                self.append_topology(id, false);
-            } else {
-                self.invalidate_topology();
-            }
-        }
         if let Some(old) = old {
             self.clock_readers -= usize::from(old.clock);
             self.change_scans(&old.scans, id, false);
@@ -482,17 +393,9 @@ impl ReactiveIndex {
         {
             return;
         }
-        if previous.is_none() && next.is_some() {
-            self.append_topology(id, true);
-        } else if !previous.zip(next).is_some_and(|(old, new)| equal(old, new)) {
-            self.invalidate_topology();
-        }
         self.shape = Arc::new(());
-        self.roots.remove(id);
-        self.root_cells.remove(&Key(format!("cell:{}", &id[5..])));
         self.invalid_roots.remove(id);
         if let Some(value) = next {
-            self.roots.insert(id.into(), value.clone());
             let depth = if record_depth_valid {
                 Ok(())
             } else {
@@ -509,18 +412,8 @@ impl ReactiveIndex {
                     }
                     Ok(reference)
                 });
-            match reference {
-                Ok(reference) => {
-                    self.root_cells.insert(
-                        Key(reference.cell_id()),
-                        Arc::new(Root {
-                            value: value.clone(),
-                        }),
-                    );
-                }
-                Err(error) => {
-                    self.invalid_roots.insert(id.into(), error);
-                }
+            if let Err(error) = reference {
+                self.invalid_roots.insert(id.into(), error);
             }
         }
     }

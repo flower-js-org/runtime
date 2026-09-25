@@ -105,9 +105,6 @@ impl Reference {
     fn value(&self) -> Value {
         json!({"name":self.name,"args":self.args})
     }
-    fn cell_id(&self) -> String {
-        cell_id(&self.name, &self.args)
-    }
     fn root_id(&self) -> String {
         root_id(&self.name, &self.args)
     }
@@ -130,6 +127,20 @@ struct Preview {
 
 type Rows = HashMap<String, BTreeMap<Key, Arc<Value>>>;
 
+/// Graph maintenance a preview owes for the writes since the last one.
+#[derive(Clone, Default)]
+struct GraphChanges {
+    /// Roots stored since, whose cells must be evaluated.
+    added_roots: BTreeSet<String>,
+    /// Cells that lost a reader or their root, or are new: collected unless
+    /// something still holds them.
+    released: BTreeSet<String>,
+    /// Cells whose derived dependencies changed, so their heights may too, in
+    /// write order: evaluation stores children first, so each height is
+    /// computed once.
+    reshaped: Vec<String>,
+}
+
 struct Engine<'a> {
     execute: &'a dyn Executor,
     base: Records,
@@ -145,8 +156,14 @@ struct Engine<'a> {
     graph_costs: HashMap<String, usize>,
     graph_index_bytes: usize,
     query_indexes: Vec<QueryIndex>,
-    durable_roots: im::OrdMap<String, Arc<Value>>,
+    /// Roots the invocation materialized (Some) or unmaterialized (None)
+    /// since the last preview applied them.
+    root_changes: BTreeMap<String, Option<Arc<Value>>>,
     temporary_root: Option<Reference>,
+    /// A root a preview stored only to read `temporary_root`, removed by the
+    /// next preview that no longer needs it.
+    staged_temporary: Option<String>,
+    graph_changes: GraphChanges,
     writes: BTreeMap<String, Option<Arc<Value>>>,
     changed: HashSet<String>,
     unchecked: HashSet<String>,
@@ -273,9 +290,8 @@ fn run_with_limit_and_schema(
     let speculative = mode == "mutation"
         && invocation["$speculate"] == true
         && !super::staging::maintaining_graph(&data);
-    // The snapshot's roots and graph are shared, not copied, so they cost this
-    // invocation nothing: it pays for the graph entries it adds or replaces.
-    let durable_roots = data.reactive().roots.clone();
+    // The snapshot's graph is shared, not copied, so it costs this invocation
+    // nothing: it pays for the graph entries it adds or replaces.
     let deployment_schema_bytes = deployment_schema
         .as_ref()
         .map_or(0, Schema::allocation_cost);
@@ -325,8 +341,10 @@ fn run_with_limit_and_schema(
         graph_costs: HashMap::new(),
         graph_index_bytes: 0,
         query_indexes: Vec::new(),
-        durable_roots,
+        root_changes: BTreeMap::new(),
         temporary_root: None,
+        staged_temporary: None,
+        graph_changes: GraphChanges::default(),
         writes: BTreeMap::new(),
         changed: HashSet::new(),
         unchecked: HashSet::new(),
@@ -522,7 +540,26 @@ impl Engine<'_> {
 
     fn put(&mut self, id: String, value: Value) -> EngineResult<()> {
         if id.starts_with("cell:") {
-            self.update_readers(&id, Some(&value));
+            let previous = self.staged.get_shared(&id).cloned();
+            // Most reevaluations keep their dependencies, and with them the
+            // cell's reader records and height.
+            let same_deps = previous
+                .as_ref()
+                .is_some_and(|previous| previous.get("deps") == value.get("deps"));
+            if !same_deps {
+                if previous
+                    .as_ref()
+                    .is_none_or(|previous| !cell_edges(previous).eq(cell_edges(&value)))
+                {
+                    self.graph_changes.reshaped.push(id.clone());
+                }
+                if previous.is_none() {
+                    self.graph_changes.released.insert(id.clone());
+                }
+                self.update_readers(&id, Some(&value));
+            }
+        } else if id.starts_with("root:") && !self.staged.contains_key(&id) {
+            self.graph_changes.added_roots.insert(id.clone());
         }
         self.write(id, value)
     }
@@ -530,6 +567,15 @@ impl Engine<'_> {
     fn remove(&mut self, id: &str) {
         if id.starts_with("cell:") {
             self.update_readers(id, None);
+            let height = Records::height_key(id);
+            if self.staged.contains_key(&height) {
+                self.delete(&height);
+            }
+        } else if id.starts_with("root:") {
+            self.graph_changes.added_roots.remove(id);
+            self.graph_changes
+                .released
+                .insert(format!("cell:{}", &id[5..]));
         }
         self.delete(id);
     }
@@ -554,22 +600,25 @@ impl Engine<'_> {
         for dep in &old {
             if !new.contains(dep.as_str()) {
                 self.delete(&Records::reader_key(dep, id));
+                if dep.starts_with("cell:") {
+                    self.graph_changes.released.insert(dep.clone());
+                }
             }
         }
         for dep in new {
             if !old.contains(dep) {
-                self.write_reader(Records::reader_key(dep, id));
+                self.write_structure(Records::reader_key(dep, id), Value::Null);
             }
         }
     }
 
-    /// A reader record is its cell's reverse edge, reserved in the cell's
-    /// accounted graph bytes rather than charged as an overlay write.
-    fn write_reader(&mut self, id: String) {
+    /// Reader and height records are a cell's reverse edges and depth, reserved
+    /// in its accounted graph bytes rather than charged as overlay writes.
+    fn write_structure(&mut self, id: String, value: Value) {
         self.speculative_read(&id);
         self.changed.insert(id.clone());
         self.preview.changed.insert(id.clone());
-        self.staged.insert(id, Value::Null);
+        self.staged.insert(id, value);
     }
 
     fn write(&mut self, id: String, value: Value) -> EngineResult<()> {
@@ -1066,9 +1115,9 @@ impl Engine<'_> {
                 if operation == "materialize" {
                     let value = reference.value();
                     self.retain(&id, Some(&value))?;
-                    self.durable_roots.insert(id, Arc::new(value));
+                    self.root_changes.insert(id, Some(Arc::new(value)));
                 } else {
-                    self.durable_roots.remove(&id);
+                    self.root_changes.insert(id, None);
                 }
                 self.preview_dirty = true;
                 Ok(Value::Null)
@@ -1273,11 +1322,10 @@ impl Engine<'_> {
             let id = reference.root_id();
             let value = reference.value();
             self.put(id.clone(), value)?;
-            self.durable_roots = self.staged.reactive().roots.clone();
         }
         for value in list(command, "unmaterialize")? {
             let reference = Reference::parse(value, "unmaterialize")?;
-            self.durable_roots.remove(&reference.root_id());
+            self.root_changes.insert(reference.root_id(), None);
         }
         if graph {
             // These roots already belong to the target program. Updating the
@@ -1379,6 +1427,16 @@ fn patch_bytes(puts: &BTreeMap<String, Value>, deletes: &[String], evaluated: &[
     };
     // {"puts":...,"deletes":...,"evaluated":...}
     33 + object + strings(deletes) + strings(evaluated)
+}
+
+/// A stored cell's dependencies on other cells, in stored order.
+fn cell_edges(cell: &Value) -> impl Iterator<Item = &str> {
+    cell["deps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|dep| dep.starts_with("cell:"))
 }
 
 fn shared_changes(

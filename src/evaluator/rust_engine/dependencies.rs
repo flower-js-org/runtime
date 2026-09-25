@@ -218,6 +218,9 @@ impl Engine<'_> {
     }
     pub(super) fn marker_read(&mut self, id: impl AsRef<str>) {
         let id = id.as_ref();
+        if (!self.query_cacheable && !self.speculative) || self.certificate.is_none() {
+            return;
+        }
         // Equality buckets have no markers of their own; stamp their entries.
         if let Some((marker, lower, upper)) = bucket_window(id) {
             self.window_read(marker, &lower, &upper);

@@ -21,11 +21,11 @@ node -e 'import("./sdk/bundle.ts").then(async ({buildBundle}) => {
   fs.writeFileSync("target/footprint/footprint.js", (await buildBundle("bench/footprint.ts")).javascript);
 })'
 nix develop -c cargo build --release --bin flower-footprint
-FLOWER_RUST_MEMORY_BYTES=34359738368 target/release/flower-footprint \
+target/release/flower-footprint \
   --bundle target/footprint/footprint.js --orders 100000 --dir target/footprint
 ```
 
-The raised budget is needed beyond about 40,000 orders (see below). `--breakdown` attributes the graph metadata to key classes instead of timing storage. `--profile SECONDS` samples single-row mutations with macOS `sample`.
+Builds before 41b392c need `FLOWER_RUST_MEMORY_BYTES=34359738368` beyond about 40,000 orders (see below). `--breakdown` attributes the graph metadata to key classes instead of timing storage. `--profile SECONDS` samples single-row mutations with macOS `sample`.
 
 Apple M5 Pro, 18 logical CPUs, 48 GiB, Darwin 27.2.0; release build of main at 66349bc plus this harness. One run per size. Heap bytes are deterministic; times are single samples. Raw reports are in [footprint-results](footprint-results).
 
@@ -90,6 +90,8 @@ When its cache holds the file, redb is as fast as `Records`, and faster from 1.4
 
 ## Limits independent of storage
 
+Both limits below are fixed: main charges a transaction for the graph it changes since 41b392c, and [incremental graph maintenance](#incremental-graph-maintenance) finds root changes from the invocation's own operations. The measurements are of 66349bc.
+
 **The graph must fit in one transaction's budget.** Once a mutation touches the graph, the accounted size of the whole graph counts toward that transaction's `FLOWER_RUST_MEMORY_BYTES`, 128 MiB by default ([graph.rs](../src/evaluator/rust_engine/graph.rs), `refresh_graph_budget`). With 100 orders per mutation, seeding fails at 40,400 orders with `Graph index exceeds FLOWER_RUST_MEMORY_BYTES`; with 2,000 per mutation, it fails at 28,000. The accounting charges about 3.3 KB per order, a fifth of the measured heap.
 
 **Adding a materialized root walks every root.** When a write changes the root set, `run_preview_inner` makes three full passes over the roots. Creating one order costs about 0.7 µs per existing order; updating a line does not:
@@ -104,9 +106,9 @@ Seeding batches slowed from 62 ms to 352 ms across the runs for the same reason.
 ## What this means for disk-backed serving
 
 - Moving values to disk alone gains at most a factor of 1.5: keys, graph metadata and the proof would still take 17 KB per order. The graph metadata has to shrink or move to disk as well. Keys alone cost 131 bytes each in memory, so a disk-backed design has to keep them on disk too.
-- Before storage matters, materialized collections need the two fixes above: charge a transaction for the graph it changes, not the whole graph, and find added and removed roots from the transaction's writes. Otherwise they stop at about 40,000 rows per logical database.
+- Before storage mattered, materialized collections needed the two fixes above, now made: charge a transaction for the graph it changes, and find added and removed roots from the transaction's own operations.
 - Most graph metadata can leave memory before any storage change. [Restructured graph metadata](#restructured-graph-metadata) moves reverse edges into records and drops three other per-cell structures, halving `Records`.
-- Startup needs the graph metadata built in bulk or read from disk, not rebuilt through per-record persistent-map updates. Scanning and parsing redb is under 10% of today's load.
+- Startup needed the graph metadata read from disk rather than rebuilt through per-record persistent-map updates. It now is: reader and height records load like any other.
 - Warm redb reads are cheap enough to serve from. The risk is SSD misses on the serial sequencer path: at 25–150 µs each, a few thousand per batch would stall a group for hundreds of milliseconds. Certificate validation should not need to reread values.
 - Receipts belong on disk too, or under retention.
 
@@ -142,7 +144,35 @@ Creating an order writes 6 reader records, 27% more stored text. Alternating run
 
 All 623 library tests pass. The JavaScript-reference differential test now compares patches without reader records, then checks after every step that the stored reader records are exactly the reverse of every cell's dependencies. A new case covers rows moving between equality buckets.
 
-What still grows with the graph in memory: roots (250 bytes per order) and the topology proof (450 bytes per order of pending frontier after loading, 775 once validated). Removing a root runs the full collector over the whole graph: deleting one order takes 32 ms at 10,000 orders and 146 ms at 30,000. Reader records make an incremental replacement possible: store each cell's height, propagate height changes up through reader records to detect cycles and depth, and delete cells that are neither roots nor read by any cell.
+### Incremental graph maintenance
+
+The in-memory topology proof and root maps are gone too. What they did is now kept in records, and a preview updates it only where its writes changed the graph:
+
+- **Heights.** A cell that reads other cells has a `height:` record: the number of cells on its longest derived path, itself included. A preview recomputes heights only for cells whose derived edges it changed, in write order, so children come before parents. It then follows reader records to the parents of any cell whose height changed. A height above 128 is an error. A cycle raises heights without bound, so it is caught the same way, and the full traversal then reports the same error the reference does.
+- **Collection.** Cells that lose a reader or their root, and new cells, are collected at the end of the preview if no reader record or root holds them. Deleting a cell deletes its reader records, which can release the cells it read.
+- **Roots.** An invocation tracks the roots it materializes and unmaterializes, plus the one temporary root a preview stores to read a derived value. The root set is no longer compared as a whole. Roots are read from their `root:` records.
+
+Deployments, which reevaluate every cell, still traverse from every root. So does a preview in which a callback error kept a dirty child it never evaluated. The traversal is also the test reference: randomized comparisons check that incremental maintenance produces the same patches, callbacks and errors.
+
+This removes the last per-row graph structures from memory, and the traversals from root and edge changes and from the first mutation after a restart. Stored graphs are now trusted: the engine checks cycles, depth and missing children when it writes cells, and no longer revalidates records it did not write. At 30,000 orders, compared with 66349bc:
+
+| | Before | After |
+| --- | ---: | ---: |
+| Keys per order | 14 | 21 |
+| Stored JSON text per order | 1,883 | 2,437 |
+| `Records` heap per order | 25,308 | 11,889 |
+| Load into `Records` | 1,089–1,128 ms | 341 ms |
+| First mutation after loading | 79–82 ms | 0.46 ms |
+
+Single-row mutations no longer grow with the database:
+
+| | 10,000 orders | 30,000 | 100,000 |
+| --- | ---: | ---: | ---: |
+| Create one order | 0.16 ms (was 4.5) | 0.18 ms (was 14.7) | 0.20 ms (was 53) |
+| Delete one order | 0.14 ms (was 32) | 0.15 ms (was 146) | 0.18 ms |
+| Update one line | 0.07 ms | 0.07 ms | 0.08 ms |
+
+`Records` minus a plain map of the same parsed values is now slightly negative, because reader records share one null value. What remains in memory is keys and parsed values, the next target for disk-backed serving. Scan windows are still indexed in memory per reading cell.
 
 ## What this does not measure
 

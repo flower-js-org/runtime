@@ -162,6 +162,8 @@ The application state is an ordered map from strings to JSON values:
 - `source:` + canonical `[collection, key]` → record value
 - `cell:` + canonical `[definitionName, args]` → `{name, args, outcome, deps}`
 - `root:` + canonical `[definitionName, args]` → `{name, args}`
+- `reader:` + dependency ID + NUL + cell ID → `null`, one for each non-scan dependency of a stored cell
+- `height:` + cell ID → the number of cells on its longest derived path, itself included; absent for cells that read no other cell
 - `bundle` → `{hash, javascript}`
 - `httpMethods` → `{publicAlias: {name: internalName, kind: 'query' | 'mutation' | 'transaction', consistency?}}`
 - `maintenanceMethod` → `null` or `{name: internalName, kind: 'mutation', onError?: {name: internalName, kind: 'mutation'}}`
@@ -170,7 +172,7 @@ The application state is an ordered map from strings to JSON values:
 
 Canonical JSON sorts object keys lexically, preserves array order, and uses JavaScript JSON number semantics. Omitted instance arguments become `null`.
 
-Outcomes are `{ok:true,value}` or `{ok:false,error:{code,message}}`; stored derived errors never keep failure details. Dependencies are source IDs, derived cell IDs, `clock`, or `collection:` + JSON-encoded collection name. Missing source reads are dependencies. Scans/equality queries depend conservatively on the complete collection. Successful evaluation replaces dependencies; errors retain the union of prior and observed reads. Reachability from roots controls derived-cell collection.
+Outcomes are `{ok:true,value}` or `{ok:false,error:{code,message}}`; stored derived errors never keep failure details. Dependencies are source IDs, derived cell IDs, `clock`, or `collection:` + JSON-encoded collection name. Missing source reads are dependencies. Scans/equality queries depend conservatively on the complete collection. Successful evaluation replaces dependencies; errors retain the union of prior and observed reads. Reachability from roots controls derived-cell collection: a cell with no root and no reader record is deleted with its own reader and height records. The engine writes reader and height records in the same patch as the cells they describe; a change propagates to a dependency's readers by prefix, and heights above 128 are rejected.
 
 The SDK's helpers store ordinary source records; typed keys are stored as canonical JSON text. Expiration envelopes contain `{value, createdAt, updatedAt, expiresAt}`. Queue jobs are keyed by `[scope, id]` in the queue's collection and contain `{scope, id, payload, state, availableAt, leaseExpiresAt, lease, attempts, createdAt, updatedAt, result, error}`. A lease contains `{owner, token, expiresAt, history?}`. When retry retention is initialized, history records its logical database/incarnation; renewal, completion and failure must supply the matching current history. Collection `$flower.fencing` keeps one counter per queue and scope, keyed by canonical `[queue, scope]`, which retains the last issued token even when work is replaced or deleted. Internal application code must preserve these counters to preserve fencing. Timers live in the collection named after their scheduler. `define` reserves `$flower.tasks` for per-task maintenance backoff and `$flower.materialized` for materialization progress; external values keep `<name>.results` and, with `each`, `<name>.stale`.
 

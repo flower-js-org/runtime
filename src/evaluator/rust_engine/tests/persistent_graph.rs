@@ -148,23 +148,20 @@ fn comparable(result: &Evaluation) -> Value {
 }
 
 #[test]
-fn quiet_tenants_share_topology_and_skip_global_traversal() {
+fn quiet_tenants_share_the_graph_and_skip_global_traversal() {
     let fixture = fixture();
     let mut data = tenants(&fixture, 256);
-    // Patches and disk input rebuild derived metadata, so validate the freshly
-    // installed topology once before checking its steady-state path.
-    write(&mut data, &fixture, "0", 1000);
-    assert!(data.reactive().validated());
     let prior = data.clone();
-    let proof = data.reactive().topology.clone();
     graph::take_graph_passes();
+    graph::take_graph_visits();
     let result = write(&mut data, &fixture, "1", 1001);
     assert_eq!(graph::take_graph_passes(), (1, 0));
+    // Unchanged edges leave every height as stored.
+    assert_eq!(graph::take_graph_visits(), (0, 0));
     assert_eq!(
         result.evaluated,
         [cell_id("leaf", &json!("1")), cell_id("top", &json!("1"))]
     );
-    assert!(Arc::ptr_eq(&proof, &data.reactive().topology));
     assert!(Arc::ptr_eq(
         prior.get_shared(&cell_id("top", &json!("200"))).unwrap(),
         data.get_shared(&cell_id("top", &json!("200"))).unwrap()
@@ -212,7 +209,6 @@ fn randomized_previews_match_forced_full_traversal() {
         assert_eq!(fast, full, "step {step}");
         if step % 31 == 0 {
             fast = serde_json::from_str(&serde_json::to_string(&fast).unwrap()).unwrap();
-            assert!(!fast.reactive().validated());
         }
     }
 }
@@ -274,7 +270,6 @@ fn terminal_preview_errors_match_rollback_path_at_memory_boundaries() {
 fn recover(data: &Records) -> Records {
     let recovered: Records = serde_json::from_str(&serde_json::to_string(data).unwrap()).unwrap();
     assert_eq!(data, &recovered);
-    assert!(!recovered.reactive().validated());
     recovered
 }
 
@@ -283,21 +278,18 @@ fn grow(start: usize, count: usize) -> Value {
 }
 
 #[test]
-fn restart_revalidates_then_reuses_topology_without_charging_it() {
+fn restart_needs_no_graph_revalidation() {
     let fixture = fixture();
     let mut original = tenants(&fixture, 16);
     write(&mut original, &fixture, "0", 1000);
+    // Reader and height records survive a restart like any other record.
     let mut recovered = recover(&original);
     graph::take_graph_passes();
     graph::take_graph_visits();
     write(&mut recovered, &fixture, "0", 1001);
     assert_eq!(graph::take_graph_passes(), (1, 0));
-    assert_eq!(graph::take_graph_visits(), (32, 0));
-    write(&mut recovered, &fixture, "0", 1002);
-    assert_eq!(graph::take_graph_passes(), (1, 0));
     assert_eq!(graph::take_graph_visits(), (0, 0));
-    // Revalidation derives the snapshot's own proof. The invocation which
-    // happens to need it pays only for what it changes.
+    // The first invocation after a restart pays only for what it changes.
     let recovered = recover(&original);
     run_with_limit(
         recovered.clone(),
@@ -308,7 +300,6 @@ fn restart_revalidates_then_reuses_topology_without_charging_it() {
         metadata::graph_bytes(&recovered) / 4,
     )
     .unwrap();
-    assert!(recovered.reactive().validated());
 }
 
 #[test]
@@ -383,10 +374,11 @@ fn inserts_continue_after_the_graph_outgrows_the_transaction_budget() {
         apply(&mut data, result);
         next += 16;
     }
-    assert_eq!(data.reactive().roots.len(), next);
-    // Removing a root and restarting both revalidate the whole graph, which
-    // the same budget admits too.
+    assert_eq!(data.graph_roots().count(), next);
+    // Removing a root collects its cells without a traversal, and the same
+    // budget admits growth after a restart.
     graph::take_graph_passes();
+    graph::take_graph_visits();
     let result = run_with_limit(
         data.clone(),
         json!({"name":"mixed","args":{"tenant":"0","op":5,"value":0}}),
@@ -396,9 +388,12 @@ fn inserts_continue_after_the_graph_outgrows_the_transaction_budget() {
         budget,
     )
     .unwrap();
-    assert_eq!(graph::take_graph_passes().1, 1);
+    // It reads `top` again after unmaterializing it: two previews, neither a
+    // full traversal.
+    assert_eq!(graph::take_graph_passes(), (2, 0));
+    assert_eq!(graph::take_graph_visits(), (0, 0));
     apply(&mut data, result);
-    assert_eq!(data.reactive().roots.len(), next - 1);
+    assert_eq!(data.graph_roots().count(), next - 1);
     let mut recovered = recover(&data);
     let result = run_with_limit(
         recovered.clone(),
@@ -409,9 +404,8 @@ fn inserts_continue_after_the_graph_outgrows_the_transaction_budget() {
         budget,
     )
     .unwrap();
-    assert!(recovered.reactive().validated());
     apply(&mut recovered, result);
-    assert_eq!(recovered.reactive().roots.len(), next + 15);
+    assert_eq!(recovered.graph_roots().count(), next + 15);
 }
 
 const GENERATION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -448,12 +442,7 @@ fn committed_append_pages_visit_only_new_nodes_with_single_and_multiple_roots() 
             graph_page(&data, json!({}), &fixture).unwrap();
             let (append, full) = graph::take_graph_visits();
             assert_eq!(full, 0, "{count} roots, {page_size} roots per page");
-            assert_eq!(
-                append,
-                4 * count,
-                "each cell is certified at evaluation and commit"
-            );
-            assert!(data.graph_view(Some(GENERATION)).reactive().validated());
+            assert_eq!(append, 2 * count, "each new cell's height is computed once");
             assert!(
                 data.reactive().cell_count() == 0,
                 "the legacy graph stays isolated"
@@ -487,13 +476,12 @@ fn committed_shared_append_pages_and_removals_match_full_validation_after_restar
         assert_eq!(fast, full);
         if step % 17 == 0 {
             fast = serde_json::from_str(&serde_json::to_string(&fast).unwrap()).unwrap();
-            assert!(!fast.graph_view(Some(GENERATION)).reactive().validated());
         }
     }
 }
 
 #[test]
-fn committed_removal_rebuilds_one_baseline_then_append_pages_resume() {
+fn committed_removal_needs_no_rebuild_before_append_pages() {
     let fixture = fixture();
     let mut data = Records::new();
     let roots: Vec<_> = (0..16)
@@ -508,7 +496,6 @@ fn committed_removal_rebuilds_one_baseline_then_append_pages_resume() {
     )
     .unwrap();
     apply(&mut data, result);
-    assert!(!data.graph_view(Some(GENERATION)).reactive().validated());
     graph::take_graph_visits();
     for id in 16..32 {
         let result = graph_page(
@@ -520,139 +507,136 @@ fn committed_removal_rebuilds_one_baseline_then_append_pages_resume() {
         apply(&mut data, result);
     }
     graph_page(&data, json!({}), &fixture).unwrap();
-    assert_eq!(graph::take_graph_visits(), (64, 30));
+    assert_eq!(graph::take_graph_visits(), (32, 0));
+}
+
+/// chain(i) reads chain(i + 1) up to chain(126), which reads per its tail
+/// record: nothing, a further leaf chain(127), or the wrapper above chain(0).
+fn chain_fixture() -> Fixture {
+    Fixture::new([
+        (
+            "chain",
+            (|args, host| {
+                let index = args.as_u64().unwrap();
+                if index < 126 {
+                    return get(host, "derived", "chain", json!(index + 1));
+                }
+                if index > 126 {
+                    return Ok(json!(1));
+                }
+                match get(host, "collection", "tail", json!("end"))?.as_str() {
+                    Some("deeper") => get(host, "derived", "chain", json!(127)),
+                    Some("loop") => get(host, "derived", "wrapper", Value::Null),
+                    _ => Ok(json!(1)),
+                }
+            }) as Callback,
+        ),
+        (
+            "wrapper",
+            (|_, host| get(host, "derived", "chain", json!(0))) as Callback,
+        ),
+        (
+            "wrapper2",
+            (|_, host| get(host, "derived", "wrapper", Value::Null)) as Callback,
+        ),
+        (
+            "tail",
+            (|args, host| {
+                set(host, "tail", "end", args.clone())?;
+                Ok(Value::Null)
+            }) as Callback,
+        ),
+    ])
+}
+
+fn chain(fixture: &Fixture) -> Records {
+    let mut data = Records::new();
+    deploy(
+        &mut data,
+        json!({"materialize":[{"name":"chain","args":0}]}),
+        fixture,
+    );
+    assert_eq!(
+        data[&Records::height_key(&cell_id("chain", &json!(0)))],
+        127
+    );
+    data
 }
 
 #[test]
-fn appended_roots_honor_cached_descendant_depth() {
-    let fixture = fixture();
-    let mut data = Records::new();
-    for index in 0..127 {
-        let name = format!("chain{index}");
-        let deps = if index == 126 {
-            vec![]
-        } else {
-            vec![cell_id(&format!("chain{}", index + 1), &Value::Null)]
-        };
-        data.insert(cell_id(&name, &Value::Null), stored_cell(&name, deps));
-    }
-    data.insert(
-        root_id("chain0", &Value::Null),
-        json!({"name":"chain0","args":null}),
-    );
-    run(
-        data.clone(),
-        json!({"name":"noop"}),
-        "mutation",
-        Some(1),
-        &fixture,
-    )
-    .unwrap();
-    assert!(data.reactive().validated());
-    data.insert(
-        cell_id("wrapper", &Value::Null),
-        stored_cell("wrapper", vec![cell_id("chain0", &Value::Null)]),
-    );
-    data.insert(
-        root_id("wrapper", &Value::Null),
-        json!({"name":"wrapper","args":null}),
-    );
+fn appended_roots_honor_stored_descendant_heights() {
+    let fixture = chain_fixture();
+    let mut data = chain(&fixture);
     graph::take_graph_visits();
-    run(
-        data.clone(),
-        json!({"name":"noop"}),
-        "mutation",
-        Some(1),
+    deploy(
+        &mut data,
+        json!({"materialize":[{"name":"wrapper"}]}),
         &fixture,
-    )
-    .unwrap();
+    );
+    // Only the new cell's height is computed, from its child's stored one.
     assert_eq!(graph::take_graph_visits(), (1, 0));
-    assert!(data.reactive().validated());
-    data.insert(
-        cell_id("wrapper2", &Value::Null),
-        stored_cell("wrapper2", vec![cell_id("wrapper", &Value::Null)]),
+    assert_eq!(
+        data[&Records::height_key(&cell_id("wrapper", &Value::Null))],
+        128
     );
-    data.insert(
-        root_id("wrapper2", &Value::Null),
-        json!({"name":"wrapper2","args":null}),
-    );
+    let command = json!({"materialize":[{"name":"wrapper2"}],"requestId":"too-deep"});
     let actual = run(
         data.clone(),
-        json!({"name":"noop"}),
-        "mutation",
+        command.clone(),
+        "deployment",
         Some(1),
         &fixture,
     )
     .unwrap_err();
-    let expected = graph::with_full_graph(|| {
-        run(
-            data.clone(),
-            json!({"name":"noop"}),
-            "mutation",
-            Some(1),
-            &fixture,
-        )
-    })
-    .unwrap_err();
+    let expected =
+        graph::with_full_graph(|| run(data.clone(), command, "deployment", Some(1), &fixture))
+            .unwrap_err();
     assert_eq!(actual, expected);
     assert_eq!(actual.code, "EVALUATION_BUDGET");
-    assert!(!data.reactive().validated());
 }
 
 #[test]
-fn untrusted_append_deltas_reject_cycles_and_missing_cells_and_collect_orphans() {
-    let fixture = fixture();
-    let mut baseline = tenants(&fixture, 1);
-    write(&mut baseline, &fixture, "0", 99);
-    for (name, deps, expected) in [
-        ("cycle", vec![cell_id("cycle", &Value::Null)], "CYCLE"),
-        (
-            "missing",
-            vec![cell_id("absent", &Value::Null)],
-            "INPUT_INVALID",
-        ),
-    ] {
-        let mut data = baseline.clone();
-        data.insert(cell_id(name, &Value::Null), stored_cell(name, deps));
-        data.insert(
-            root_id(name, &Value::Null),
-            json!({"name":name,"args":null}),
-        );
-        let actual = run(
-            data.clone(),
-            json!({"name":"noop"}),
-            "mutation",
-            Some(1),
-            &fixture,
-        )
-        .unwrap_err();
-        let full = graph::with_full_graph(|| {
-            run(
-                data.clone(),
-                json!({"name":"noop"}),
-                "mutation",
-                Some(1),
-                &fixture,
-            )
-        })
-        .unwrap_err();
-        assert_eq!(actual, full);
-        assert_eq!(actual.code, expected);
-        assert!(!data.reactive().validated());
-    }
-    let orphan = cell_id("orphan", &Value::Null);
-    baseline.insert(orphan.clone(), stored_cell("orphan", vec![]));
-    let result = run(
-        baseline.clone(),
-        json!({"name":"noop"}),
-        "mutation",
-        Some(1),
+fn depth_and_cycles_are_checked_through_clean_stored_cells() {
+    let fixture = chain_fixture();
+    let mut data = chain(&fixture);
+    deploy(
+        &mut data,
+        json!({"materialize":[{"name":"wrapper"}]}),
         &fixture,
-    )
-    .unwrap();
-    assert_eq!(result.deletes, vec![orphan]);
-    apply(&mut baseline, result);
-    assert_eq!(baseline.reactive().cell_count(), 2);
+    );
+    for (tail, code) in [("deeper", "EVALUATION_BUDGET"), ("loop", "CYCLE")] {
+        let command = json!({"name":"tail","args":tail});
+        let actual = run(data.clone(), command.clone(), "mutation", Some(2), &fixture).unwrap_err();
+        let expected =
+            graph::with_full_graph(|| run(data.clone(), command, "mutation", Some(2), &fixture))
+                .unwrap_err();
+        assert_eq!(actual, expected, "{tail}");
+        assert_eq!(actual.code, code, "{tail}");
+    }
+}
+
+#[test]
+fn removing_a_root_collects_its_cells_without_a_traversal() {
+    let fixture = fixture();
+    let data = tenants(&fixture, 64);
+    let command = json!({"name":"mixed","args":{"tenant":"7","op":5,"value":0}});
+    graph::take_graph_passes();
+    graph::take_graph_visits();
+    let actual = run(data.clone(), command.clone(), "mutation", Some(1), &fixture).unwrap();
+    // It reads `top` again after unmaterializing it: two previews, neither a
+    // full traversal.
+    assert_eq!(graph::take_graph_passes(), (2, 0));
+    assert_eq!(graph::take_graph_visits(), (0, 0));
+    let expected =
+        graph::with_full_graph(|| run(data.clone(), command, "mutation", Some(1), &fixture))
+            .unwrap();
+    assert_eq!(comparable(&actual), comparable(&expected));
+    let top = cell_id("top", &json!("7"));
+    let leaf = cell_id("leaf", &json!("7"));
+    assert!(actual.deletes.contains(&top));
+    assert!(actual.deletes.contains(&leaf));
+    assert!(actual.deletes.contains(&Records::height_key(&top)));
+    assert!(actual.deletes.contains(&Records::reader_key(&leaf, &top)));
 }
 
 #[test]
@@ -681,78 +665,11 @@ fn certified_graph_still_evaluates_dirty_children_retained_by_callback_errors() 
     let result = graph_page(&data, json!({"materialize":[{"name":"a"}]}), &fixture).unwrap();
     apply(&mut data, result);
     graph_page(&data, json!({}), &fixture).unwrap();
-    assert!(data.graph_view(Some(GENERATION)).reactive().validated());
     let command = json!({"writes":[{"collection":"input","key":"switch","value":true}]});
     let actual = graph_page(&data, command.clone(), &fixture).unwrap_err();
     let expected = graph::with_full_graph(|| graph_page(&data, command, &fixture)).unwrap_err();
     assert_eq!(actual, expected);
     assert_eq!(actual.code, "CYCLE");
-}
-
-fn stored_cell(name: &str, deps: Vec<String>) -> Value {
-    json!({"name":name,"args":null,"deps":deps,"outcome":{"ok":true,"value":1}})
-}
-
-#[test]
-fn added_cycle_and_depth_are_checked_even_when_stored_cells_are_clean() {
-    let fixture = fixture();
-    let mut data = Records::new();
-    for index in 0..128 {
-        let name = format!("chain{index}");
-        let deps = if index == 127 {
-            vec![]
-        } else {
-            vec![cell_id(&format!("chain{}", index + 1), &Value::Null)]
-        };
-        data.insert(cell_id(&name, &Value::Null), stored_cell(&name, deps));
-    }
-    data.insert(
-        root_id("chain0", &Value::Null),
-        json!({"name":"chain0","args":null}),
-    );
-    run(
-        data.clone(),
-        json!({"name":"noop"}),
-        "mutation",
-        Some(1),
-        &fixture,
-    )
-    .unwrap();
-    assert!(data.reactive().validated());
-    let pristine = data.clone();
-    data.insert(
-        cell_id("chain127", &Value::Null),
-        stored_cell("chain127", vec![cell_id("chain0", &Value::Null)]),
-    );
-    assert!(!data.reactive().validated());
-    assert!(pristine.reactive().validated());
-    assert_eq!(
-        run(data, json!({"name":"noop"}), "mutation", Some(2), &fixture)
-            .unwrap_err()
-            .code,
-        "CYCLE"
-    );
-    let mut too_deep = pristine;
-    too_deep.insert(
-        cell_id("chain127", &Value::Null),
-        stored_cell("chain127", vec![cell_id("chain128", &Value::Null)]),
-    );
-    too_deep.insert(
-        cell_id("chain128", &Value::Null),
-        stored_cell("chain128", vec![]),
-    );
-    assert_eq!(
-        run(
-            too_deep,
-            json!({"name":"noop"}),
-            "mutation",
-            Some(2),
-            &fixture
-        )
-        .unwrap_err()
-        .code,
-        "EVALUATION_BUDGET"
-    );
 }
 
 #[test]
@@ -778,8 +695,12 @@ fn root_removal_collects_only_unreachable_shared_descendants() {
         &fixture,
     );
     assert!(data.reactive().cell_count() == 0);
-    assert!(data.reactive().roots.is_empty());
-    assert!(!data.keys().any(|key| key.starts_with("reader:")));
+    assert_eq!(data.graph_roots().count(), 0);
+    assert!(
+        !data
+            .keys()
+            .any(|key| key.starts_with("reader:") || key.starts_with("height:"))
+    );
 }
 
 #[test]
@@ -833,7 +754,7 @@ fn cached_validation_tracks_malformed_cells_roots_and_clock_dependencies() {
 }
 
 #[test]
-fn derived_branch_switch_detaches_proof_and_collects_old_branch_in_the_same_preview() {
+fn derived_branch_switch_collects_old_branch_in_the_same_preview() {
     let fixture = Fixture::new([
         ("left", (|_, _| Ok(json!(1))) as Callback),
         ("right", (|_, _| Ok(json!(2))) as Callback),
@@ -872,8 +793,6 @@ fn derived_branch_switch_detaches_proof_and_collects_old_branch_in_the_same_prev
             &fixture,
         )
         .unwrap();
-        assert!(data.reactive().validated());
-        let proof = data.reactive().topology.clone();
         let command = json!({"name":"switch","args":switch});
         graph::take_graph_passes();
         let actual = run(
@@ -886,8 +805,8 @@ fn derived_branch_switch_detaches_proof_and_collects_old_branch_in_the_same_prev
         .unwrap();
         assert_eq!(
             graph::take_graph_passes(),
-            (0, 1),
-            "edge change must fall back within its first preview"
+            (1, 0),
+            "an edge change needs no full traversal"
         );
         let expected = graph::with_full_graph(|| {
             run(
@@ -902,7 +821,6 @@ fn derived_branch_switch_detaches_proof_and_collects_old_branch_in_the_same_prev
         assert_eq!(comparable(&actual), comparable(&expected));
         assert_eq!(actual.value, if switch { json!(2) } else { json!(1) });
         apply(&mut data, actual);
-        assert!(!Arc::ptr_eq(&proof, &data.reactive().topology));
         assert!(data.contains_key(&cell_id(
             if switch { "right" } else { "left" },
             &Value::Null

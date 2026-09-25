@@ -172,13 +172,19 @@ impl Records {
         format!("reader:{dependency}\0{reader}")
     }
 
+    /// The durable key holding a cell's height: the number of cells on its
+    /// longest derived path, itself included. Leaves, of height 1, have none.
+    pub fn height_key(cell: &str) -> String {
+        format!("height:{cell}")
+    }
+
     /// Cells of the selected graph that read `dependency`, in key order.
     pub fn readers<'a>(&'a self, dependency: &str) -> impl Iterator<Item = &'a str> + 'a {
         let prefix = format!("{}reader:{dependency}\0", self.graph_prefix());
-        let upper = format!("{}\u{1}", &prefix[..prefix.len() - 1]);
         let offset = prefix.len();
         self.0
-            .range::<_, str>((Bound::Included(prefix.as_str()), Bound::Excluded(upper.as_str())))
+            .range::<_, str>((Bound::Included(prefix.as_str()), Bound::Unbounded))
+            .take_while(move |(key, _)| key.starts_with(prefix.as_str()))
             .map(move |(key, _)| &key[offset..])
     }
 
@@ -407,6 +413,7 @@ fn is_graph_record(key: &str) -> bool {
         || key.starts_with("cell:")
         || key.starts_with("root:")
         || key.starts_with("reader:")
+        || key.starts_with("height:")
 }
 
 static READER_VALUE: std::sync::LazyLock<Arc<Value>> =

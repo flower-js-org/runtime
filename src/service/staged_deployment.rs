@@ -680,6 +680,7 @@ async fn collect(app: &App, id: String, requested: Option<usize>) -> Result<Valu
                 "root:".into(),
                 "clock".into(),
                 "reader:".into(),
+                "height:".into(),
             ]);
         }
     }
