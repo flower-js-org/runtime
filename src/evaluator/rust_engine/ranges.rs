@@ -3,6 +3,7 @@
 use super::*;
 use indexes::IndexSpec;
 use std::ops::Bound;
+use windows::Window;
 
 pub(super) fn prefix(collection: &str, fields: &[String]) -> String {
     format!(
@@ -51,15 +52,37 @@ fn scalar(value: &Value) -> EngineResult<String> {
         }
     })
 }
-pub(super) fn entry(spec: &IndexSpec, key: &str, value: &Value) -> Option<String> {
-    let object = value.as_object()?;
-    let mut encoded = prefix(&spec.collection, &spec.fields);
-    for field in &spec.fields {
-        encoded.push_str(&scalar(object.get(field)?).ok()?);
+/// A row's ordered-entry ID after its index prefix: its scalar fields, or its
+/// key for a source-key scan (`fields` is `None`), then its key.
+pub(super) fn position(fields: Option<&[String]>, key: &str, value: &Value) -> Option<String> {
+    let mut encoded = String::new();
+    match fields {
+        None => {
+            encoded.push('3');
+            encoded.push_str(&text_key(key));
+        }
+        Some(fields) => {
+            let object = value.as_object()?;
+            for field in fields {
+                encoded.push_str(&scalar(object.get(field)?).ok()?);
+            }
+        }
     }
     encoded.push(':');
     encoded.push_str(&text_key(key));
     Some(encoded)
+}
+pub(super) fn entry(spec: &IndexSpec, key: &str, value: &Value) -> Option<String> {
+    let mut encoded = prefix(&spec.collection, &spec.fields);
+    encoded.push_str(&position(Some(&spec.fields), key, value)?);
+    Some(encoded)
+}
+
+/// Rows and the dependency that determines them: a scan window, a coarse
+/// marker if no window applies, or nothing when no data can change them.
+pub(super) struct Scanned {
+    pub rows: Value,
+    pub dependency: Option<String>,
 }
 
 pub(super) struct RangeQuery {
@@ -310,15 +333,56 @@ impl RangeQuery {
     }
     fn entry(&self, spec: &IndexSpec, key: &str, value: &Value) -> Option<String> {
         if self.source_keys {
-            Some(format!(
-                "{}3{}:{}",
-                prefix(&self.collection, &self.fields),
-                text_key(key),
-                text_key(key)
-            ))
+            let mut encoded = prefix(&self.collection, &self.fields);
+            encoded.push_str(&position(None, key, value)?);
+            Some(encoded)
         } else {
             entry(spec, key, value)
         }
+    }
+
+    /// The part of the index this result depends on. A result that examined
+    /// its whole offset, limit and lookahead cannot change beyond the last row
+    /// examined; rows skipped by the offset contribute their positions only.
+    fn window(
+        &self,
+        examined: Option<&str>,
+        full: bool,
+        returned: Option<(&str, &str)>,
+    ) -> Option<Option<Window>> {
+        let prefix = prefix(&self.collection, &self.fields);
+        let suffix = |id: &str| id.strip_prefix(prefix.as_str()).map(str::to_owned);
+        let successor = |id: &str| suffix(id).map(|id| id + "\0");
+        let (mut lower, mut upper) = (suffix(&self.lower)?, suffix(&self.upper)?);
+        if let Some(after) = &self.after {
+            if self.reverse {
+                upper = suffix(after)?;
+            } else {
+                lower = successor(after)?;
+            }
+        }
+        if full && let Some(examined) = examined {
+            if self.reverse {
+                lower = suffix(examined)?;
+            } else {
+                upper = successor(examined)?;
+            }
+        }
+        if lower >= upper {
+            // An empty range always yields the same empty result.
+            return Some(None);
+        }
+        let values = match returned {
+            Some((first, last)) => Some((suffix(first)?, successor(last)?)),
+            None => None,
+        };
+        Some(Some(Window {
+            collection: self.collection.clone(),
+            fields: (!self.source_keys).then(|| self.fields.clone()),
+            lower,
+            upper,
+            values,
+        }))
     }
     fn includes(&self, id: &str) -> bool {
         id >= self.lower.as_str()
@@ -349,23 +413,25 @@ impl RangeQuery {
 }
 
 impl Engine<'_> {
-    pub(super) fn range_rows(&mut self, query: &RangeQuery) -> EngineResult<Value> {
+    pub(super) fn range_rows(&mut self, query: &RangeQuery) -> EngineResult<Scanned> {
         self.marker_read(query.dependency(self));
         if query.lower >= query.upper || query.limit == 0 {
-            return Ok(if query.scan {
-                json!([])
-            } else {
-                json!({"rows":[],"cursor":null})
+            return Ok(Scanned {
+                rows: if query.scan {
+                    json!([])
+                } else {
+                    json!({"rows":[],"cursor":null})
+                },
+                dependency: None,
             });
         }
         let spec = IndexSpec {
             collection: query.collection.clone(),
             fields: query.fields.clone(),
         };
-        let keep = query
-            .offset
-            .saturating_add(query.limit)
-            .saturating_add(usize::from(!query.scan));
+        // A page reads one row past its limit to decide whether it continues.
+        let selected_limit = query.limit.saturating_add(usize::from(!query.scan));
+        let keep = query.offset.saturating_add(selected_limit);
         let mut found = BTreeMap::<String, (String, Arc<Value>)>::new();
         let mut bytes = 0usize;
         let retain = |found: &mut BTreeMap<String, (String, Arc<Value>)>,
@@ -451,7 +517,6 @@ impl Engine<'_> {
             let mut pending = pending.peekable();
             let mut stored = iterator.peekable();
             let mut skip = query.offset;
-            let selected_limit = query.limit.saturating_add(usize::from(!query.scan));
             let mut position = 0usize;
             loop {
                 if position % 64 == 0 {
@@ -543,6 +608,14 @@ impl Engine<'_> {
                 }
             }
         }
+        // The indexed walk retained only rows after the offset.
+        let full = found.len() == if indexed { selected_limit } else { keep };
+        let examined = if query.reverse {
+            found.first_key_value()
+        } else {
+            found.last_key_value()
+        }
+        .map(|(id, _)| id.clone());
         if !indexed {
             for _ in 0..query.offset.min(found.len()) {
                 if query.reverse {
@@ -574,6 +647,14 @@ impl Engine<'_> {
         for (key, _) in found.values() {
             self.record_read(source_id(&query.collection, key));
         }
+        let returned = found
+            .first_key_value()
+            .zip(found.last_key_value())
+            .map(|((first, _), (last, _))| (first.as_str(), last.as_str()));
+        let dependency = match query.window(examined.as_deref(), full, returned) {
+            Some(window) => window.map(|window| window.dependency()),
+            None => Some(query.dependency(self)),
+        };
         let rows = if query.reverse {
             found.into_values().rev().collect()
         } else {
@@ -581,9 +662,12 @@ impl Engine<'_> {
         };
         let rows = self.rows_for_host(rows)?;
         if query.scan {
-            return Ok(rows);
+            return Ok(Scanned { rows, dependency });
         }
         let page = json!({"rows":rows,"cursor":cursor});
-        self.copy_for_host(&page)
+        Ok(Scanned {
+            rows: self.copy_for_host(&page)?,
+            dependency,
+        })
     }
 }

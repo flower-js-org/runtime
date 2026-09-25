@@ -11,6 +11,7 @@ pub(crate) use metadata::ReactiveIndex;
 mod indexes;
 mod ranges;
 mod reducers;
+mod windows;
 pub use indexes::{IndexSpec, Schema};
 pub(crate) use indexes::{staged_entries, staged_prefixes, staged_schema, staged_schema_bytes};
 mod json;
@@ -779,8 +780,9 @@ impl Engine<'_> {
             .as_ref()
             .and_then(|rows| rows.get(&query.collection))
             .map_or(0, BTreeMap::len);
-        // The persisted dependency/budget contract remains a collection read,
-        // even when the physical lookup touches only an equality bucket.
+        // The read budget remains a collection read, even when the physical
+        // lookup touches only an equality bucket. Certificates stamp the whole
+        // collection: undeclared buckets have no markers.
         if derived {
             self.count_reads(1 + count)?;
         }
@@ -937,7 +939,7 @@ impl Engine<'_> {
             "scan" => {
                 if let Some(options) = arguments.get(1) {
                     let query = ranges::RangeQuery::parse_scan(argument(0), options)?;
-                    let rows = self.range_rows(&query)?;
+                    let rows = self.range_rows(&query)?.rows;
                     self.count_operations(rows.as_array().expect("scan rows").len())?;
                     return Ok(rows);
                 }
@@ -949,7 +951,7 @@ impl Engine<'_> {
             }
             "range" => {
                 let query = ranges::RangeQuery::parse(argument(0))?;
-                self.range_rows(&query)
+                Ok(self.range_rows(&query)?.rows)
             }
             "query" => {
                 let query = Query::parse(argument(0))?;

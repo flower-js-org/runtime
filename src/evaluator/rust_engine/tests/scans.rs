@@ -1,5 +1,6 @@
 use super::*;
 use crate::evaluator::rust_engine::indexes::IndexSpec;
+use std::collections::BTreeSet;
 
 fn collection() -> Value {
     json!({"kind":"collection","name":"items","indexes":{"rank":["tenant","score"]}})
@@ -453,4 +454,523 @@ fn declared_scan_offsets_do_not_retain_skipped_rows_with_pending_writes() {
         .unwrap();
         assert_eq!(keys(&result.value), expected);
     }
+}
+
+fn page(options: Value) -> Value {
+    json!({"kind":"range","collection":"items","fields":["tenant","score"],"options":options})
+}
+
+fn windowed_fixture() -> Fixture {
+    Fixture::new([
+        (
+            "read",
+            (|args, host| host("scan", json!([collection(), args]))) as Callback,
+        ),
+        (
+            "page",
+            (|args, host| host("range", json!([page(args.clone())]))) as Callback,
+        ),
+    ])
+}
+
+fn write(key: &str, value: Value) -> Value {
+    json!({"collection":"items","key":key,"value":value})
+}
+
+fn delete(key: &str) -> Value {
+    json!({"collection":"items","key":key,"delete":true})
+}
+
+fn evaluated(data: &mut Records, writes: Value, fixture: &Fixture) -> BTreeSet<String> {
+    deploy(data, json!({ "writes": writes }), fixture)
+        .evaluated
+        .into_iter()
+        .collect()
+}
+
+fn cells<const N: usize>(ids: [&String; N]) -> BTreeSet<String> {
+    ids.into_iter().cloned().collect()
+}
+
+#[test]
+fn derived_scans_rerun_only_when_a_write_can_change_their_window() {
+    let fixture = windowed_fixture();
+    for declared in [false, true] {
+        let mut data = Records::default();
+        for n in 1..=6 {
+            data.insert(
+                source_id("items", &format!("s{n}")),
+                json!({"tenant":"a","score":n}),
+            );
+        }
+        data.insert(source_id("items", "b1"), json!({"tenant":"b","score":1}));
+        if declared {
+            install(&mut data, &fixture);
+        }
+        let top = json!({"index":"rank","prefix":["a"],"lte":5,"limit":2});
+        let skipped = json!({"index":"rank","prefix":["a"],"reverse":true,"offset":1,"limit":1});
+        let keyed = json!({"gt":"s2","lte":"s5","limit":2});
+        let first = json!({"prefix":["a"],"limit":1});
+        deploy(
+            &mut data,
+            json!({"materialize":[
+                {"name":"read","args":top},
+                {"name":"read","args":skipped},
+                {"name":"read","args":keyed},
+                {"name":"page","args":first}
+            ]}),
+            &fixture,
+        );
+        let top = cell_id("read", &top);
+        let skipped = cell_id("read", &skipped);
+        let keyed = cell_id("read", &keyed);
+        let first = cell_id("page", &first);
+        let value = |data: &Records, id: &str| data[id]["outcome"]["value"].clone();
+        assert_eq!(keys(&value(&data, &top)), ["s1", "s2"]);
+        assert_eq!(keys(&value(&data, &skipped)), ["s5"]);
+        assert_eq!(keys(&value(&data, &keyed)), ["s3", "s4"]);
+        assert_eq!(keys(&value(&data, &first)["rows"]), ["s1"]);
+        let context = format!("declared={declared}");
+
+        // Another prefix, a value past every examined row, and an insert
+        // after the last examined row cannot change any result.
+        assert!(
+            evaluated(
+                &mut data,
+                json!([write("b1", json!({"tenant":"b","score":0}))]),
+                &fixture
+            )
+            .is_empty(),
+            "{context}"
+        );
+        assert!(
+            evaluated(
+                &mut data,
+                json!([write("s9", json!({"tenant":"a","score":9}))]),
+                &fixture
+            ) == cells([&skipped]),
+            "{context}"
+        );
+        assert_eq!(keys(&value(&data, &skipped)), ["s6"]);
+        assert!(
+            evaluated(
+                &mut data,
+                json!([write("s3", json!({"tenant":"a","score":3,"label":"x"}))]),
+                &fixture
+            ) == cells([&keyed]),
+            "{context}"
+        );
+        // The page's lookahead row matters only through its existence.
+        assert!(
+            evaluated(
+                &mut data,
+                json!([write("s2", json!({"tenant":"a","score":2,"label":"x"}))]),
+                &fixture
+            ) == cells([&top]),
+            "{context}"
+        );
+        // The reverse scan skipped s9 by offset: its value is irrelevant.
+        assert!(
+            evaluated(
+                &mut data,
+                json!([write("s9", json!({"tenant":"a","score":9,"label":"x"}))]),
+                &fixture
+            )
+            .is_empty(),
+            "{context}"
+        );
+        assert!(
+            evaluated(
+                &mut data,
+                json!([write("s6", json!({"tenant":"a","score":6,"label":"x"}))]),
+                &fixture
+            ) == cells([&skipped]),
+            "{context}"
+        );
+
+        // Moving a row into the examined prefix changes it.
+        let moved = evaluated(
+            &mut data,
+            json!([write("s4", json!({"tenant":"a","score":0}))]),
+            &fixture,
+        );
+        assert_eq!(moved, cells([&first, &top, &keyed]), "{context}");
+        assert_eq!(keys(&value(&data, &top)), ["s4", "s1"]);
+        assert_eq!(keys(&value(&data, &first)["rows"]), ["s4"]);
+        // So does deleting the page's lookahead row.
+        assert_eq!(
+            evaluated(&mut data, json!([delete("s1")]), &fixture),
+            cells([&first, &top]),
+            "{context}"
+        );
+        assert_eq!(keys(&value(&data, &top)), ["s4", "s2"]);
+        assert!(!value(&data, &first)["cursor"].is_null());
+        // A row leaving past the examined rows does not.
+        assert!(
+            evaluated(&mut data, json!([delete("s5")]), &fixture).is_empty(),
+            "{context}"
+        );
+        assert_eq!(keys(&value(&data, &keyed)), ["s3", "s4"]);
+
+        // Reloading rebuilds the windows from the stored dependencies.
+        let mut restored: Records =
+            serde_json::from_slice(&serde_json::to_vec(&data).unwrap()).unwrap();
+        assert!(
+            evaluated(
+                &mut restored,
+                json!([write("s7", json!({"tenant":"a","score":7}))]),
+                &fixture
+            ) == cells([&skipped]),
+            "{context}"
+        );
+        assert_eq!(
+            evaluated(
+                &mut restored,
+                json!([write("s0", json!({"tenant":"a","score":-1}))]),
+                &fixture
+            ),
+            cells([&first, &top]),
+            "{context}"
+        );
+        assert_eq!(keys(&value(&restored, &top)), ["s0", "s4"]);
+    }
+}
+
+#[test]
+fn windowed_scans_always_match_a_fresh_scan() {
+    let fixture = windowed_fixture();
+    let scans = [
+        json!({}),
+        json!({"limit":3}),
+        json!({"gt":"k03","lte":"k08","limit":2}),
+        json!({"gte":"k02","reverse":true,"offset":2,"limit":2}),
+        json!({"index":"rank","prefix":["a"]}),
+        json!({"index":"rank","prefix":["a"],"lte":4,"limit":3}),
+        json!({"index":"rank","prefix":["a"],"gt":1,"reverse":true,"offset":1,"limit":2}),
+        json!({"index":"rank","gte":"b","limit":1}),
+        json!({"index":"rank","offset":20}),
+        json!({"index":"rank","prefix":["a",3]}),
+    ];
+    // Cursors continue from a fixed position whatever rows exist, so pages
+    // with `after` exercise windows that start (or, reversed, end) there.
+    let cursor = |options: Value| {
+        let mut data = Records::default();
+        for n in 0..4 {
+            data.insert(
+                source_id("items", &format!("k{n:02}")),
+                json!({"tenant":"a","score":n}),
+            );
+        }
+        run(
+            data,
+            json!({"name":"page","args":options}),
+            "query",
+            None,
+            &fixture,
+        )
+        .unwrap()
+        .value["cursor"]
+            .clone()
+    };
+    let mut pages = vec![
+        json!({"prefix":["a"],"limit":2}),
+        json!({"prefix":["a"],"gt":2,"reverse":true,"limit":1}),
+    ];
+    for options in [
+        json!({"prefix":["a"],"limit":2}),
+        json!({"prefix":["a"],"reverse":true,"limit":1}),
+    ] {
+        let mut continued = options.clone();
+        continued["after"] = cursor(options);
+        assert!(continued["after"].is_string());
+        pages.push(continued);
+    }
+    for declared in [false, true] {
+        let mut data = Records::default();
+        if declared {
+            install(&mut data, &fixture);
+        }
+        let materialize: Vec<_> = scans
+            .iter()
+            .map(|args| json!({"name":"read","args":args}))
+            .chain(pages.iter().map(|args| json!({"name":"page","args":args})))
+            .collect();
+        deploy(&mut data, json!({ "materialize": materialize }), &fixture);
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |bound: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % bound
+        };
+        let (mut runs, mut checks) = (0, 0);
+        for step in 0..300 {
+            let key = format!("k{:02}", next(12));
+            let change = match next(6) {
+                0 => delete(&key),
+                1 => write(&key, json!(next(3))),
+                _ => {
+                    let tenant = ["a", "b"][next(2) as usize];
+                    write(
+                        &key,
+                        json!({"tenant":tenant,"score":next(7),"label":next(3)}),
+                    )
+                }
+            };
+            runs += evaluated(&mut data, json!([change]), &fixture).len();
+            if step % 50 == 49 {
+                data = serde_json::from_slice(&serde_json::to_vec(&data).unwrap()).unwrap();
+            }
+            for (name, args) in scans
+                .iter()
+                .map(|args| ("read", args))
+                .chain(pages.iter().map(|args| ("page", args)))
+            {
+                let fresh = run(
+                    data.clone(),
+                    json!({"name":name,"args":args}),
+                    "query",
+                    None,
+                    &fixture,
+                )
+                .unwrap()
+                .value;
+                let stored = &data[&cell_id(name, args)]["outcome"]["value"];
+                assert_eq!(
+                    stored, &fresh,
+                    "declared={declared} step={step} {name} {args}"
+                );
+                checks += 1;
+            }
+        }
+        // Precision, not just correctness: most writes leave most windows alone.
+        assert!(
+            runs * 2 < checks,
+            "declared={declared}: {runs} reruns for {checks} cells"
+        );
+    }
+}
+
+fn matching(fields: Value, value: Value) -> Value {
+    json!([{"kind":"query","collection":"items","fields":fields,"value":value}])
+}
+
+fn query_fixture() -> Fixture {
+    Fixture::new([
+        (
+            "matches",
+            (|args, host| host("query", matching(args[0].clone(), args[1].clone()))) as Callback,
+        ),
+        (
+            "through",
+            (|args, host| get(host, "derived", "matches", args.clone())) as Callback,
+        ),
+    ])
+}
+
+#[test]
+fn undeclared_equality_queries_rerun_only_for_their_bucket() {
+    let fixture = query_fixture();
+    let mut data = Records::default();
+    for (key, tenant, state) in [
+        ("a1", "a", "open"),
+        ("a2", "a", "done"),
+        ("b1", "b", "open"),
+    ] {
+        data.insert(
+            source_id("items", key),
+            json!({"tenant":tenant,"state":state}),
+        );
+    }
+    let single = json!([["state"], "open"]);
+    let pair = json!([["tenant", "state"], ["a", "open"]]);
+    deploy(
+        &mut data,
+        json!({"materialize":[{"name":"matches","args":single},{"name":"matches","args":pair}]}),
+        &fixture,
+    );
+    let single = cell_id("matches", &single);
+    let pair = cell_id("matches", &pair);
+    let count = |data: &Records, id: &str| data[id]["outcome"]["value"].as_array().unwrap().len();
+    assert_eq!((count(&data, &single), count(&data, &pair)), (2, 1));
+    // Rows outside both buckets, and rows lacking a queried field.
+    assert!(
+        evaluated(
+            &mut data,
+            json!([write("a2", json!({"tenant":"a","state":"done","n":1}))]),
+            &fixture
+        )
+        .is_empty()
+    );
+    assert!(
+        evaluated(
+            &mut data,
+            json!([write("c1", json!({"tenant":"c"}))]),
+            &fixture
+        )
+        .is_empty()
+    );
+    assert!(evaluated(&mut data, json!([write("c2", json!(["open"]))]), &fixture).is_empty());
+    // A row changing within a bucket, entering one, and leaving one.
+    assert_eq!(
+        evaluated(
+            &mut data,
+            json!([write("b1", json!({"tenant":"b","state":"open","n":1}))]),
+            &fixture
+        ),
+        cells([&single])
+    );
+    assert_eq!(
+        evaluated(
+            &mut data,
+            json!([write("a2", json!({"tenant":"a","state":"open"}))]),
+            &fixture
+        ),
+        cells([&single, &pair])
+    );
+    assert_eq!((count(&data, &single), count(&data, &pair)), (3, 2));
+    assert_eq!(
+        evaluated(&mut data, json!([delete("a1")]), &fixture),
+        cells([&single, &pair])
+    );
+    assert_eq!((count(&data, &single), count(&data, &pair)), (2, 1));
+    // Reloading rebuilds the queried field sets from stored dependencies.
+    let mut restored: Records =
+        serde_json::from_slice(&serde_json::to_vec(&data).unwrap()).unwrap();
+    assert!(
+        evaluated(
+            &mut restored,
+            json!([write("b2", json!({"tenant":"b","state":"done"}))]),
+            &fixture
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        evaluated(
+            &mut restored,
+            json!([write("b2", json!({"tenant":"b","state":"open"}))]),
+            &fixture
+        ),
+        cells([&single])
+    );
+    // Declaring the index keeps the same dependency and precision.
+    let schema = Schema {
+        indexes: vec![IndexSpec {
+            collection: "items".into(),
+            fields: vec!["state".into()],
+        }],
+        aggregates: BTreeMap::new(),
+    };
+    let declared = run_with_schema(
+        restored.clone(),
+        json!({"requestId":"schema"}),
+        "deployment",
+        None,
+        &fixture,
+        Some(schema),
+    )
+    .unwrap();
+    apply(&mut restored, declared);
+    assert!(
+        evaluated(
+            &mut restored,
+            json!([write("c3", json!({"tenant":"c","state":"done"}))]),
+            &fixture
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        evaluated(
+            &mut restored,
+            json!([write("c3", json!({"tenant":"c","state":"open"}))]),
+            &fixture
+        ),
+        cells([&single])
+    );
+    assert_eq!(count(&restored, &single), 4);
+}
+
+#[test]
+fn undeclared_equality_queries_always_match_a_fresh_query() {
+    let fixture = query_fixture();
+    let queries = [
+        json!([["state"], "open"]),
+        json!([["state"], {"n":1}]),
+        json!([["tenant", "state"], ["a", "open"]]),
+        json!([["missing"], null]),
+    ];
+    let mut data = Records::default();
+    let materialize: Vec<_> = queries
+        .iter()
+        .map(|args| json!({"name":"matches","args":args}))
+        .collect();
+    deploy(&mut data, json!({ "materialize": materialize }), &fixture);
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = move |bound: u64| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state % bound
+    };
+    let (mut runs, mut checks) = (0, 0);
+    for step in 0..300 {
+        let key = format!("k{:02}", next(10));
+        let change = match next(6) {
+            0 => delete(&key),
+            1 => write(&key, json!(next(2))),
+            _ => {
+                let tenant = ["a", "b"][next(2) as usize];
+                let state =
+                    [json!("open"), json!("done"), json!({"n":1})][next(3) as usize].clone();
+                write(&key, json!({"tenant":tenant,"state":state,"label":next(3)}))
+            }
+        };
+        runs += evaluated(&mut data, json!([change]), &fixture).len();
+        if step % 50 == 49 {
+            data = serde_json::from_slice(&serde_json::to_vec(&data).unwrap()).unwrap();
+        }
+        for args in &queries {
+            let fresh = run(
+                data.clone(),
+                json!({"name":"matches","args":args}),
+                "query",
+                None,
+                &fixture,
+            )
+            .unwrap()
+            .value;
+            let stored = &data[&cell_id("matches", args)]["outcome"]["value"];
+            assert_eq!(stored, &fresh, "step={step} {args}");
+            checks += 1;
+        }
+    }
+    assert!(runs * 2 < checks, "{runs} reruns for {checks} cells");
+}
+
+#[test]
+fn query_certificates_cover_undeclared_buckets_read_through_derivations() {
+    let fixture = query_fixture();
+    let mut data = Records::from([(
+        source_id("items", "a1"),
+        json!({"tenant":"a","state":"open"}),
+    )]);
+    // An undeclared bucket has no marker of its own: the cached result must
+    // still notice a row entering it through the unmaterialized derivation.
+    let result = run(
+        data.clone(),
+        json!({"name":"through","args":[["state"],"open"]}),
+        "query",
+        None,
+        &fixture,
+    )
+    .unwrap();
+    assert_eq!(result.value.as_array().unwrap().len(), 1);
+    let certificate = result.query_certificate.unwrap();
+    assert!(certificate.valid(&data));
+    evaluated(
+        &mut data,
+        json!([write("a2", json!({"tenant":"a","state":"open"}))]),
+        &fixture,
+    );
+    assert!(!certificate.valid(&data));
 }

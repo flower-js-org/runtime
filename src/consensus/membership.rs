@@ -57,8 +57,10 @@ pub fn compatibility() -> &'static Compatibility {
     CURRENT.get_or_init(|| Compatibility {
         // A quorum-committed recovery barrier fences replay after a crash.
         raft_wire: 8,
-        // Staged deployments select a prepared generation of the materialized graph.
-        state_machine: 11,
+        // Derived scans depend on the window of index entries their result
+        // came from, and equality queries on their bucket even without a
+        // declared index. Older evaluators would never invalidate either.
+        state_machine: 12,
         snapshot_format: 4,
         value_format: 1,
         quickjs_sha256: crate::evaluator::hash(include_bytes!(

@@ -152,6 +152,14 @@ impl Engine<'_> {
             }
             if id.starts_with("source:") {
                 self.record_read(id);
+            } else if let Some(window) = windows::Window::parse(&id) {
+                // Snapshot validation cannot see which rows moved.
+                self.marker_read(window.marker(&self.schema));
+            } else if let Some((collection, fields)) = bucket_spec(&id)
+                && !self.maintained_index(&collection, &fields)
+            {
+                // Only maintained indexes have bucket markers.
+                self.marker_read(collection_id(&collection));
             } else if id.starts_with("collection:")
                 || id.starts_with("index-bucket:")
                 || id.starts_with("index-range:")
@@ -191,7 +199,14 @@ impl Engine<'_> {
     }
 
     pub(super) fn speculative_read(&mut self, id: &str) {
-        if !self.speculative || id == "clock" {
+        // range_rows already stamped a scan's marker and returned rows, and
+        // query_rows the collection of an undeclared bucket.
+        if !self.speculative
+            || id == "clock"
+            || windows::Window::is_dependency(id)
+            || bucket_spec(id)
+                .is_some_and(|(collection, fields)| !self.maintained_index(&collection, &fields))
+        {
             return;
         }
         if id.starts_with("collection:")
@@ -239,6 +254,12 @@ fn component(value: &str) -> Option<(&str, &str)> {
     }
     None
 }
+/// The collection and fields of an `index-bucket:` dependency.
+pub(super) fn bucket_spec(id: &str) -> Option<(String, Vec<String>)> {
+    let (spec, _) = component(id.strip_prefix("index-bucket:")?)?;
+    serde_json::from_str(spec).ok()
+}
+
 pub(super) fn membership_marker(id: &str) -> Option<String> {
     if let Some(source) = id.strip_prefix("source:[") {
         // The first member is always a JSON string; use the same escape-safe

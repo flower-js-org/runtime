@@ -838,7 +838,7 @@ test("deferred collection ordering preserves scans, query copies, and staged-wri
     assert.deepEqual(result.value.before, ["10", "2", "__proto__", "a", "😀", "\ue000"]);
     assert.deepEqual(result.value.after, ["10", "__proto__", "a", "b", "😀", "\ue000"]);
     assert.deepEqual(result.value.scanned, result.value.after);
-    assert.deepEqual(db.data[cellKey("ordered")].deps, ['collection:"rows"']);
+    assert.deepEqual(db.data[cellKey("ordered")].deps, ['collection:"rows"', 'index-bucket:["rows",["included"]]:true']);
     assert.equal(db.data[sourceKey("rows", "10")].key, "10");
   }
 });

@@ -206,6 +206,53 @@ pub(crate) fn staged_prefixes(spec: &IndexSpec) -> [String; 2] {
 }
 
 impl Engine<'_> {
+    /// Whether writes maintain durable entries, and so bucket markers, for
+    /// this field set: the current schema and, during a staged deployment,
+    /// the other one.
+    pub(super) fn maintained_index(&self, collection: &str, fields: &[String]) -> bool {
+        self.schema
+            .indexes
+            .iter()
+            .chain(
+                self.shadow_schema
+                    .iter()
+                    .flat_map(|schema| schema.indexes.iter()),
+            )
+            .any(|index| index.collection == collection && index.fields == fields)
+    }
+
+    /// Derived equality queries depend on their bucket whether or not the
+    /// index is declared. update_durable_indexes reports maintained buckets;
+    /// report the others that some derivation reads, where the row leaves,
+    /// enters or changes within them.
+    pub(super) fn undeclared_bucket_changes(
+        &self,
+        collection: &str,
+        previous: Option<&Value>,
+        value: Option<&Value>,
+        dependencies: &mut Vec<String>,
+    ) {
+        for fields in self.staged.reactive().bucket_fields(collection) {
+            if self.maintained_index(collection, fields) {
+                continue;
+            }
+            let spec = IndexSpec {
+                collection: collection.into(),
+                fields: fields.clone(),
+            };
+            let before = previous.and_then(|value| spec.key(value));
+            let after = value.and_then(|value| spec.key(value));
+            let buckets = if before == after {
+                [before, None]
+            } else {
+                [before, after]
+            };
+            for encoded in buckets.into_iter().flatten() {
+                dependencies.push(bucket_id_encoded(collection, fields, &encoded));
+            }
+        }
+    }
+
     pub(super) fn has_index(&self, query: &Query) -> bool {
         self.schema
             .indexes

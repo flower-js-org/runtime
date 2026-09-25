@@ -324,6 +324,7 @@ impl Engine<'_> {
         if self.keys_changed {
             changed_dependencies.push("managedKeys".into());
         }
+        let mut windowed = Vec::new();
         for (id, value) in writes {
             let changed = match (self.staged.get(&id), &value) {
                 (Some(previous), Some(value)) => !equal(previous, value),
@@ -333,6 +334,19 @@ impl Engine<'_> {
             if changed {
                 let (collection, key) = source_pair(&id)?;
                 let previous = self.staged.get_shared(&id).cloned();
+                self.staged.reactive().scan_readers(
+                    &collection,
+                    &key,
+                    previous.as_deref(),
+                    value.as_deref(),
+                    &mut windowed,
+                );
+                self.undeclared_bucket_changes(
+                    &collection,
+                    previous.as_deref(),
+                    value.as_deref(),
+                    &mut changed_dependencies,
+                );
                 self.update_durable_indexes(
                     &collection,
                     &key,
@@ -366,6 +380,14 @@ impl Engine<'_> {
                 .extend(self.preview.dirty.iter().cloned());
         }
         let direct_dependencies = changed_dependencies.len();
+        // Scans whose window a write touched read it directly; their own
+        // readers are only transitively dirty.
+        for reader in windowed {
+            self.preview.direct.insert(reader.clone());
+            if self.preview.dirty.insert(reader.clone()) {
+                changed_dependencies.push(reader);
+            }
+        }
         let mut cursor = 0;
         while cursor < changed_dependencies.len() {
             if cursor % 64 == 0 {
@@ -749,8 +771,7 @@ impl Engine<'_> {
             "scan" => {
                 if let Some(options) = arguments.get(1) {
                     let query = ranges::RangeQuery::parse_scan(argument(0), options)?;
-                    self.observe(observed, query.dependency(self))?;
-                    let rows = self.range_rows(&query)?;
+                    let rows = self.observed_range(observed, &query)?;
                     let count = rows.as_array().expect("scan rows").len();
                     self.count_reads(1 + count)?;
                     if self.mode != "deployment" {
@@ -770,16 +791,17 @@ impl Engine<'_> {
             "range" => {
                 let query = ranges::RangeQuery::parse(argument(0))?;
                 self.count_reads(1)?;
-                self.observe(observed, query.dependency(self))?;
-                self.range_rows(&query)
+                self.observed_range(observed, &query)
             }
             "query" => {
                 let query = Query::parse(argument(0))?;
+                // Declared or not, only rows entering, leaving or changing in
+                // the matching bucket can change the result.
+                self.observe(
+                    observed,
+                    indexes::bucket_id(&query.collection, &query.fields, &query.expected),
+                )?;
                 if self.has_index(&query) {
-                    self.observe(
-                        observed,
-                        indexes::bucket_id(&query.collection, &query.fields, &query.expected),
-                    )?;
                     let rows = self.indexed_rows(&query)?;
                     self.count_reads(1 + rows.len())?;
                     for (key, _) in &rows {
@@ -787,7 +809,6 @@ impl Engine<'_> {
                     }
                     self.query_values(rows.into_iter().map(|(_, value)| value).collect())
                 } else {
-                    self.observe(observed, collection_id(&query.collection))?;
                     self.query_rows(&query, true)
                 }
             }
@@ -795,6 +816,27 @@ impl Engine<'_> {
                 "INVALID_REFERENCE",
                 format!("Unknown context operation: {operation}"),
             )),
+        }
+    }
+
+    /// Depend on exactly the window a range or scan result came from. A failed
+    /// read keeps the whole index, since a later write can repair it.
+    fn observed_range(
+        &mut self,
+        observed: &mut BTreeSet<Key>,
+        query: &ranges::RangeQuery,
+    ) -> EngineResult<Value> {
+        match self.range_rows(query) {
+            Ok(scanned) => {
+                if let Some(dependency) = scanned.dependency {
+                    self.observe(observed, dependency)?;
+                }
+                Ok(scanned.rows)
+            }
+            Err(error) => {
+                self.observe(observed, query.dependency(self))?;
+                Err(error)
+            }
         }
     }
 

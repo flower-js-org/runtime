@@ -251,6 +251,31 @@
   // Source identity validation runs for every stored source during a preview.
   function sourceId(collection, key) { return "source:" + JSON.stringify([collection, key]); }
   function collectionId(collection) { return "collection:" + JSON.stringify(collection); }
+  // Derived equality queries depend on the bucket of their value.
+  function bucketId(collection, fields, encoded) { return "index-bucket:" + canonical([collection, fields]) + ":" + encoded; }
+  function bucketOf(fields, value) {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+    if (!fields.every(function (field) { return own(value, field); })) return null;
+    return canonical(fields.length === 1 ? value[fields[0]] : fields.map(function (field) { return value[field]; }));
+  }
+  // The [collection, fields] JSON that starts a bucket dependency, or null.
+  function bucketSpec(dep) {
+    if (dep.indexOf("index-bucket:") !== 0) return null;
+    var text = dep.slice(13), depth = 0, quoted = false, escaped = false;
+    for (var index = 0; index < text.length; index++) {
+      var char = text[index];
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (char === "\\") escaped = true;
+        else if (char === '"') quoted = false;
+      } else if (char === '"') quoted = true;
+      else if (char === "[") depth++;
+      else if (char === "]" && --depth === 0) {
+        try { return JSON.parse(text.slice(0, index + 1)); } catch (error) { return null; }
+      }
+    }
+    return null;
+  }
   // Staged maps retain unchanged immutable values by reference. In particular,
   // finalization need not serialize every untouched source, cell, and bundle.
   function equal(a, b) { return a === b || canonical(a) === canonical(b); }
@@ -416,6 +441,13 @@
         reverse.get(dep).add(id);
       });
     });
+    var bucketFields = new Map();
+    reverse.forEach(function (_, dep) {
+      var spec = bucketSpec(dep);
+      if (!spec) return;
+      if (!bucketFields.has(spec[0])) bucketFields.set(spec[0], new Map());
+      bucketFields.get(spec[0]).set(canonical(spec[1]), spec[1]);
+    });
 
     var touched = new Set();
     list("writes").forEach(function (write) {
@@ -443,8 +475,15 @@
     }
     touched.forEach(function (id) {
       if (base.has(id) === staged.has(id) && (!base.has(id) || equal(base.get(id), staged.get(id)))) return;
+      var collection = JSON.parse(id.slice(7))[0];
       changed.push(id);
-      changed.push(collectionId(JSON.parse(id.slice(7))[0]));
+      changed.push(collectionId(collection));
+      (bucketFields.get(collection) || new Map()).forEach(function (fields) {
+        var before = base.has(id) ? bucketOf(fields, base.get(id)) : null;
+        var after = staged.has(id) ? bucketOf(fields, staged.get(id)) : null;
+        if (before !== null) changed.push(bucketId(collection, fields, before));
+        if (after !== null && after !== before) changed.push(bucketId(collection, fields, after));
+      });
     });
     for (var cursor = 0; cursor < changed.length; cursor++) {
       var readers = reverse.get(changed[cursor]);
@@ -586,7 +625,9 @@
           if (ref.fields.length > 1 && (!Array.isArray(expected) || expected.length !== ref.fields.length)) {
             throw failure("INVALID_REFERENCE", "Composite query value must match the index field count");
           }
-          var rows = scanRows(collection);
+          var rows = collectionRows(collection);
+          countRead(1 + rows.length);
+          observed.add(bucketId(collection, ref.fields, canonical(expected)));
           var result = [];
           rows.forEach(function (row) {
             if (row.value === null || typeof row.value !== "object" || Array.isArray(row.value)) return;

@@ -47,10 +47,17 @@ impl Topology {
 #[derive(Clone, Debug)]
 pub(super) struct Cell {
     deps: Arc<[String]>,
+    // Parsed `scan:` dependencies, which have no reverse edges.
+    scans: Arc<[windows::Window]>,
+    // The collection and fields of each `index-bucket:` dependency.
+    buckets: Arc<[(String, Vec<String>)]>,
     error: Option<EngineError>,
     bytes: usize,
     clock: bool,
 }
+
+/// Scan windows by collection, then by index fields (`None` orders by key).
+type ScanWindows = im::HashMap<String, im::HashMap<Option<Vec<String>>, windows::Windows>>;
 
 #[derive(Clone, Debug)]
 pub(super) struct Root {
@@ -70,6 +77,9 @@ impl Root {
 #[derive(Clone, Debug)]
 pub(crate) struct ReactiveIndex {
     pub(super) reverse: im::HashMap<String, im::HashSet<String>>,
+    scans: ScanWindows,
+    // Equality-queried field sets by collection, with their dependency counts.
+    buckets: im::HashMap<String, im::HashMap<Vec<String>, usize>>,
     pub(super) cells: im::HashMap<String, Arc<Cell>>,
     pub(super) roots: im::OrdMap<String, Arc<Value>>,
     pub(super) root_cells: im::OrdMap<Key, Arc<Root>>,
@@ -94,6 +104,8 @@ impl Default for ReactiveIndex {
     fn default() -> Self {
         Self {
             reverse: im::HashMap::new(),
+            scans: im::HashMap::new(),
+            buckets: im::HashMap::new(),
             cells: im::HashMap::new(),
             roots: im::OrdMap::new(),
             root_cells: im::OrdMap::new(),
@@ -181,6 +193,88 @@ impl ReactiveIndex {
                     members,
                 },
             );
+        }
+    }
+
+    /// Cells whose scan result may change when a row of `collection` changes
+    /// from `previous` to `next`: a row entering, leaving or moving touches
+    /// membership windows at either position; a value alone touches the
+    /// windows of rows returned at its position.
+    pub(super) fn scan_readers(
+        &self,
+        collection: &str,
+        key: &str,
+        previous: Option<&Value>,
+        next: Option<&Value>,
+        readers: &mut Vec<String>,
+    ) {
+        let Some(indexes) = self.scans.get(collection) else {
+            return;
+        };
+        for (fields, windows) in indexes {
+            let position = |value: Option<&Value>| {
+                value.and_then(|value| ranges::position(fields.as_deref(), key, value))
+            };
+            match (position(previous), position(next)) {
+                (Some(before), Some(after)) if before == after => {
+                    windows.readers(&before, true, readers);
+                }
+                (before, after) => {
+                    for position in [before, after].into_iter().flatten() {
+                        windows.readers(&position, false, readers);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Field sets that derivations query by equality in `collection`.
+    pub(super) fn bucket_fields(&self, collection: &str) -> impl Iterator<Item = &Vec<String>> {
+        self.buckets
+            .get(collection)
+            .into_iter()
+            .flat_map(|fields| fields.keys())
+    }
+
+    fn change_buckets(&mut self, buckets: &[(String, Vec<String>)], insert: bool) {
+        for (collection, fields) in buckets {
+            let specs = self.buckets.entry(collection.clone()).or_default();
+            let count = specs.get(fields).copied().unwrap_or(0);
+            let count = if insert {
+                count + 1
+            } else {
+                count.saturating_sub(1)
+            };
+            if count == 0 {
+                specs.remove(fields);
+                if specs.is_empty() {
+                    self.buckets.remove(collection);
+                }
+            } else {
+                specs.insert(fields.clone(), count);
+            }
+        }
+    }
+
+    fn change_scans(&mut self, scans: &[windows::Window], reader: &str, insert: bool) {
+        if scans.is_empty() {
+            return;
+        }
+        let reader: Arc<str> = reader.into();
+        for window in scans {
+            let indexes = self.scans.entry(window.collection.clone()).or_default();
+            let windows = indexes.entry(window.fields.clone()).or_default();
+            if insert {
+                windows.insert(window, &reader);
+            } else {
+                windows.remove(window, &reader);
+                if windows.is_empty() {
+                    indexes.remove(&window.fields);
+                    if indexes.is_empty() {
+                        self.scans.remove(&window.collection);
+                    }
+                }
+            }
         }
     }
 
@@ -280,6 +374,18 @@ impl ReactiveIndex {
                 })
                 .unwrap_or_default()
                 .into();
+            // validate_cell rejected any scan dependency that does not parse.
+            let scans: Arc<[windows::Window]> = deps
+                .iter()
+                .filter(|dep| windows::Window::is_dependency(dep))
+                .filter_map(|dep| windows::Window::parse(dep))
+                .collect::<Vec<_>>()
+                .into();
+            let buckets: Arc<[(String, Vec<String>)]> = deps
+                .iter()
+                .filter_map(|dep| dependencies::bucket_spec(dep))
+                .collect::<Vec<_>>()
+                .into();
             // Includes persistent depth certificates and pending append IDs,
             // as well as the previous reverse-edge and traversal reservations.
             let bytes = 384_usize
@@ -291,6 +397,8 @@ impl ReactiveIndex {
                 );
             Arc::new(Cell {
                 deps,
+                scans,
+                buckets,
                 error,
                 bytes,
                 clock,
@@ -325,7 +433,12 @@ impl ReactiveIndex {
         if let Some(old) = old {
             self.bytes = self.bytes.saturating_sub(old.bytes);
             self.clock_readers -= usize::from(old.clock);
+            self.change_scans(&old.scans, id, false);
+            self.change_buckets(&old.buckets, false);
             for dep in old.deps.iter() {
+                if windows::Window::is_dependency(dep) {
+                    continue;
+                }
                 if let Some(readers) = self.reverse.get_mut(dep) {
                     readers.remove(id);
                     if readers.is_empty() {
@@ -338,7 +451,13 @@ impl ReactiveIndex {
         if let Some(new) = new {
             self.bytes = self.bytes.saturating_add(new.bytes);
             self.clock_readers += usize::from(new.clock);
-            for dep in new.deps.iter() {
+            self.change_scans(&new.scans, id, true);
+            self.change_buckets(&new.buckets, true);
+            for dep in new
+                .deps
+                .iter()
+                .filter(|dep| !windows::Window::is_dependency(dep))
+            {
                 self.reverse
                     .entry(dep.clone())
                     .or_default()
@@ -462,10 +581,13 @@ fn validate_cell(
             "Malformed stored cell outcome",
         ));
     }
-    if value["deps"]
-        .as_array()
-        .is_none_or(|deps| deps.iter().any(|dep| !dep.is_string()))
-    {
+    if value["deps"].as_array().is_none_or(|deps| {
+        deps.iter().any(|dep| {
+            dep.as_str().is_none_or(|dep| {
+                windows::Window::is_dependency(dep) && windows::Window::parse(dep).is_none()
+            })
+        })
+    }) {
         return Err(EngineError::new(
             "INPUT_INVALID",
             "Malformed stored cell dependencies",
