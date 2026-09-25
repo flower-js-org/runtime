@@ -18,10 +18,64 @@ mod flight;
 mod profile;
 
 const WASM: &[u8] = include_bytes!("../../../vendor/quickjs-ng/quickjs.wasm");
-const WASM_HASH: &str = "a48ba3c7f53381bd9129c1bb5b64623ab3fa89a608df172b67acaf8993b2bbf7";
+const WASM_HASH: &str = "099925f68919e38c315a012090db3d971cf2f2383ba081061b0934e51bdf1b68";
 const MAX_CACHE_BYTES: usize = 96 * 1024 * 1024;
 const MAX_CACHE_ENTRIES: usize = 8;
 const TABLE_ELEMENTS: usize = 4096;
+
+/// What a bundle deploys: JavaScript for the pinned QuickJS guest, or a guest
+/// module of its own.
+#[derive(Clone, Copy)]
+pub(super) enum Source<'a> {
+    JavaScript(&'a str),
+    Module(&'a [u8]),
+}
+
+impl<'a> Source<'a> {
+    /// Borrow a bundle's code, decoding a module into `decoded`.
+    pub(super) fn of(bundle: &'a Value, decoded: &'a mut Vec<u8>) -> Result<Self> {
+        match (bundle.get("javascript"), bundle.get("wasm")) {
+            (Some(Value::String(javascript)), None) => Ok(Self::JavaScript(javascript)),
+            (None, Some(Value::String(encoded))) => {
+                use base64::Engine as _;
+                *decoded = base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .context("bundle.wasm must be base64")?;
+                Ok(Self::Module(decoded))
+            }
+            _ => anyhow::bail!("bundle must carry either a javascript or a wasm string"),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::JavaScript(javascript) => javascript.len(),
+            Self::Module(wasm) => wasm.len(),
+        }
+    }
+
+    /// Exact content identity. For JavaScript it includes the guest, sandbox
+    /// and runner; no user-supplied hash or native code is ever trusted.
+    fn key(&self) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        let parts: &[&[u8]] = match self {
+            Self::JavaScript(javascript) => &[
+                WASM_HASH.as_bytes(),
+                b"checked-shadow-stack-v1",
+                super::super::SANDBOX.as_bytes(),
+                super::super::CELL_RUNNER.as_bytes(),
+                super::super::MANIFEST.as_bytes(),
+                javascript.as_bytes(),
+            ],
+            Self::Module(wasm) => &[b"guest-module-v1", wasm],
+        };
+        for part in parts {
+            hash.update(part.len().to_le_bytes());
+            hash.update(part);
+        }
+        hash.finalize().into()
+    }
+}
 
 pub(in crate::evaluator) struct Prepared {
     pub(super) pre: InstancePre<Host>,
@@ -232,11 +286,8 @@ impl Runtime {
         {
             return Ok(prepared);
         }
-        let source = bundle
-            .get("javascript")
-            .and_then(Value::as_str)
-            .context("bundle.javascript must be a string")?;
-        let prepared = self.prepare(source, shared)?;
+        let mut decoded = Vec::new();
+        let prepared = self.prepare_source(Source::of(bundle, &mut decoded)?, shared)?;
         self.cache
             .lock()
             .map_err(|_| anyhow::anyhow!("Wasm cache lock poisoned"))?
@@ -245,25 +296,20 @@ impl Runtime {
     }
 
     pub(super) fn prepare(&self, bundle: &str, shared: Arc<Limits>) -> Result<Arc<Prepared>> {
+        self.prepare_source(Source::JavaScript(bundle), shared)
+    }
+
+    pub(super) fn prepare_source(
+        &self,
+        source: Source<'_>,
+        shared: Arc<Limits>,
+    ) -> Result<Arc<Prepared>> {
         ensure!(
-            bundle.len() <= crate::evaluator::config::settings()?.bundle_max_bytes,
+            source.len() <= crate::evaluator::config::settings()?.bundle_max_bytes,
             "bundle exceeds FLOWER_BUNDLE_MAX_BYTES"
         );
         shared.check()?;
-        // Exact content identity includes the ABI, sandbox and runner. No user
-        // supplied hash or serialized native code is ever trusted for this cache.
-        let mut hash = Sha256::new();
-        for part in [
-            WASM_HASH,
-            "checked-shadow-stack-v1",
-            super::super::SANDBOX,
-            super::super::CELL_RUNNER,
-            bundle,
-        ] {
-            hash.update(part.len().to_le_bytes());
-            hash.update(part.as_bytes());
-        }
-        let key: [u8; 32] = hash.finalize().into();
+        let key = source.key();
         loop {
             if let Some(prepared) = self.cached(&key)? {
                 return Ok(prepared);
@@ -290,8 +336,9 @@ impl Runtime {
                         leader.publish(prepared.clone());
                         return Ok(prepared);
                     }
-                    let prepared = profile::observe("total", || {
-                        self.prepare_uncached(bundle, shared.clone())
+                    let prepared = profile::observe("total", || match source {
+                        Source::JavaScript(bundle) => self.prepare_uncached(bundle, shared.clone()),
+                        Source::Module(wasm) => self.prepare_module(wasm, shared.clone()),
                     })?;
                     let prepared = Arc::new(prepared);
                     let mut cache = self
@@ -337,13 +384,8 @@ impl Runtime {
         let bytecode = profile::observe("bytecode_compile", || abi.compile(&mut store, bundle))?;
         let prepared = if bundle.starts_with(STATIC_INIT_MARKER) {
             // Explicit opt-in promises initialization independent of invocation.
-            // Detect direct reads as well as actual DB calls during construction.
-            abi.discard(&mut store, r#"for (const key of ['__name','__argsJson','__kind']) Object.defineProperty(this,key,{configurable:true,get(){throw new Error('Static bundle initialization cannot access invocation bindings')}});"#)?;
+            // Database calls fail here: no host callback is bound yet.
             profile::observe("static_initialize", || abi.bytecode(&mut store, &bytecode))?;
-            abi.discard(
-                &mut store,
-                "for (const key of ['__name','__argsJson','__kind']) delete this[key];",
-            )?;
             let memory_bytes = abi.memory.data_size(&store);
             tracing::debug!(target: "flower::evaluator_profile", guest_memory_bytes = memory_bytes,
                 initialized_snapshot = memory_bytes <= 8 * 1024 * 1024,
@@ -407,6 +449,48 @@ impl Runtime {
     }
 }
 
+impl Runtime {
+    /// Snapshot a deployed guest after its optional flower_init, as a pristine
+    /// image of its own. Guest modules run without the QuickJS shadow-stack
+    /// instrumentation: their memory is reset after every call regardless.
+    fn prepare_module(&self, wasm: &[u8], shared: Arc<Limits>) -> Result<Prepared> {
+        let settings = crate::evaluator::config::settings()?;
+        super::module::validate(wasm, settings.guest_memory_bytes)?;
+        let exported = super::module::export_globals(wasm)?;
+        let mut wizer = Wizer::new();
+        wizer.init_func("flower_init");
+        let (context, instrumented) = wizer.instrument(&exported)?;
+        let module = Module::new(&self.engine, instrumented)?;
+        let pre = host::linker(&self.engine)?.instantiate_pre(&module)?;
+        let mut store = store(&self.engine, shared.clone(), None);
+        let instance = pre.instantiate(&mut store).map_err(|error| error.context("Wasm instance allocation failed; check FLOWER_WASM_POOL_SLOTS and FLOWER_GUEST_MEMORY_BYTES"))?;
+        let abi = Abi::load(&mut store, instance)?;
+        store.data_mut().abi = Some(abi.clone());
+        if let Ok(init) = instance.get_typed_func::<(), i32>(&mut store, "flower_init") {
+            ensure!(init.call(&mut store, ())? == 0, "guest flower_init failed");
+        }
+        let input_buffer = abi.reserve_input(&mut store)?;
+        let memory_bytes = abi.memory.data_size(&store);
+        let bytes = futures_executor::block_on(wizer.snapshot(
+            &context,
+            &mut Snapshot {
+                store: &mut store,
+                instance,
+            },
+        ))?;
+        drop(store);
+        shared.check()?;
+        let (pre, compiled_bytes, reset_globals) = compile_image(&self.engine, &bytes)?;
+        Prepared::new(
+            pre,
+            None,
+            input_buffer,
+            &reset_globals,
+            bytes.len() + memory_bytes + compiled_bytes,
+        )
+    }
+}
+
 fn initialize(
     engine: &Engine,
     pre: &InstancePre<Host>,
@@ -431,7 +515,11 @@ fn initialize(
     // the returned function privately and removes both temporary setup globals.
     abi.discard(
         &mut store,
-        &format!("__flowerSetRunner({});", super::super::CELL_RUNNER),
+        &format!(
+            "__flowerSetRunner(...{},{});",
+            super::super::CELL_RUNNER,
+            super::super::MANIFEST
+        ),
     )?;
     Ok((store, instance, abi))
 }

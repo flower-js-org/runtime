@@ -1,18 +1,23 @@
 use super::Host;
+use crate::evaluator::wire;
 use anyhow::{Context, Result, bail, ensure};
+#[cfg(test)]
+use std::sync::Arc;
 use wasmtime::{AsContextMut, Instance, Memory, Module, ModuleExport, Store, TypedFunc};
 
-type InvokeParameters = (i32, i32, i32, i32, i32, i32, i32, i32);
+type InvokeParameters = (i32, i32, i32, i32, i32);
 
 /// The guest exposes owned byte buffers, never interpreter values or pointers to
-/// its runtime. One invocation binds inputs and runs the callback inside C.
+/// its runtime. Values cross as the wire encoding described in GUEST_ABI.md.
 #[derive(Clone)]
 pub(super) struct Abi {
     pub(super) memory: Memory,
     instance: Instance,
     alloc: TypedFunc<i32, i32>,
-    free: TypedFunc<i32, ()>,
+    /// Only the QuickJS guest's image-building exports return owned buffers.
+    free: Option<TypedFunc<i32, ()>>,
     invoke: TypedFunc<InvokeParameters, i64>,
+    manifest: TypedFunc<(), i64>,
 }
 
 /// Export identities belong to a compiled module, while all actual handles
@@ -20,8 +25,9 @@ pub(super) struct Abi {
 pub(super) struct Exports {
     memory: ModuleExport,
     alloc: ModuleExport,
-    free: ModuleExport,
+    free: Option<ModuleExport>,
     invoke: ModuleExport,
+    manifest: ModuleExport,
 }
 
 impl Exports {
@@ -34,8 +40,9 @@ impl Exports {
         Ok(Self {
             memory: export("memory")?,
             alloc: export("flower_alloc")?,
-            free: export("flower_free")?,
+            free: module.get_export_index("flower_free"),
             invoke: export("flower_invoke")?,
+            manifest: export("flower_manifest")?,
         })
     }
 }
@@ -105,8 +112,9 @@ impl Abi {
                 .get_memory(&mut *store, "memory")
                 .context("memory")?,
             alloc: f!("flower_alloc"),
-            free: f!("flower_free"),
+            free: instance.get_typed_func(&mut *store, "flower_free").ok(),
             invoke: f!("flower_invoke"),
+            manifest: f!("flower_manifest"),
         })
     }
 
@@ -131,8 +139,18 @@ impl Abi {
                 .and_then(|export| export.into_memory())
                 .context("cached guest memory")?,
             alloc: f!(alloc),
-            free: f!(free),
+            free: match &exports.free {
+                Some(free) => Some(
+                    instance
+                        .get_module_export(&mut *store, free)
+                        .and_then(|export| export.into_func())
+                        .context("cached guest function free")?
+                        .typed(&*store)?,
+                ),
+                None => None,
+            },
             invoke: f!(invoke),
+            manifest: f!(manifest),
         })
     }
 
@@ -151,6 +169,7 @@ impl Abi {
 
     /// Copy before calling guest code again: both reentrant host callbacks and
     /// allocator growth may move or mutate linear memory.
+    #[cfg(test)]
     pub(super) fn string<S: AsContextMut<Data = Host>>(
         &self,
         s: &S,
@@ -169,27 +188,36 @@ impl Abi {
         Ok(std::str::from_utf8(bytes)?.to_owned())
     }
 
-    /// Decode while the guest is suspended, finishing the memory borrow before
-    /// a host callback can recursively enter another guest or allocate a reply.
-    /// The returned JSON owns its strings and never borrows guest memory.
-    pub(super) fn json<S: AsContextMut<Data = Host>>(
+    /// Decode host-call arguments while the guest is suspended, finishing the
+    /// memory borrow before a host callback can recursively enter another
+    /// guest or allocate a reply. Each argument is a root value; malformed
+    /// arguments are the caller's business error, not a trap.
+    pub(super) fn arguments<S: AsContextMut<Data = Host>>(
         &self,
         s: &S,
         pointer: i32,
         length: i32,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<Result<Vec<serde_json::Value>, wire::Invalid>> {
         let size = length as u32 as usize;
         ensure!(
             size <= super::max_json_bytes()?,
-            "guest string exceeds limit"
+            "guest arguments exceed FLOWER_RESULT_MAX_BYTES"
         );
         let start = pointer as u32 as usize;
         let bytes = self
             .memory
             .data(s)
-            .get(start..start.checked_add(size).context("string overflow")?)
-            .context("guest string bounds")?;
-        super::parse_json(std::str::from_utf8(bytes)?)
+            .get(start..start.checked_add(size).context("arguments overflow")?)
+            .context("guest arguments bounds")?;
+        let mut decoder = wire::Decoder::new(bytes);
+        let mut arguments = Vec::new();
+        while !decoder.is_empty() {
+            match decoder.value() {
+                Ok(value) => arguments.push(value),
+                Err(invalid) => return Ok(Err(invalid)),
+            }
+        }
+        Ok(Ok(arguments))
     }
 
     /// Packed results own a malloc buffer. Bit 63 marks a guest exception; the
@@ -215,7 +243,7 @@ impl Abi {
             Ok(bytes.to_vec())
         })();
         if pointer != 0 {
-            self.free.call(&mut *s, pointer)?;
+            self.free()?.call(&mut *s, pointer)?;
         }
         let bytes = copied?;
         if bits >> 63 != 0 {
@@ -235,8 +263,12 @@ impl Abi {
         // After a trap discard the entire Store; do not reenter potentially
         // interrupted guest allocator state merely to release this allocation.
         let packed = function.call(&mut *s, (pointer, i32::try_from(bytes.len())?))?;
-        self.free.call(&mut *s, pointer)?;
+        self.free()?.call(&mut *s, pointer)?;
         self.result(s, packed, maximum)
+    }
+
+    fn free(&self) -> Result<&TypedFunc<i32, ()>> {
+        self.free.as_ref().context("guest has no flower_free")
     }
 
     pub(super) fn discard(&self, s: &mut Store<Host>, code: &str) -> Result<()> {
@@ -290,21 +322,14 @@ impl Abi {
     pub(super) fn invocation(
         &self,
         s: &mut Store<Host>,
+        kind: i32,
         name: &str,
-        args: &str,
-        kind: &str,
-        bytecode: Option<&[u8]>,
+        args: &[u8],
         input_buffer: InputBuffer,
     ) -> Result<Invocation> {
-        let inputs = [
-            name.as_bytes(),
-            args.as_bytes(),
-            kind.as_bytes(),
-            bytecode.unwrap_or_default(),
-        ];
-        let size = inputs
-            .iter()
-            .try_fold(0usize, |total, input| total.checked_add(input.len() + 1))
+        let size = name
+            .len()
+            .checked_add(args.len())
             .context("invocation input overflow")?;
         let pointer = if size <= InputBuffer::CAPACITY {
             input_buffer.pointer
@@ -319,29 +344,20 @@ impl Abi {
             .data_mut(&mut *s)
             .get_mut(start..start.checked_add(size).context("input overflow")?)
             .context("guest input bounds")?;
-        let mut fields = [0i32; 8];
-        let mut offset = 0;
-        for (index, input) in inputs.into_iter().enumerate() {
-            fields[index * 2] = (start + offset) as u32 as i32;
-            fields[index * 2 + 1] = i32::try_from(input.len())?;
-            memory[offset..offset + input.len()].copy_from_slice(input);
-            memory[offset + input.len()] = 0;
-            offset += input.len() + 1;
-        }
-        if bytecode.is_none() {
-            fields[6] = 0;
-        }
+        memory[..name.len()].copy_from_slice(name.as_bytes());
+        memory[name.len()..].copy_from_slice(args);
         Ok(Invocation {
             parameters: (
-                fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6],
-                fields[7],
+                kind,
+                pointer,
+                i32::try_from(name.len())?,
+                (start + name.len()) as u32 as i32,
+                i32::try_from(args.len())?,
             ),
         })
     }
     /// This callback is the last guest execution before its Store is discarded
-    /// or fully restored. Its input and retained QuickJS CString disappear with
-    /// that heap. Unlike
-    /// setup results, invocation result pointers must never enter flower_free.
+    /// or fully restored. Its input and outcome disappear with that heap.
     pub(super) fn run_once(
         &self,
         s: &mut Store<Host>,
@@ -350,40 +366,48 @@ impl Abi {
         Ok(CallbackResult(self.invoke.call(s, invocation.parameters)?))
     }
 
-    /// Parse the suspended callback's result directly into owned Rust values.
+    /// The guest's raw manifest, computed without host capabilities.
+    pub(super) fn manifest(&self, s: &mut Store<Host>) -> Result<wire::Outcome> {
+        let result = CallbackResult(self.manifest.call(&mut *s, ())?);
+        self.outcome(s, result)
+    }
+
+    /// Decode the suspended callback's outcome directly into owned Rust values.
     /// No guest entry or allocator call may occur before decoding completes.
-    /// Setup eval/compile/load keep their separate copy-and-free result path.
-    pub(super) fn callback_result(
-        &self,
-        s: &Store<Host>,
-        result: CallbackResult,
-    ) -> Result<serde_json::Value> {
+    /// A malformed outcome is the callback's INVALID_VALUE failure.
+    pub(super) fn outcome(&self, s: &Store<Host>, result: CallbackResult) -> Result<wire::Outcome> {
         let bits = result.0 as u64;
         let pointer = bits as u32 as usize;
-        let length = ((bits >> 32) & 0x7fff_ffff) as usize;
+        let length = (bits >> 32) as usize;
         ensure!(
             length <= super::max_json_bytes()?,
-            "guest result exceeds limit"
+            "guest result exceeds FLOWER_RESULT_MAX_BYTES"
         );
-        ensure!(pointer != 0 || length == 0, "null guest result");
         let bytes = self
             .memory
             .data(s)
             .get(pointer..pointer.checked_add(length).context("result overflow")?)
             .context("guest result bounds")?;
-        if bits >> 63 != 0 {
-            bail!("guest: {}", String::from_utf8_lossy(bytes));
-        }
-        let encoded = std::str::from_utf8(bytes).context("guest result is not UTF-8")?;
-        super::parse_json(encoded).context("invalid guest result JSON")
+        Ok(
+            wire::outcome(bytes).unwrap_or_else(|invalid| wire::Outcome::Failure {
+                code: "INVALID_VALUE".into(),
+                message: invalid.0.into(),
+                details: None,
+            }),
+        )
     }
 
+    /// The guest owns the returned buffer and frees it after decoding.
     pub(super) fn response<S: AsContextMut<Data = Host>>(
         &self,
         s: &mut S,
-        response: &str,
+        response: &[u8],
     ) -> Result<i64> {
-        let pointer = self.bytes(s, response.as_bytes())?;
+        let pointer = self.alloc.call(&mut *s, i32::try_from(response.len())?)?;
+        ensure!(pointer != 0, "guest allocation failed");
+        let start = pointer as u32 as usize;
+        super::dirty::prepare_write(s, start, response.len())?;
+        self.memory.write(&mut *s, start, response)?;
         Ok(((response.len() as u64) << 32 | pointer as u32 as u64) as i64)
     }
 }
@@ -393,11 +417,21 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn fresh() -> (Store<Host>, Abi, Arc<super::super::Prepared>) {
+        let shared = super::super::tests::limits();
+        let runtime = super::super::cache::runtime().unwrap();
+        let prepared = super::super::prepare("", shared.clone()).unwrap();
+        let mut store = super::super::store(&runtime.engine, shared, None);
+        let instance = prepared.pre.instantiate(&mut store).unwrap();
+        let abi = Abi::load_cached(&mut store, instance, &prepared.exports).unwrap();
+        (store, abi, prepared)
+    }
+
     #[test]
     fn invocation_buffer_has_exact_boundary_and_instance_private_bytes() {
         let runtime = super::super::cache::runtime().unwrap();
         let prepared = super::super::prepare("", super::super::tests::limits()).unwrap();
-        let prefix = "test".len() + "query".len() + 4;
+        let prefix = "test".len();
         for length in [
             0,
             InputBuffer::CAPACITY - prefix,
@@ -408,49 +442,28 @@ mod tests {
                 super::super::store(&runtime.engine, super::super::tests::limits(), None);
             let instance = prepared.pre.instantiate(&mut store).unwrap();
             let abi = Abi::load_cached(&mut store, instance, &prepared.exports).unwrap();
-            let args = "x".repeat(length);
+            let args = vec![0xa5; length];
             let invocation = abi
-                .invocation(
-                    &mut store,
-                    "test",
-                    &args,
-                    "query",
-                    None,
-                    prepared.input_buffer,
-                )
+                .invocation(&mut store, 3, "test", &args, prepared.input_buffer)
                 .unwrap();
-            let (
-                name,
-                name_length,
-                arguments,
-                argument_length,
-                kind,
-                kind_length,
-                bytecode,
-                bytecode_length,
-            ) = invocation.parameters;
+            let (kind, name, name_length, arguments, argument_length) = invocation.parameters;
+            assert_eq!(kind, 3);
             assert_eq!(
                 name == prepared.input_buffer.pointer,
                 length + prefix <= InputBuffer::CAPACITY
             );
             assert_eq!(abi.string(&store, name, name_length, 64).unwrap(), "test");
-            assert_eq!(
-                abi.string(&store, arguments, argument_length, 16384)
-                    .unwrap(),
-                args
-            );
-            assert_eq!(abi.string(&store, kind, kind_length, 64).unwrap(), "query");
-            assert_eq!((bytecode, bytecode_length), (0, 0));
-            assert_eq!(abi.memory.data(&store)[arguments as usize + length], 0);
+            assert_eq!(arguments, name + name_length);
+            let bytes = |store: &Store<Host>| {
+                let start = arguments as usize;
+                abi.memory.data(store)[start..start + argument_length as usize].to_vec()
+            };
+            assert_eq!(bytes(&store), args);
 
             // Allocator activity must not reclaim the reserved buffer. A second
             // live clone must still expose the pristine bytes, not this input.
             abi.bytes(&mut store, &[0xff; 8192]).unwrap();
-            assert_eq!(
-                abi.string(&store, arguments, argument_length, 16384)
-                    .unwrap(),
-                args
-            );
+            assert_eq!(bytes(&store), args);
             let mut pristine =
                 super::super::store(&runtime.engine, super::super::tests::limits(), None);
             let instance = prepared.pre.instantiate(&mut pristine).unwrap();
@@ -490,109 +503,97 @@ mod tests {
     }
 
     #[test]
-    fn disposable_callback_results_keep_errors_bounds_and_owned_values() {
-        let shared = super::super::tests::limits();
-        let runtime = super::super::cache::runtime().unwrap();
-        let prepared = super::super::prepare("", shared.clone()).unwrap();
-        let mut store = super::super::store(&runtime.engine, shared, None);
-        let instance = prepared.pre.instantiate(&mut store).unwrap();
-        let abi = Abi::load_cached(&mut store, instance, &prepared.exports).unwrap();
-        let packed = |pointer: i32, length: usize, error: bool| {
-            CallbackResult(
-                (pointer as u32 as u64 | ((length as u64) << 32) | ((error as u64) << 63)) as i64,
-            )
+    fn callback_outcomes_are_owned_bounded_and_malformed_ones_are_invalid_values() {
+        let (mut store, abi, _prepared) = fresh();
+        let packed = |pointer: i32, length: usize| {
+            CallbackResult((pointer as u32 as u64 | ((length as u64) << 32)) as i64)
+        };
+        let value = json!({"text": "a\u{0}b🌸", "nested": [true, null, 1.5]});
+        let success = wire::success(&value).unwrap();
+        let pointer = abi.bytes(&mut store, &success).unwrap();
+        let wire::Outcome::Success(decoded) =
+            abi.outcome(&store, packed(pointer, success.len())).unwrap()
+        else {
+            panic!("expected success");
         };
 
-        let input = r#"{"ok":true,"value":{"text":"a\u0000b🌸","nested":[true,null]}}"#;
-        let pointer = abi.bytes(&mut store, input.as_bytes()).unwrap();
-        let value = abi
-            .callback_result(&store, packed(pointer, input.len(), false))
-            .unwrap();
-
-        let error = b"engine exception";
-        let error_pointer = abi.bytes(&mut store, error).unwrap();
-        assert_eq!(
-            abi.callback_result(&store, packed(error_pointer, error.len(), true))
-                .unwrap_err()
-                .to_string(),
-            "guest: engine exception"
-        );
-        let malformed = abi.bytes(&mut store, &[0xff]).unwrap();
+        let failure = wire::failure("NOPE", "no 🌸", Some(&json!([1])));
+        let pointer = abi.bytes(&mut store, &failure).unwrap();
+        assert!(matches!(
+            abi.outcome(&store, packed(pointer, failure.len())).unwrap(),
+            wire::Outcome::Failure { code, message, details: Some(details) }
+                if code == "NOPE" && message == "no 🌸" && details == json!([1])
+        ));
+        for malformed in [&[][..], &[0, 0x62][..], &[0, 7, 1, 0, 0, 0, 0, 0xd8][..]] {
+            let pointer = abi.bytes(&mut store, malformed).unwrap();
+            assert!(matches!(
+                abi.outcome(&store, packed(pointer, malformed.len())).unwrap(),
+                wire::Outcome::Failure { code, .. } if code == "INVALID_VALUE"
+            ));
+        }
         assert!(
-            abi.callback_result(&store, packed(malformed, 1, false))
-                .unwrap_err()
-                .to_string()
-                .contains("UTF-8")
-        );
-        assert!(
-            abi.callback_result(&store, packed(0, 1, false))
-                .unwrap_err()
-                .to_string()
-                .contains("null guest result")
-        );
-        assert!(
-            abi.callback_result(&store, packed(i32::MAX, 1, false))
+            abi.outcome(&store, packed(i32::MAX, 1))
                 .unwrap_err()
                 .to_string()
                 .contains("bounds")
         );
         assert!(
-            abi.callback_result(
+            abi.outcome(
                 &store,
-                packed(pointer, super::super::max_json_bytes().unwrap() + 1, false)
+                packed(pointer, super::super::max_json_bytes().unwrap() + 1)
             )
             .unwrap_err()
             .to_string()
-            .contains("exceeds limit")
-        );
-        let trailing = abi.bytes(&mut store, b"{}[]").unwrap();
-        assert!(
-            abi.callback_result(&store, packed(trailing, 4, false))
-                .unwrap_err()
-                .to_string()
-                .contains("invalid guest result JSON")
+            .contains("exceeds")
         );
 
         // All invocation buffers are discarded together; decoded strings must
         // remain valid after the Store and its entire linear memory disappear.
         drop(store);
-        assert_eq!(
-            value,
-            json!({"ok":true,"value":{"text":"a\0b🌸","nested":[true,null]}})
-        );
+        assert_eq!(decoded, value);
     }
 
     #[test]
-    fn borrowed_guest_json_is_owned_before_memory_is_reused_and_rejects_bad_spans() {
-        let shared = super::super::tests::limits();
-        let runtime = super::super::cache::runtime().unwrap();
-        let prepared = super::super::prepare("", shared.clone()).unwrap();
-        let mut store = super::super::store(&runtime.engine, shared, None);
-        let instance = prepared.pre.instantiate(&mut store).unwrap();
-        let abi = Abi::load_cached(&mut store, instance, &prepared.exports).unwrap();
-        let input = r#"["a\u0000b",{"😀":"é","nested":[true,null,1]}]"#;
-        let pointer = abi.bytes(&mut store, input.as_bytes()).unwrap();
-        let value = abi.json(&store, pointer, input.len() as i32).unwrap();
+    fn host_call_arguments_are_owned_root_values_and_reject_bad_spans() {
+        let (mut store, abi, _prepared) = fresh();
+        let mut input = wire::encode(&json!("a\u{0}b")).unwrap();
+        input.extend(wire::encode(&json!({"😀": "é", "nested": [true, null, 1]})).unwrap());
+        let pointer = abi.bytes(&mut store, &input).unwrap();
+        let arguments = abi
+            .arguments(&store, pointer, input.len() as i32)
+            .unwrap()
+            .unwrap();
         super::super::dirty::prepare_write(&mut store, pointer as usize, 1).unwrap();
         abi.memory
             .write(&mut store, pointer as usize, &[0xff])
             .unwrap();
-        assert_eq!(value, json!(["a\0b", {"😀":"é", "nested":[true,null,1]}]));
-        assert!(
-            abi.json(&store, pointer, input.len() as i32).is_err(),
-            "malformed UTF-8"
+        assert_eq!(
+            arguments,
+            [
+                json!("a\u{0}b"),
+                json!({"😀": "é", "nested": [true, null, 1]})
+            ]
+        );
+        assert_eq!(
+            abi.arguments(&store, pointer, input.len() as i32)
+                .unwrap()
+                .unwrap_err(),
+            wire::Invalid("unknown tag"),
+            "malformed arguments are a business error"
         );
         assert!(
-            abi.json(&store, i32::MAX, 1).is_err(),
+            abi.arguments(&store, pointer, 0)
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            abi.arguments(&store, i32::MAX, 1).is_err(),
             "out-of-bounds pointer"
         );
         assert!(
-            abi.json(&store, pointer, -1).is_err(),
+            abi.arguments(&store, pointer, -1).is_err(),
             "unsigned oversized span"
         );
-        abi.free.call(&mut store, pointer).unwrap();
-        let pointer = abi.bytes(&mut store, b"{}[]").unwrap();
-        assert!(abi.json(&store, pointer, 4).is_err(), "trailing JSON input");
-        abi.free.call(&mut store, pointer).unwrap();
     }
 }

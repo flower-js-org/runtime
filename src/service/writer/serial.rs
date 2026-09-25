@@ -125,9 +125,6 @@ impl Batch {
                 observability::stage("blocking_queue", queued.elapsed(), "serial_batch");
             }
             let started = telemetry.then(Instant::now);
-            // This guard stays on the blocking worker's OS thread across the
-            // whole serial batch; no idle guest survives cancellation/unwind.
-            let _recycle = crate::evaluator::wasm_recycle_scope();
             // Public serial calls have no asynchronous authorization evaluator.
             // The shared guards can still wait for the per-app evaluation gate;
             // blocking here never occupies a Tokio scheduler worker.

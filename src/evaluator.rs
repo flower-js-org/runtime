@@ -1,9 +1,13 @@
 pub mod config;
 #[cfg(test)]
 mod differential;
+#[cfg(test)]
 mod json_order;
+mod manifest;
 #[cfg(test)]
 mod oracle;
+#[cfg(test)]
+mod perf_tests;
 mod profile;
 pub(crate) mod rust_engine;
 pub(crate) mod staging;
@@ -12,16 +16,7 @@ pub use rust_engine::{DependencyCertificate, MutationCertificate};
 #[cfg(test)]
 mod transactions_tests;
 mod wasm;
-
-/// Reuse resident sandbox storage only inside a synchronous blocking batch.
-/// Each callback still starts from the exact pristine guest image.
-pub(crate) fn wasm_recycle_scope() -> impl Drop {
-    wasm::recycle_scope()
-}
-
-pub(crate) fn clear_wasm_recycle_idle() {
-    wasm::clear_recycle_idle();
-}
+mod wire;
 
 use std::{
     collections::BTreeMap,
@@ -132,15 +127,12 @@ pub struct MaintenanceMethod {
     pub on_error: Option<HttpMethod>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 struct Manifest {
     http: BTreeMap<String, HttpMethod>,
     maintenance: Option<MaintenanceMethod>,
-    #[serde(default)]
     authorize: Option<AuthorizationMethod>,
-    #[serde(default)]
     schema: rust_engine::Schema,
-    #[serde(default)]
     keys: Vec<Value>,
 }
 
@@ -198,12 +190,18 @@ pub fn validate_mutation(mutation: &Value) -> Result<()> {
         );
     }
     if let Some(bundle) = object.get("bundle") {
-        let javascript = bundle
-            .get("javascript")
-            .and_then(Value::as_str)
-            .context("bundle.javascript must be a string")?;
+        let code = match (bundle.get("javascript"), bundle.get("wasm")) {
+            (Some(Value::String(javascript)), None) => javascript.as_bytes().to_vec(),
+            (None, Some(Value::String(encoded))) => {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .context("bundle.wasm must be base64")?
+            }
+            _ => anyhow::bail!("bundle must carry either a javascript or a wasm string"),
+        };
         anyhow::ensure!(
-            javascript.len() <= config::settings()?.bundle_max_bytes,
+            code.len() <= config::settings()?.bundle_max_bytes,
             "bundle exceeds FLOWER_BUNDLE_MAX_BYTES"
         );
         let supplied_hash = bundle
@@ -211,8 +209,8 @@ pub fn validate_mutation(mutation: &Value) -> Result<()> {
             .and_then(Value::as_str)
             .context("bundle.hash must be a SHA-256 hash")?;
         anyhow::ensure!(
-            supplied_hash == hash(javascript.as_bytes()),
-            "bundle hash does not match JavaScript"
+            supplied_hash == hash(&code),
+            "bundle hash does not match its code"
         );
     }
     Ok(())
@@ -433,46 +431,32 @@ fn evaluate_selected(
     // This entire evaluator is synchronous; the guard never crosses an await.
     let span = profile::span(&profile);
     let _entered = span.enter();
-    let bundle = mutation
-        .get("bundle")
-        .or_else(|| data.get("bundle"))
-        .and_then(|bundle| bundle.get("javascript"))
-        .and_then(Value::as_str)
-        .unwrap_or("var __flowerBundle = { default: { definitions: {}, http: {} } };");
     let stored = mutation
         .get("bundle")
         .is_none()
         .then(|| data.get_shared("bundle"))
         .flatten()
-        .filter(|stored| stored.get("javascript").is_some_and(Value::is_string));
+        .filter(|stored| {
+            stored.get("javascript").is_some_and(Value::is_string)
+                || stored.get("wasm").is_some_and(Value::is_string)
+        });
     let prepared = {
         let _timer = profile::timer(&profile, profile::Stage::BundlePrepare);
-        match stored {
-            Some(stored) => wasm::prepare_shared_bundle(stored, limits.clone())?,
-            None => wasm::prepare(bundle, limits.clone())?,
+        match (mutation.get("bundle"), stored) {
+            (Some(bundle), _) => wasm::prepare_bundle(bundle, limits.clone())?,
+            (None, Some(stored)) => wasm::prepare_shared_bundle(stored, limits.clone())?,
+            (None, None) => wasm::prepare(
+                "var __flowerBundle = { default: { definitions: {}, http: {} } };",
+                limits.clone(),
+            )?,
         }
     };
     let manifest = if mutation.get("bundle").is_some() {
         let _timer = profile::timer(&profile, profile::Stage::Manifest);
-        let manifest: Manifest =
-            serde_json::from_str(&wasm::manifest_prepared(&prepared, limits.clone())?)?;
-        for (alias, method) in &manifest.http {
-            anyhow::ensure!(!alias.is_empty(), "HTTP aliases must not be empty");
-            anyhow::ensure!(!method.name.is_empty(), "method names must not be empty");
-        }
-        if let Some(method) = &manifest.maintenance {
-            anyhow::ensure!(
-                !method.name.is_empty(),
-                "maintenance method names must not be empty"
-            );
-            if let Some(on_error) = &method.on_error {
-                anyhow::ensure!(
-                    !on_error.name.is_empty(),
-                    "maintenance error method names must not be empty"
-                );
-            }
-        }
-        Some(manifest)
+        Some(manifest::validate(&wasm::manifest_prepared(
+            &prepared,
+            limits.clone(),
+        )?)?)
     } else {
         None
     };
@@ -607,22 +591,19 @@ impl rust_engine::Executor for CellExecutor {
                     .saturating_sub(read_nanos),
             );
         }
-        let mut envelope = result.map_err(|error| {
+        match result.map_err(|error| {
             rust_engine::EngineError::new("EVALUATION_BUDGET", error.to_string())
-        })?;
-        if envelope["ok"] == true {
-            Ok(envelope["value"].take())
-        } else {
-            let mut error = rust_engine::EngineError::new(
-                envelope["error"]["code"]
-                    .as_str()
-                    .unwrap_or("COMPUTE_ERROR"),
-                envelope["error"]["message"]
-                    .as_str()
-                    .unwrap_or("application callback failed"),
-            );
-            error.details = envelope["error"].get_mut("details").map(Value::take);
-            Err(error)
+        })? {
+            wire::Outcome::Success(value) => Ok(value),
+            wire::Outcome::Failure {
+                code,
+                message,
+                details,
+            } => {
+                let mut error = rust_engine::EngineError::new(code, message);
+                error.details = details;
+                Err(error)
+            }
         }
     }
 }
@@ -661,7 +642,11 @@ const SANDBOX: &str = r#"
 })()
 "#;
 
-const BUNDLE_MANIFEST: &str = r#"
+// Evaluates to the bundle's manifest function for __flowerSetRunner. It checks
+// only what is specific to JavaScript bundles, such as compute functions and
+// definition kinds, and returns the raw manifest of GUEST_ABI.md; the manifest
+// module validates the rest exactly as for any other guest.
+const MANIFEST: &str = r#"
 (() => {
     function record(value, label) {
         if (value === null || typeof value !== 'object' || Array.isArray(value) ||
@@ -674,179 +659,95 @@ const BUNDLE_MANIFEST: &str = r#"
         }
         return value;
     }
-    function consistency(value, query) {
-        if (!Object.hasOwn(value, 'consistency')) return 'linearizable';
-        if (!query || !['linearizable', 'replica-local'].includes(value.consistency))
-            throw new Error('consistency requires a query method and linearizable or replica-local');
-        return value.consistency;
-    }
-    const app = record(typeof __flowerBundle !== 'undefined' && __flowerBundle.default, 'application');
-    if (Object.keys(app).some(key => !['definitions', 'http', 'maintenance', 'collections', 'keys', 'authorize'].includes(key)))
-        throw new Error('Use define({definitions, http, maintenance, collections, keys, authorize}) to declare the application');
-    const keys = app.keys === undefined ? [] : app.keys;
-    if (!Array.isArray(keys)) throw new Error('keys must be an array');
-    const keyNames = new Set();
-    for (const value of keys) {
-        const key = record(value, 'Key declaration');
-        if (Object.keys(key).length !== 4 || Object.keys(key).some(field => !['kind', 'name', 'algorithm', 'usages'].includes(field)) ||
-            key.kind !== 'key' || typeof key.name !== 'string' || !key.name || keyNames.has(key.name) ||
-            !['Ed25519', 'P256', 'RSA', 'HS256', 'A256GCM', 'XSalsa20Poly1305', 'X25519'].includes(key.algorithm) ||
-            !Array.isArray(key.usages) || key.usages.length === 0 || new Set(key.usages).size !== key.usages.length ||
-            key.usages.some(usage => !['sign', 'verify', 'encrypt', 'decrypt', 'derive', 'publicKey'].includes(usage)))
-            throw new Error('Invalid or duplicate key declaration');
-        keyNames.add(key.name);
-    }
-    const definitions = record(app.definitions, 'definitions');
-    const http = record(app.http, 'http');
-    for (const name of Object.keys(definitions)) {
-        const definition = record(definitions[name], 'definition');
-        if (!name || definition.name !== name || typeof definition.compute !== 'function' ||
-            !['derived', 'queryMethod', 'mutationMethod', 'transactionMethod'].includes(definition.kind))
-            throw new Error('Invalid definition: ' + name);
-        consistency(definition, definition.kind === 'queryMethod');
-    }
-    const registry = Object.create(null);
-    for (const alias of Object.keys(http)) {
-        const method = record(http[alias], 'HTTP method');
-        if (!alias || Object.keys(method).some(key => !['name', 'kind', 'consistency'].includes(key)) ||
-            typeof method.name !== 'string' || !Object.hasOwn(definitions, method.name) ||
-            !['query', 'mutation', 'transaction'].includes(method.kind) ||
-            definitions[method.name].kind !== method.kind + 'Method')
-            throw new Error('Invalid HTTP method mapping: ' + alias);
-        const mode = consistency(method, method.kind === 'query');
-        if (mode !== consistency(definitions[method.name], method.kind === 'query'))
-            throw new Error('HTTP consistency must match its query definition: ' + alias);
-        registry[alias] = {name: method.name, kind: method.kind};
-        if (mode === 'replica-local') registry[alias].consistency = mode;
-    }
-    let maintenance = null;
-    if (app.maintenance !== undefined && app.maintenance !== null) {
-        const method = record(app.maintenance, 'maintenance method');
-        if (Object.keys(method).some(key => !['name', 'kind', 'onError'].includes(key)) ||
-            method.kind !== 'mutation' || typeof method.name !== 'string' ||
-            !Object.hasOwn(definitions, method.name) || definitions[method.name].kind !== 'mutationMethod')
-            throw new Error('Maintenance must reference a mutation method');
-        maintenance = {name: method.name, kind: 'mutation'};
-        if (Object.hasOwn(method, 'onError')) {
-            const handler = record(method.onError, 'maintenance error method');
-            if (Object.keys(handler).some(key => key !== 'name' && key !== 'kind') ||
-                handler.kind !== 'mutation' || typeof handler.name !== 'string' ||
-                !Object.hasOwn(definitions, handler.name) || definitions[handler.name].kind !== 'mutationMethod')
-                throw new Error('Maintenance onError must reference a mutation method');
-            maintenance.onError = {name: handler.name, kind: 'mutation'};
+    const kinds = {derived: 'derived', queryMethod: 'query', mutationMethod: 'mutation', transactionMethod: 'transaction'};
+    const members = ['http', 'maintenance', 'authorize', 'collections', 'keys'];
+    return () => {
+        const app = record(typeof __flowerBundle !== 'undefined' && __flowerBundle.default, 'application');
+        const definitions = record(app.definitions, 'definitions');
+        const manifest = {definitions: {}};
+        for (const name of Object.keys(definitions)) {
+            const definition = record(definitions[name], 'definition');
+            if (!name || definition.name !== name || typeof definition.compute !== 'function' ||
+                !Object.hasOwn(kinds, definition.kind))
+                throw new Error('Invalid definition: ' + name);
+            const entry = manifest.definitions[name] = {kind: kinds[definition.kind]};
+            if (Object.hasOwn(definition, 'consistency')) entry.consistency = definition.consistency;
+            if (Object.hasOwn(definition, 'aggregate')) entry.aggregate = definition.aggregate;
         }
-    }
-    let authorize = null;
-    if (app.authorize !== undefined && app.authorize !== null) {
-        const method = record(app.authorize, 'authorization method');
-        if (Object.keys(method).length !== 1 || typeof method.name !== 'string' ||
-            !Object.hasOwn(definitions, method.name) || definitions[method.name].kind !== 'queryMethod' ||
-            consistency(definitions[method.name], true) !== 'linearizable')
-            throw new Error('Authorization must reference a fresh read-only query method');
-        authorize = {name: method.name};
-    }
-    return JSON.stringify({http: registry, maintenance, authorize, ...(keys.length ? {keys} : {}),
-        ...(typeof __flowerSchema === 'function' ? {schema: __flowerSchema(app)} : {})});
+        for (const key of Object.keys(app)) {
+            if (key === 'definitions' || app[key] === undefined) continue;
+            if (!members.includes(key)) manifest[key] = null;
+            else if (app[key] !== null || (key !== 'maintenance' && key !== 'authorize')) manifest[key] = app[key];
+        }
+        return manifest;
+    };
 })()
 "#;
 
+// Evaluates to [run, describe] for __flowerSetRunner. `host(op, ...args)` is
+// the native database capability; see GUEST_ABI.md for operation numbers.
+// Values cross natively: the host encoder validates results and arguments.
 const CELL_RUNNER: &str = r#"
-((nativeCheck, nativeRead) => {
-    function checkJsonFallback(value, active = new Set(), depth = 0) {
-        if (depth > 128) throw new Error('JSON nesting exceeds 128');
-        if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
-        if (typeof value === 'number' && Number.isFinite(value)) return;
-        if (typeof value !== 'object') throw new Error('Return a finite JSON value');
-        if (active.has(value)) throw new Error('Return values cannot contain cycles');
-        if (!Array.isArray(value) && Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
-            throw new Error('Return values must be plain JSON objects or arrays');
-        active.add(value);
-        for (const key of Reflect.ownKeys(value)) {
-            if (Array.isArray(value) && key === 'length') continue;
-            const descriptor = Object.getOwnPropertyDescriptor(value, key);
-            if (typeof key !== 'string' || !descriptor.enumerable || !('value' in descriptor))
-                throw new Error('Return values cannot contain symbols or accessors');
-            checkJsonFallback(descriptor.value, active, depth + 1);
-        }
-        if (Array.isArray(value)) for (let i = 0; i < value.length; ++i)
-            if (!Object.hasOwn(value, i)) throw new Error('Return arrays cannot contain holes');
-        active.delete(value);
-    }
-    function checkJson(value) {
-        if (!nativeCheck(value)) checkJsonFallback(value);
-    }
+((host) => {
+    const kinds = ['query', 'mutation', 'transaction', 'derived'];
     function ref(value) {
         if (typeof value === 'string') return value;
         if (value && (value.kind === 'collection' || value.kind === 'derived'))
             return {kind: value.kind, name: value.name};
         return value;
     }
-    function read(method, args) {
-        try { checkJson(args); } catch (e) { e.code = 'INVALID_VALUE'; throw e; }
-        const parsed = nativeRead(method, args);
-        const result = parsed === undefined ? JSON.parse(__flowerRead(method, JSON.stringify(args))) : parsed;
-        if (!result.ok) throw Object.assign(new Error(result.error.message), {code: result.error.code});
-        return result.value;
-    }
     const readers = {
-        now: () => read('now', []),
-        principal: () => read('principal', []),
-        history: () => read('history', []),
-        get: (target, args = null) => read('get', [ref(target), args]),
+        now: () => host(1),
+        principal: () => host(2),
+        history: () => host(3),
+        get: (target, args = null) => host(4, ref(target), args),
         scan: (collection, options) => {
             const target = ref(collection);
-            if (options === undefined) return read('scan', [target]);
+            if (options === undefined) return host(5, target);
             if (target && typeof target === 'object' && target.kind === 'collection') {
                 const descriptor = Object.getOwnPropertyDescriptor(collection, 'indexes');
                 if (descriptor && !('value' in descriptor))
                     throw Object.assign(new Error('Collection indexes cannot be an accessor'), {code: 'INVALID_VALUE'});
                 target.indexes = descriptor ? descriptor.value : {};
             }
-            return read('scan', [target, options]);
+            return host(5, target, options);
         },
-        query: (query) => read('query', [query]),
-        range: (query) => read('range', [query])
+        query: (query) => host(7, query),
+        range: (query) => host(6, query)
     };
     const writers = {
-        set: (collection, key, value) => read('set', [ref(collection), key, value]),
-        delete: (collection, key) => read('delete', [ref(collection), key]),
-        materialize: (definition, args = null) => read('materialize', [ref(definition), args]),
-        unmaterialize: (definition, args = null) => read('unmaterialize', [ref(definition), args])
+        set: (collection, key, value) => host(8, ref(collection), key, value),
+        delete: (collection, key) => host(9, ref(collection), key),
+        materialize: (definition, args = null) => host(10, ref(definition), args),
+        unmaterialize: (definition, args = null) => host(11, ref(definition), args)
     };
     // Each cell gets a fresh Wasm image. Immutable context objects can therefore
-    // be prepared in the trusted image; methods read invocation bindings only
-    // when called and cannot retain mutations into any subsequent cell.
+    // be prepared in the trusted image and cannot retain mutations into any
+    // subsequent cell.
     const derivedContext = Object.freeze({...readers});
     const methodContext = Object.freeze({...readers, ...writers});
-    return () => {
-        const api = __kind === 'derived' ? derivedContext : methodContext;
-        try {
-            const definitions = typeof __flowerBundle !== 'undefined' && __flowerBundle.default.definitions;
-            if (!definitions || !Object.hasOwn(definitions, __name) || typeof definitions[__name].compute !== 'function')
-                throw Object.assign(new Error('Unknown derived definition: ' + __name), {code: 'DEFINITION_MISSING'});
-            const actualKind = definitions[__name].kind;
-            const expectedKind = __kind === 'derived' ? 'derived' : __kind + 'Method';
-            if (actualKind !== expectedKind)
-                throw Object.assign(new Error('Definition ' + __name + ' is not a ' + __kind + ' method'), {code: 'METHOD_KIND_MISMATCH'});
-            const value = definitions[__name].compute(api, JSON.parse(__argsJson));
-            try { checkJson(value); } catch (e) { e.code = 'INVALID_VALUE'; throw e; }
-            return JSON.stringify({ok: true, value});
-        } catch (e) {
-            const message = String(e && e.message || e);
-            const error = {
-                code: e && typeof e.code === 'string' ? e.code : /out of memory|interrupted/i.test(message) ? 'EVALUATION_BUDGET' : 'COMPUTE_ERROR',
-                message
-            };
-            try {
-                if (__kind !== 'derived' && e && typeof e === 'object' && e.details !== undefined) {
-                    checkJson(e.details);
-                    error.details = e.details;
-                }
-            } catch (_) {}
-            return JSON.stringify({ok: false, error});
-        }
+    // Published before the bundle initializes, so the SDK can bind contexts
+    // into the initialization snapshot instead of in every callback.
+    Object.defineProperty(globalThis, '__flowerContexts', {value: Object.freeze([derivedContext, methodContext])});
+    const run = (kind, name, args) => {
+        const definitions = typeof __flowerBundle !== 'undefined' && __flowerBundle.default.definitions;
+        if (!definitions || !Object.hasOwn(definitions, name) || typeof definitions[name].compute !== 'function')
+            throw Object.assign(new Error('Unknown derived definition: ' + name), {code: 'DEFINITION_MISSING'});
+        const expectedKind = kind === 3 ? 'derived' : kinds[kind] + 'Method';
+        if (definitions[name].kind !== expectedKind)
+            throw Object.assign(new Error('Definition ' + name + ' is not a ' + kinds[kind] + ' method'), {code: 'METHOD_KIND_MISMATCH'});
+        return definitions[name].compute(kind === 3 ? derivedContext : methodContext, args);
     };
-})(__flowerCheckJson, __flowerReadParsed)
+    const describe = (kind, e) => {
+        const message = String(e && e.message || e);
+        const code = e && typeof e.code === 'string' ? e.code
+            : /out of memory|interrupted/i.test(message) ? 'EVALUATION_BUDGET' : 'COMPUTE_ERROR';
+        let details;
+        try { if (kind !== 3 && e && typeof e === 'object') details = e.details; } catch (_) {}
+        return [code, message, details];
+    };
+    return [run, describe];
+})(__flowerHost)
 "#;
 
 #[cfg(test)]

@@ -1007,6 +1007,7 @@ dependencies = [
  "pem",
  "redb",
  "reqwest",
+ "rustc-hash",
  "ryu-js",
  "serde",
  "serde_json",

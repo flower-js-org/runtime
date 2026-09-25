@@ -1131,7 +1131,16 @@ impl Engine<'_> {
         if let Some(bundle) = command.get("bundle") {
             record(bundle, "bundle", "INPUT_INVALID")?;
             string(&bundle["hash"], "bundle.hash", "INPUT_INVALID")?;
-            string(&bundle["javascript"], "bundle.javascript", "INPUT_INVALID")?;
+            match (bundle.get("javascript"), bundle.get("wasm")) {
+                (Some(code), None) => string(code, "bundle.javascript", "INPUT_INVALID")?,
+                (None, Some(code)) => string(code, "bundle.wasm", "INPUT_INVALID")?,
+                _ => {
+                    return Err(EngineError::new(
+                        "INPUT_INVALID",
+                        "bundle must carry either javascript or wasm",
+                    ));
+                }
+            };
             if self
                 .staged
                 .get("bundle")

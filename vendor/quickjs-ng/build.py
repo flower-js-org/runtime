@@ -19,7 +19,8 @@ FUNCTIONS = {
     "flower_eval": ([0x7F] * 2, [0x7E]),
     "flower_compile": ([0x7F] * 2, [0x7E]),
     "flower_load": ([0x7F] * 2, [0x7E]),
-    "flower_invoke": ([0x7F] * 8, [0x7E]),
+    "flower_invoke": ([0x7F] * 5, [0x7E]),
+    "flower_manifest": ([], [0x7E]),
     "flower_snapshot_prepare": ([], [0x7E]),
 }
 
@@ -97,7 +98,7 @@ def verify_wasm(data):
         elif tag == 8:
             raise ValueError("guest must not run initialization implicitly")
     expected_imports = {
-        ("flower", "host_call"): ([0x7F] * 4, [0x7E]),
+        ("flower", "host_call"): ([0x7F] * 3, [0x7E]),
         ("flower", "crypto_call"): ([0x7F] * 5, [0x7F]),
     }
     assert len(imports) == len(expected_imports), imports
@@ -199,7 +200,7 @@ def main():
     elif digest != lock["artifact"]["sha256"] or output != artifact.read_bytes():
         raise SystemExit(f"rebuild differs: {digest}; checked-in artifact is {lock['artifact']['sha256']}")
     print(f"QuickJS-NG {lock['upstream']['release']}: {len(output):,} bytes; SHA-256 {digest}")
-    print("Verified pinned sources, two explicit flower imports, nine ABI functions, and 1 MiB guarded stack.")
+    print("Verified pinned sources, two explicit flower imports, ten ABI functions, and 1 MiB guarded stack.")
     if not args.verify_only and not args.write:
         print("Rebuild is byte-for-byte identical to the checked-in artifact.")
 

@@ -16,8 +16,9 @@ pub(super) struct Tracker {
     pages: Box<[AtomicBool]>,
     active: AtomicBool,
     faults: AtomicUsize,
+    // The executing thread's native errno slot; see bind_thread().
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    errno: usize,
+    errno: AtomicUsize,
 }
 
 pub(super) fn install(store: &mut Store<Host>, memory: Memory) -> Result<Option<Arc<Tracker>>> {
@@ -130,6 +131,14 @@ impl Tracker {
         Ok(copied)
     }
 
+    /// Pooled Stores move between threads while idle. Resolve the errno slot
+    /// here, before Wasm runs on this thread, never through TLS or dynamic
+    /// binding inside the signal handler.
+    pub(super) fn bind_thread(&self) {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        self.errno.store(native::errno(), Ordering::Release);
+    }
+
     #[cfg(test)]
     pub(super) fn faults(&self) -> usize {
         self.faults.load(Ordering::Relaxed)
@@ -164,13 +173,6 @@ mod native {
         if writable(base, length).is_err() {
             return Ok(None);
         }
-        // Stores are thread-confined by Host's scoped non-Send callback token.
-        // Resolve this thread's errno slot now, never through TLS/dynamic binding
-        // inside the signal handler.
-        #[cfg(target_os = "macos")]
-        let errno = unsafe { libc::__error() };
-        #[cfg(target_os = "linux")]
-        let errno = unsafe { libc::__errno_location() };
         let tracker = Arc::new(Tracker {
             base,
             length,
@@ -180,7 +182,7 @@ mod native {
                 .collect(),
             active: AtomicBool::new(false),
             faults: AtomicUsize::new(0),
-            errno: errno as usize,
+            errno: AtomicUsize::new(errno()),
         });
         let handler = tracker.clone();
         // SAFETY: this closure uses only immutable geometry, preallocated
@@ -193,6 +195,15 @@ mod native {
         // The caller installs its RAII cleanup owner before protect(). Until
         // then this handler is inert and memory is still normally writable.
         Ok(Some(tracker))
+    }
+
+    /// This thread's native errno slot.
+    pub(super) fn errno() -> usize {
+        #[cfg(target_os = "macos")]
+        let errno = unsafe { libc::__error() };
+        #[cfg(target_os = "linux")]
+        let errno = unsafe { libc::__errno_location() };
+        errno as usize
     }
 
     pub(super) fn readonly(base: usize, length: usize) -> Result<()> {
@@ -246,7 +257,7 @@ mod native {
             }
             // The mprotect system-call wrapper can change errno; guest/native
             // code observes exactly the prior value when the instruction retries.
-            let errno = self.errno as *mut libc::c_int;
+            let errno = self.errno.load(Ordering::Acquire) as *mut libc::c_int;
             // SAFETY: errno is this thread's native integer slot. Geometry is
             // checked at installation and the atomic page index is in bounds.
             let success = unsafe {

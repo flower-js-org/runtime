@@ -9,23 +9,22 @@
 #define EXPORT(name) __attribute__((export_name(name)))
 #define ERROR_BIT (UINT64_C(1) << 63)
 
-/* The JSON database capability. Both arguments and results are UTF-8 strings.
- * The host allocates its response with flower_alloc in this same guest. */
-__attribute__((import_module("flower"), import_name("host_call")))
-extern uint64_t flower_host_call(const char *, uint32_t, const char *, uint32_t);
-
 static JSRuntime *runtime;
 static JSContext *context;
-static JSValue cell_runner = JS_UNDEFINED;
-/* Owned atoms live exactly as long as this single-runtime guest. Reusing their
- * IDs avoids interning/refcount pairs without precreating global properties. */
-enum { BIND_NAME, BIND_ARGS, BIND_KIND, BIND_COUNT };
-static JSAtom invocation_bindings[BIND_COUNT];
+/* The trusted runner: run(kind, name, args), describe(kind, error) and the
+ * bundle's manifest(). */
+static JSValue cell_run = JS_UNDEFINED;
+static JSValue cell_describe = JS_UNDEFINED;
+static JSValue cell_manifest = JS_UNDEFINED;
 extern int flower_json_init(JSContext *ctx);
 extern int flower_canonical_init(JSContext *ctx);
-extern int flower_read_init(JSContext *ctx);
+extern int flower_wire_init(JSContext *ctx);
 extern int flower_crypto_init(JSContext *ctx);
 extern int flower_crypto_callback_active;
+extern uint64_t flower_wire_invoke(JSContext *ctx, JSValueConst run, JSValueConst describe,
+                                   int32_t kind, const char *name, uint32_t name_length,
+                                   const uint8_t *args, uint32_t args_length);
+extern uint64_t flower_wire_manifest(JSContext *ctx, JSValueConst manifest, JSValueConst describe);
 
 /* QuickJS seeds its internal string hash in JS_NewContextRaw. Deterministic
  * zero is deliberate: no ambient clock/randomness is available to this guest.
@@ -108,77 +107,21 @@ static uint64_t value_result(JSValue value) {
     return result;
 }
 
-/* Invocation is the final execution before Store disposal or pristine reset.
- * Keep QuickJS's CString reference until that full reset instead of allocating
- * and copying another buffer, then tearing down a heap about to be replaced.
- * These pointers must never be passed to flower_free: QuickJS's string arena
- * has different bookkeeping. Both successful and exceptional returns follow
- * this ownership rule; eval/compile/load keep their independent owned buffers. */
-static uint64_t invocation_exception(void) {
-    JSValue error = JS_GetException(context);
-    size_t length = 0;
-    const char *text = JS_ToCStringLen(context, &length, error);
-    static const char unreadable[] = "unreadable QuickJS exception";
-    return text ? pack(text, length, 1)
-                : pack(unreadable, sizeof(unreadable) - 1, 1);
-}
-
-static uint64_t invocation_result(JSValue value) {
-    if (JS_IsException(value)) return invocation_exception();
-    size_t length = 0;
-    const char *text = JS_ToCStringLen(context, &length, value);
-    return text ? pack(text, length, 0) : invocation_exception();
-}
-
-static JSValue read_host_internal(JSContext *ctx, int argc,
-                                  JSValueConst *argv, int parsed) {
-    if (argc != 2) return JS_ThrowTypeError(ctx, "expected method and JSON arguments");
-    size_t method_length, payload_length;
-    const char *method = JS_ToCStringLen(ctx, &method_length, argv[0]);
-    if (!method) return JS_EXCEPTION;
-    /* ToString may reenter the host bridge; hold each owned C string until its
-     * matching conversion has completed, then use explicit lengths throughout. */
-    const char *payload = JS_ToCStringLen(ctx, &payload_length, argv[1]);
-    if (!payload) {
-        JS_FreeCString(ctx, method);
-        return JS_EXCEPTION;
-    }
-    uint64_t response = flower_host_call(method, method_length, payload, payload_length);
-    JS_FreeCString(ctx, payload);
-    JS_FreeCString(ctx, method);
-    char *pointer = (char *)(uintptr_t)(uint32_t)response;
-    size_t length = (response >> 32) & INT32_MAX;
-    JSValue value = parsed && !(response & ERROR_BIT)
-        ? JS_ParseJSON(ctx, pointer, length, "<input>")
-        : JS_NewStringLen(ctx, pointer, length);
-    flower_free(pointer);
-    return (response & ERROR_BIT) && !JS_IsException(value) ? JS_Throw(ctx, value) : value;
-}
-
-static JSValue read_host(JSContext *ctx, JSValueConst this_value,
-                         int argc, JSValueConst *argv) {
-    (void)this_value;
-    return read_host_internal(ctx, argc, argv, 0);
-}
-
-JSValue flower_read_parsed_host(JSContext *ctx, JSValueConst method,
-                                JSValueConst payload) {
-    JSValueConst arguments[] = {method, payload};
-    return read_host_internal(ctx, 2, arguments, 1);
-}
-
 /* Called only by trusted bootstrap before any application code. Keep the runner
  * in the C image, inaccessible through JS globals, and erase the bootstrap API.
- * The runner's private closure holds the native validator, so application global
- * or lexical names cannot replace validation or the execution entry point. */
+ * The runner's private closure holds the host capability, so application global
+ * or lexical names can neither reach nor replace it or the execution entry. */
 static JSValue set_runner(JSContext *ctx, JSValueConst this_value,
                           int argc, JSValueConst *argv) {
     (void)this_value;
-    if (argc != 1 || !JS_IsFunction(ctx, argv[0]) || !JS_IsUndefined(cell_runner))
+    if (argc != 3 || !JS_IsFunction(ctx, argv[0]) || !JS_IsFunction(ctx, argv[1])
+        || !JS_IsFunction(ctx, argv[2]) || !JS_IsUndefined(cell_run))
         return JS_ThrowTypeError(ctx, "invalid Flower runner initialization");
-    cell_runner = JS_DupValue(ctx, argv[0]);
+    cell_run = JS_DupValue(ctx, argv[0]);
+    cell_describe = JS_DupValue(ctx, argv[1]);
+    cell_manifest = JS_DupValue(ctx, argv[2]);
     JSValue global = JS_GetGlobalObject(ctx);
-    const char *names[] = {"__flowerCheckJson", "__flowerReadParsed", "__flowerSetRunner"};
+    const char *names[] = {"__flowerHost", "__flowerSetRunner"};
     for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
         JSAtom atom = JS_NewAtom(ctx, names[i]);
         if (atom == JS_ATOM_NULL) {
@@ -212,21 +155,12 @@ EXPORT("flower_init") int flower_init(void) {
         || JS_AddIntrinsicTypedArrays(context) || JS_AddIntrinsicPromise(context)
         || JS_AddIntrinsicWeakRef(context) || JS_AddIntrinsicAToB(context)
         || flower_json_init(context) || flower_canonical_init(context)
-        || flower_crypto_init(context) < 0) return -1;
+        || flower_wire_init(context) || flower_crypto_init(context) < 0) return -1;
     JSValue global = JS_GetGlobalObject(context);
-    JSValue callback = JS_NewCFunction(context, read_host, "__flowerRead", 2);
-    int status = JS_SetPropertyStr(context, global, "__flowerRead", callback);
-    if (status >= 0) status = flower_read_init(context);
-    if (status >= 0) status = JS_DefinePropertyValueStr(context, global, "__flowerSetRunner",
-        JS_NewCFunction(context, set_runner, "__flowerSetRunner", 1), JS_PROP_CONFIGURABLE);
+    int status = JS_DefinePropertyValueStr(context, global, "__flowerSetRunner",
+        JS_NewCFunction(context, set_runner, "__flowerSetRunner", 3), JS_PROP_CONFIGURABLE);
     JS_FreeValue(context, global);
-    if (status < 0) return -1;
-    const char *names[BIND_COUNT] = {"__name", "__argsJson", "__kind"};
-    for (unsigned i = 0; i < BIND_COUNT; ++i) {
-        invocation_bindings[i] = JS_NewAtom(context, names[i]);
-        if (invocation_bindings[i] == JS_ATOM_NULL) return -1;
-    }
-    return 0;
+    return status < 0 ? -1 : 0;
 }
 
 EXPORT("flower_eval") uint64_t flower_eval(const char *source, size_t length) {
@@ -286,28 +220,16 @@ EXPORT("flower_snapshot_prepare") uint64_t flower_snapshot_prepare(void) {
     return copy_result(diagnostics, (size_t)length, 0);
 }
 
-static int bind_string(JSValueConst global, JSAtom key, const char *value, size_t length) {
-    JSValue string = JS_NewStringLen(context, value, length);
-    if (JS_IsException(string)) return -1;
-    /* JS_SetPropertyStr calls this same throwing setter after interning its
-     * name. Keep inherited/own setters, readonly checks and insertion order. */
-    return JS_SetProperty(context, global, key, string);
+/* One callback: kind 0 query, 1 mutation, 2 transaction, 3 derived. The
+ * returned outcome lives in guest memory until the host resets the heap. */
+EXPORT("flower_invoke") uint64_t flower_invoke(
+    int32_t kind, const char *name, uint32_t name_length,
+    const uint8_t *args, uint32_t args_length) {
+    return flower_wire_invoke(context, cell_run, cell_describe, kind,
+                              name, name_length, args, args_length);
 }
 
-EXPORT("flower_invoke") uint64_t flower_invoke(
-    const char *name, size_t name_length, const char *args, size_t args_length,
-    const char *kind, size_t kind_length, const uint8_t *bytecode, size_t bytecode_length) {
-    JSValue global = JS_GetGlobalObject(context);
-    if (bind_string(global, invocation_bindings[BIND_NAME], name, name_length) < 0
-        || bind_string(global, invocation_bindings[BIND_ARGS], args, args_length) < 0
-        || bind_string(global, invocation_bindings[BIND_KIND], kind, kind_length) < 0
-        || (bytecode && load_bytecode(bytecode, bytecode_length) < 0)) {
-        JS_FreeValue(context, global);
-        return invocation_exception();
-    }
-    flower_crypto_callback_active = 1;
-    JSValue result = JS_Call(context, cell_runner, global, 0, NULL);
-    flower_crypto_callback_active = 0;
-    JS_FreeValue(context, global);
-    return invocation_result(result);
+/* The bundle's raw manifest as an outcome, computed without host access. */
+EXPORT("flower_manifest") uint64_t flower_manifest(void) {
+    return flower_wire_manifest(context, cell_manifest, cell_describe);
 }

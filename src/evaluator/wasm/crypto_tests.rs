@@ -2,7 +2,7 @@ use super::tests::{bundle, limits, run};
 use super::*;
 
 #[test]
-fn managed_keys_cannot_resolve_during_initialization_or_through_the_json_host() {
+fn managed_keys_cannot_resolve_during_initialization_or_from_application_code() {
     let call = "__flowerCrypto(200,0,JSON.stringify({operation:'key.publicKey',key:{kind:'key',name:'x',algorithm:'Ed25519',usages:['publicKey']}}),'','','')";
     for marker in ["", STATIC_INIT_MARKER] {
         let code = format!(
@@ -24,9 +24,11 @@ fn managed_keys_cannot_resolve_during_initialization_or_through_the_json_host() 
         assert!(outcome.is_err(), "managed key escaped initialization guard");
         assert_eq!(calls, 0);
     }
-    let code = bundle("()=>__flowerRead('managedKey','[]')", true);
+    // Application code has no generic host capability through which to name
+    // a native-only operation; the runner's numbered operations exclude it.
+    let code = bundle("()=>[typeof __flowerRead,typeof __flowerHost]", true);
     let mut calls = 0;
-    let error = execute(
+    let result = execute(
         &code,
         "test",
         &Value::Null,
@@ -37,8 +39,8 @@ fn managed_keys_cannot_resolve_during_initialization_or_through_the_json_host() 
         },
         limits(),
     )
-    .unwrap_err();
-    assert!(format!("{error:#}").contains("native-only"));
+    .unwrap();
+    assert_eq!(result["value"], json!(["undefined", "undefined"]));
     assert_eq!(calls, 0);
 }
 

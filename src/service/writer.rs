@@ -844,13 +844,7 @@ async fn prepare_candidate_inner(
 ) -> Result<speculation::Candidate, ApiError> {
     let admission = match admitted {
         Some(permit) => permit,
-        None => {
-            // A previous callback can have parked guests before a later guard
-            // rejected its candidate. Without a retained lease, release those
-            // guests before this next request can wait for admission.
-            crate::evaluator::clear_wasm_recycle_idle();
-            admit(app, pending, deployment).await?
-        }
+        None => admit(app, pending, deployment).await?,
     };
     if let Some(started) = started {
         started.store(true, std::sync::atomic::Ordering::Release);
@@ -958,21 +952,12 @@ async fn prepare_candidate_inner(
     let permit = if speculative_now.is_some() {
         None
     } else {
-        let permit = match app.evaluations.clone().try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(error) => {
-                // Idle cached guests must not occupy scarce Wasm slots while
-                // this writer waits for another invocation to release its gate.
-                if matches!(error, tokio::sync::TryAcquireError::NoPermits) {
-                    crate::evaluator::clear_wasm_recycle_idle();
-                }
-                app.evaluations
-                    .clone()
-                    .acquire_owned()
-                    .await
-                    .map_err(|error| unavailable(error.into()))?
-            }
-        };
+        let permit = app
+            .evaluations
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|error| unavailable(error.into()))?;
         Some(permit)
     };
     let permit_wait_us = permit_started.elapsed().as_micros() as u64;

@@ -5,10 +5,10 @@ mod canonical_json;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod dirty;
 mod invoke_results;
-mod json_check;
-mod parsed_reads;
+mod modules;
 mod recycle;
 mod scans;
+mod values;
 
 pub(super) fn limits() -> Arc<Limits> {
     Limits::new(Instant::now() + Duration::from_secs(30), MAX_MEMORY_BYTES)
@@ -99,10 +99,10 @@ fn snapshot_contexts_are_frozen_before_application_code_and_preserve_kind_surfac
 #[test]
 fn unicode_host_values_and_business_errors_round_trip() {
     assert_eq!(
-        error_envelope(anyhow::Error::new(
+        failure_parts(anyhow::Error::new(
             super::super::rust_engine::EngineError::new("custom-code:1", "business failure")
         )),
-        json!({"ok":false,"error":{"code":"custom-code:1","message":"business failure"}})
+        ("custom-code:1".into(), "business failure".into(), None)
     );
     let code = bundle(
         "(ctx,args)=>({args,record:ctx.get({kind:'collection',name:'字🌻'},'a\\u0000b')})",
@@ -163,36 +163,30 @@ fn initialized_snapshots_isolate_closures_globals_and_prototypes_and_rebind_host
         .unwrap();
         assert_eq!(result["value"], json!([1, 1, null, host_value]));
     }
-    let manifest: Value = serde_json::from_str(&manifest(&code, limits()).unwrap()).unwrap();
+    let manifest = manifest(&code, limits()).unwrap();
     assert_eq!(manifest["http"]["test"]["name"], "test");
 }
 
 #[test]
-fn dynamic_initialization_sees_current_invocation_and_current_host() {
-    let code = "const args=JSON.parse(__argsJson);const initial=JSON.parse(__flowerRead('get','[{\"kind\":\"collection\",\"name\":\"x\"},\"a\"]')).value;var __flowerBundle={default:{definitions:{test:{name:'test',kind:'queryMethod',compute:()=>[args,initial,__name,__kind]}},http:{}}};";
-    for number in [1, 2] {
-        let result = execute(
-            code,
-            "test",
-            &json!(number),
-            "query",
-            &mut |_, _| Ok(json!(number + 10)),
-            limits(),
-        )
-        .unwrap();
-        assert_eq!(
-            result["value"],
-            json!([number, number + 10, "test", "query"])
-        );
+fn invocation_data_and_the_host_reach_only_callbacks() {
+    let code = "const globals=[typeof __flowerHost,typeof __flowerRead,typeof __flowerSetRunner,typeof __argsJson,typeof __name,typeof __kind];var __flowerBundle={default:{definitions:{test:{name:'test',kind:'queryMethod',compute:(ctx,args)=>[args,ctx.get({kind:'collection',name:'x'},'a'),globals]}},http:{}}};";
+    for static_init in ["", STATIC_INIT_MARKER] {
+        for number in [1, 2] {
+            let result = execute(
+                &format!("{static_init}{code}"),
+                "test",
+                &json!(number),
+                "query",
+                &mut |_, _| Ok(json!(number + 10)),
+                limits(),
+            )
+            .unwrap();
+            assert_eq!(
+                result["value"],
+                json!([number, number + 10, vec!["undefined"; 6]])
+            );
+        }
     }
-    assert!(
-        manifest(code, limits()).is_err(),
-        "preflight must not gain invocation bindings"
-    );
-    assert!(
-        run(&format!("{STATIC_INIT_MARKER}{code}"), json!(1)).is_err(),
-        "static contract must reject invocation-dependent initialization"
-    );
 }
 
 #[test]
@@ -276,7 +270,6 @@ fn deep_json_is_bounded_without_rejecting_valid_envelope_depth() {
     }
     assert_eq!(run(&code, value.clone()).unwrap()["value"], value);
     assert!(run(&code, json!([value])).is_err());
-    assert!(parse_json(&format!("{}0{}", "[".repeat(137), "]".repeat(137))).is_err());
 }
 
 #[test]
@@ -370,29 +363,6 @@ fn large_guest_c_frames_cannot_corrupt_the_shadow_stack_or_hide_failure() {
 }
 
 #[test]
-fn length_aware_host_bridge_survives_reentrant_guest_coercion() {
-    let code = bundle(
-        r#"()=>{const method={toString(){JSON.parse(__flowerRead('get','[{"kind":"collection","name":"x"},"inner"]'));return 'get'}};return JSON.parse(__flowerRead(method,'[{"kind":"collection","name":"x"},"outer"]')).value}"#,
-        false,
-    );
-    let mut keys = Vec::new();
-    let result = execute(
-        &code,
-        "test",
-        &Value::Null,
-        "query",
-        &mut |_, args| {
-            keys.push(args[1].as_str().unwrap().to_owned());
-            Ok(json!({"key":args[1],"text":"字\0🌻"}))
-        },
-        limits(),
-    )
-    .unwrap();
-    assert_eq!(keys, ["inner", "outer"]);
-    assert_eq!(result["value"], json!({"key":"outer","text":"字\0🌻"}));
-}
-
-#[test]
 fn minimal_guest_exposes_only_deterministic_javascript_intrinsics() {
     let code = bundle(
         "()=>{let randomBlocked=false;try{Math.random()}catch(_){randomBlocked=true}return {ambient:[typeof performance,typeof Date,typeof crypto,typeof fetch,typeof process,typeof setTimeout],randomBlocked,base64:btoa(atob('Zmxvd2Vy')),features:[String(1n+2n),new Map([['x',2]]).get('x'),/flower/.test('flower')]}}",
@@ -405,89 +375,6 @@ fn minimal_guest_exposes_only_deterministic_javascript_intrinsics() {
             "randomBlocked":true,"base64":"Zmxvd2Vy","features":["3",2,true]
         })
     );
-}
-
-#[test]
-fn host_method_lengths_cannot_hide_a_nul_suffix() {
-    let code = bundle(
-        "()=>{try{__flowerRead('get\\u0000unexpected','[]')}catch(_){};return 1}",
-        false,
-    );
-    let mut calls = 0;
-    assert!(
-        execute(
-            &code,
-            "test",
-            &Value::Null,
-            "query",
-            &mut |_, _| {
-                calls += 1;
-                Ok(Value::Null)
-            },
-            limits()
-        )
-        .is_err()
-    );
-    assert_eq!(calls, 0);
-}
-
-fn original_runner(code: &str) -> (Value, Vec<(String, Value)>) {
-    let script = format!(
-        r#"const calls=[];
-        const __name='test',__argsJson='null',__kind='query';
-        const __flowerRead=(method,args)=>{{calls.push([method,JSON.parse(args)]);return '{{"ok":true,"value":null}}'}};
-        {code}
-        const result={runner};
-        JSON.stringify([JSON.parse(result),calls]);"#,
-        runner = include_str!("../reference-cell-runner.js")
-    );
-    serde_json::from_str(&reference_script(&script, limits()).unwrap()).unwrap()
-}
-
-#[test]
-fn optimized_runner_matches_original_strict_json_and_observable_traps() {
-    for compute in [
-        "()=>[null,true,'字\\u0000🌻',3.14,-0]",
-        "()=>Infinity",
-        "()=>NaN",
-        "()=>undefined",
-        "()=>()=>1",
-        "()=>Symbol('x')",
-        "()=>1n",
-        "()=>Object.create({custom:true})",
-        "ctx=>({get forbidden(){ctx.now();return 1}})",
-        "()=>Object.defineProperty({x:1},'hidden',{value:2})",
-        "()=>({[Symbol('x')]:1})",
-        "()=>{const x={};x.self=x;return x}",
-        "()=>[1,,3]",
-        "()=>Object.assign([1],{extra:()=>1})",
-        "()=>Object.defineProperty([1],'extra',{value:2})",
-        "()=>{const shared={n:1};return [shared,shared]}",
-        "()=>{Object.prototype.toJSON=function(){return this.tag?{converted:this.tag}:this};return {tag:'ok'}}",
-        "()=>{const trace=[];const proxy=new Proxy({x:1},{getPrototypeOf(target){trace.push('prototype');return Reflect.getPrototypeOf(target)},ownKeys(target){trace.push('keys');return Reflect.ownKeys(target)},getOwnPropertyDescriptor(target,key){trace.push('descriptor:'+key);return Reflect.getOwnPropertyDescriptor(target,key)},get(target,key){trace.push('get:'+String(key));return Reflect.get(target,key)}});return {proxy,trace}}",
-        "()=>{const trace=[];const proxy=new Proxy([1,2],{get(target,key){trace.push('get:'+String(key));return Reflect.get(target,key)},getOwnPropertyDescriptor(target,key){trace.push('descriptor:'+key);return Reflect.getOwnPropertyDescriptor(target,key)}});return {proxy,trace}}",
-        "ctx=>{try{ctx.set('records','key',[1,,3])}catch(e){return {code:e.code,message:e.message}}}",
-        "()=>{Number.isFinite=()=>true;return Infinity}",
-        "()=>{Object.getPrototypeOf=()=>Object.prototype;return new Map([['x',1]])}",
-        "()=>{Array.isArray=()=>false;return [1,2]}",
-    ] {
-        let code = bundle(compute, false);
-        let expected = original_runner(&code);
-        let mut calls = Vec::new();
-        let actual = execute(
-            &code,
-            "test",
-            &Value::Null,
-            "query",
-            &mut |method, args| {
-                calls.push((method.to_owned(), args));
-                Ok(Value::Null)
-            },
-            limits(),
-        )
-        .unwrap();
-        assert_eq!((actual, calls), expected, "{compute}");
-    }
 }
 
 #[test]
@@ -512,32 +399,30 @@ fn snapshotted_api_functions_are_isolated_and_application_freeze_hooks_are_not_c
 }
 
 #[test]
-fn optimized_validation_preserves_global_lexical_intrinsic_shadowing() {
-    let code = format!(
-        "let Number={{isFinite:()=>true}};{}",
-        bundle("()=>Infinity", false)
-    );
-    let expected = original_runner(&code);
-    assert_eq!((run(&code, Value::Null).unwrap(), Vec::new()), expected);
-}
-
-#[test]
-fn private_native_checker_and_runner_cannot_be_shadowed_by_application_bindings() {
+fn bootstrap_bindings_cannot_be_reached_or_shadowed_by_application_code() {
     for static_init in [false, true] {
-        for declarations in [
-            "let __flowerCheckJson=()=>true;let __flowerSetRunner=()=>1;",
-            "var __flowerCheckJson=()=>true;var __flowerSetRunner=()=>1;var __flowerRunCell=()=>JSON.stringify({ok:true,value:'bypassed'});",
-            "let globalThis={__flowerCheckJson:()=>true,__flowerSetRunner:()=>1};",
+        for (declarations, visible) in [
+            (
+                "let __flowerHost=()=>1;let __flowerSetRunner=()=>1;",
+                "function",
+            ),
+            (
+                "var __flowerHost=()=>1;var __flowerSetRunner=()=>1;",
+                "function",
+            ),
+            (
+                "let globalThis={__flowerHost:()=>1,__flowerSetRunner:()=>1};",
+                "undefined",
+            ),
         ] {
             let code = format!(
                 "{}{declarations}{}",
                 if static_init { STATIC_INIT_MARKER } else { "" },
                 bundle(
-                    "ctx=>({get forbidden(){ctx.now();return 'bypassed'}})",
+                    "ctx=>[ctx.get({kind:'collection',name:'x'},'a'),typeof __flowerHost,typeof __flowerSetRunner]",
                     false
                 )
             );
-            let expected = original_runner(&code);
             let mut calls = Vec::new();
             let actual = execute(
                 &code,
@@ -546,12 +431,22 @@ fn private_native_checker_and_runner_cannot_be_shadowed_by_application_bindings(
                 "query",
                 &mut |method, args| {
                     calls.push((method.to_owned(), args));
-                    Ok(Value::Null)
+                    Ok(json!("record"))
                 },
                 limits(),
             )
             .unwrap();
-            assert_eq!((actual, calls), expected, "{static_init}: {declarations}");
+            assert_eq!(
+                (actual, calls),
+                (
+                    json!({"ok":true,"value":["record",visible,visible]}),
+                    vec![(
+                        "get".to_owned(),
+                        json!([{"kind":"collection","name":"x"},"a"])
+                    )]
+                ),
+                "{static_init}: {declarations}"
+            );
         }
     }
 }

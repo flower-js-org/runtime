@@ -37,7 +37,14 @@ export interface ModuleConfig<H extends HttpMap = HttpMap> extends ComponentPart
 // ---- Context binding: typed keys, record schemas and triggers over the host context
 
 type Host = Record<string, (...args: any[]) => any>;
-interface Runtime { readonly triggers: ReadonlyMap<string, readonly Trigger[]> }
+interface Session { readonly ctx: MutationContext; readonly flush: () => void }
+interface Runtime { readonly triggers: ReadonlyMap<string, readonly Trigger[]>; readonly sessions: Map<object, Session> }
+
+// Flower publishes the contexts it will pass to callbacks before initializing
+// the application. Binding them in define() puts the bound contexts into the
+// initialization snapshot: every callback starts from that pristine state, so
+// its session is already built and its trigger bookkeeping already empty.
+declare const __flowerContexts: readonly Host[] | undefined;
 interface Touch { readonly reference: Collection<any, any, any>; readonly raw: string; readonly before: Json; readonly triggers: readonly Trigger[] }
 const hosts = new WeakMap<object, Host>();
 const flushes = new WeakMap<object, () => void>();
@@ -87,7 +94,7 @@ function sameValue(a: Json, b: Json): boolean {
   return a === b || (a !== null && b !== null && canonicalJson(a) === canonicalJson(b));
 }
 
-function bind(host: Host, runtime: Runtime) {
+function bind(host: Host, runtime: Runtime): Session {
   const touched = new Map<string, Touch>();
   function track(reference: Collection<any, any, any>, raw: string) {
     const triggers = runtime.triggers.get(reference.name);
@@ -165,16 +172,17 @@ function bind(host: Host, runtime: Runtime) {
 function bound(definition: Definition, runtime: Runtime): (ctx: any, args: any) => any {
   const compute = definition.compute as (ctx: unknown, args: unknown) => unknown;
   if (definition.kind === "derived" && definition.aggregate) return compute;
+  const session = (host: Host) => runtime.sessions.get(host) ?? bind(host, runtime);
   if (definition.kind === "mutationMethod") {
     return (host: Host, args: unknown) => {
       if (hosts.has(host)) return compute(host, args);
-      const session = bind(host, runtime);
-      const value = compute(session.ctx, args);
-      session.flush();
+      const { ctx, flush } = session(host);
+      const value = compute(ctx, args);
+      flush();
       return value;
     };
   }
-  return (host: Host, args: unknown) => compute(host && !hosts.has(host) ? bind(host, runtime).ctx : host, args);
+  return (host: Host, args: unknown) => compute(host && !hosts.has(host) ? session(host).ctx : host, args);
 }
 
 // ---- Maintenance: one host handler pair selecting among every task, earliest due first
@@ -435,7 +443,10 @@ export function define<const H extends HttpMap = {}>(config: ModuleConfig<H> = {
     list.push(each);
     triggers.set(each.source.name, list);
   }
-  const runtime: Runtime = { triggers };
+  const runtime: Runtime = { triggers, sessions: new Map() };
+  if (typeof __flowerContexts !== "undefined") {
+    for (const host of __flowerContexts) runtime.sessions.set(host, bind(host, runtime));
+  }
 
   const definitions: Record<string, Definition> = Object.create(null);
   const collections = [...flat.collections, ...[...triggers.values()].flat().map((each) => each.source)];

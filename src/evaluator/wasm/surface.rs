@@ -30,7 +30,7 @@ pub(super) fn validate(wasm: &[u8]) -> Result<()> {
                     };
                     let ty = types.get(index as usize).context("host callback type")?;
                     let valid = if import.name == "host_call" {
-                        ty.params() == [ValType::I32; 4] && ty.results() == [ValType::I64]
+                        ty.params() == [ValType::I32; 3] && ty.results() == [ValType::I64]
                     } else {
                         ty.params() == [ValType::I32; 5] && ty.results() == [ValType::I32]
                     };
@@ -84,7 +84,8 @@ pub(super) fn validate(wasm: &[u8]) -> Result<()> {
         ("flower_eval", 2, &[ValType::I64][..]),
         ("flower_compile", 2, &[ValType::I64][..]),
         ("flower_load", 2, &[ValType::I64][..]),
-        ("flower_invoke", 8, &[ValType::I64][..]),
+        ("flower_invoke", 5, &[ValType::I64][..]),
+        ("flower_manifest", 0, &[ValType::I64][..]),
         ("flower_snapshot_prepare", 0, &[ValType::I64][..]),
     ] {
         let (kind, index) = exports

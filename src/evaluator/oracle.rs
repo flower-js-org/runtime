@@ -21,6 +21,20 @@ pub(super) fn evaluate_inner(
         .and_then(|value| value.get("javascript"))
         .and_then(Value::as_str)
         .unwrap_or("var __flowerBundle={default:{definitions:{},http:{}}};");
+    let shared = wasm::Limits::new(
+        Instant::now() + timeout,
+        config::settings()?.guest_memory_bytes,
+    );
+    // The reference coordinator shares the production manifest validation.
+    let manifest = match mutation.get("bundle") {
+        Some(_) => {
+            let manifest = wasm::manifest(bundle, shared.clone())
+                .and_then(|raw| manifest::validate(&raw))
+                .map_err(|error| anyhow::anyhow!("EVALUATION_ERROR: {error}"))?;
+            json!({"http": manifest.http, "maintenance": manifest.maintenance, "authorize": manifest.authorize})
+        }
+        None => Value::Null,
+    };
     let data_json = if mode == "deployment" {
         serde_json::to_string(&data)?
     } else {
@@ -47,7 +61,7 @@ pub(super) fn evaluate_inner(
                 return result.value;
             }};
             try {{
-                const manifest = input.bundle ? JSON.parse(new Function(bundle+'\nreturn '+{manifest})()) : null;
+                const manifest = {manifest};
                 const derived = (name,args,api) => execute('derived',name,args,api);
                 if(mode==='deployment' && now!==null) input.now=now;
                 const value = mode==='deployment' ? flowerEvaluate(data,input,derived) :
@@ -63,11 +77,7 @@ pub(super) fn evaluate_inner(
         mutation = mutation,
         mode = serde_json::to_string(mode)?,
         now = serde_json::to_string(&now)?,
-        manifest = serde_json::to_string(BUNDLE_MANIFEST.trim())?
-    );
-    let shared = wasm::Limits::new(
-        Instant::now() + timeout,
-        config::settings()?.guest_memory_bytes,
+        manifest = manifest,
     );
     let envelope: Value = serde_json::from_str(&wasm::reference_script(&code, shared)?)?;
     if envelope["ok"] != true {

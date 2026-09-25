@@ -31,7 +31,7 @@ function guest() {
   };
   execute(`const __stringify=JSON.stringify;const __create=Object.create;
     const __native=(${factory})(__flowerCanonicalJson);const __reference=(${factory})(undefined);
-    __flowerSetRunner(()=>'{"ok":true,"value":null}');`);
+    __flowerSetRunner(()=>null,()=>['E','m',undefined],()=>null);`);
   return execute;
 }
 

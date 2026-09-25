@@ -7,8 +7,8 @@ upstream file's SHA-256, the upstream archive digest, compiler and static-librar
 revisions, and the final artifact digest. The upstream CLI, `quickjs-libc`, module
 loaders, and examples are neither vendored nor linked.
 
-The checked-in `quickjs.wasm` is **1,122,196 bytes**, SHA-256
-`a48ba3c7f53381bd9129c1bb5b64623ab3fa89a608df172b67acaf8993b2bbf7`.
+The checked-in `quickjs.wasm` is **1,127,378 bytes**, SHA-256
+`099925f68919e38c315a012090db3d971cf2f2383ba081061b0934e51bdf1b68`.
 Rust embeds it with `include_bytes!` and verifies its digest and complete ABI
 before compiling. Normal Cargo builds need no guest cross-compiler or WASI SDK;
 native Rust dependencies may still require a host C compiler. Server operation
@@ -20,7 +20,7 @@ The final module imports **exactly two functions**, `flower.host_call` and
 `flower.crypto_call`. It has
 **zero WASI imports**, imported memories, imported tables, or imported globals.
 Its only exported resources are its memory and C shadow-stack pointer, alongside
-nine private ABI functions. Initialization is explicit; it has no Wasm start
+ten private ABI functions. Initialization is explicit; it has no Wasm start
 section.
 
 The build uses WASI SDK 34's LLVM compiler and statically linked libc/math code
@@ -37,14 +37,14 @@ never captured in a reusable bundle-initialization snapshot.
 
 Other JavaScript intrinsics remain available, including BigInt, maps, sets,
 regular expressions, promises, weak references, typed arrays, `atob`, and `btoa`.
-Database methods still require synchronous finite JSON results. The Wasm build
+Database methods still require synchronous results that are plain data. The Wasm build
 disables native atomics/threads via upstream's `__wasi__` compile-time branch.
 
 The guest uses `-O3`, full link-time optimization, and standard WebAssembly SIMD
 (`-msimd128`) so the compiler can vectorize string scans and copies. It does not
 enable relaxed SIMD or fast-math; Wasmtime supports standard SIMD by default.
-The database interface uses length-delimited JSON; crypto passes typed-array
-bytes directly. End-to-end benchmarks determine throughput.
+Values cross the database interface in Flower's binary value encoding
+([`GUEST_ABI.md`](../../GUEST_ABI.md)); crypto passes typed-array bytes directly. End-to-end benchmarks determine throughput.
 
 Before capturing a reusable base or initialized bundle image, the host invokes
 the private `flower_snapshot_prepare` ABI. It collects unreachable cycles and
@@ -58,12 +58,15 @@ only during image preparation; it adds no host import or JavaScript capability.
 ## Pristine heaps with resident storage
 
 Every callback begins with the same pristine heap and exported numeric globals.
-Normally Wasmtime creates a new instance from the copy-on-write image. Within a
-synchronous writer batch, Flower can instead reuse a thread-confined Store after
-restoring that exact state. Before enabling restoration, Rust validates the final
-Wizer module: mutable globals must be accessible, function tables must remain
-immutable, and hidden state such as dropped segments or reference-valued globals
-is rejected. The pristine byte copy counts toward the bounded image cache.
+Wasmtime can create each instance from the copy-on-write image, but Flower
+normally reuses an idle instance after restoring that exact state. Returned
+instances queue for a background thread, `flower-wasm-reset`, that restores
+them off the request path; a caller that finds only queued instances of its
+image resets one itself rather than instantiating. Before enabling restoration,
+Rust validates the final Wizer module: mutable globals must be accessible,
+function tables must remain immutable, and hidden state such as dropped
+segments or reference-valued globals is rejected. The pristine byte copy counts
+toward the bounded image cache.
 
 On Linux and macOS, reusable Stores initially protect their linear memory as
 read-only. Wasmtime's per-Store signal hook makes each first-written native page
@@ -85,14 +88,15 @@ borrowed callback, drops per-call key/authorization caches, and charges a fresh
 transaction allowance before the next call. Operating-system entropy remains
 fresh and mutation-only.
 
-Idle Stores consume Wasmtime pool slots. Retention is capped at half the
-configured slots and `FLOWER_WASM_RECYCLE_BYTES` (96 MiB by default), disabled with
-a single slot or a zero byte budget, and cleared when a
-batch finishes or a writer must wait for admission/evaluation capacity. This
-reduces spare capacity for unrelated work under very small pool configurations;
-workers do not transfer Stores between threads to reclaim each other's slots.
-An image larger than the byte budget still runs normally in fresh COW instances;
-the budget limits caching rather than application heap capacity.
+Idle Stores consume Wasmtime pool slots. Every thread shares them. Retention is
+capped at half the configured slots and `FLOWER_WASM_RECYCLE_BYTES` (96 MiB by
+default), and disabled with a single slot or a zero byte budget. When the budget
+is full, a returning instance evicts the least recently used idle instances of
+other images; instances idle for 30 seconds are released, and so are all idle
+instances when Wasmtime runs out of slots. An evicted instance returns its budget
+before its Store is destroyed. An image larger than the byte budget still runs
+normally in fresh COW instances; the budget limits caching rather than
+application heap capacity.
 
 ## Reproduce and verify
 
@@ -100,17 +104,24 @@ The vendored source subset is byte-for-byte upstream, with its MIT license in
 [`upstream/LICENSE`](upstream/LICENSE). No upstream patch is required.
 [`engine.c`](engine.c) includes the pinned engine and Flower's
 [`json-check.c`](json-check.c), [`canonical-json.c`](canonical-json.c),
-[`read-json.c`](read-json.c) and
-[`crypto-view.c`](crypto-view.c) extensions in
-one translation unit. The JSON extension checks its optimization assumptions
-without invoking application getters. The crypto helper validates Uint8Array
+[`wire.c`](wire.c) and [`crypto-view.c`](crypto-view.c) extensions in one
+translation unit. The value codec and the canonical JSON fast path read object
+shapes and string buffers directly, without invoking application getters. The crypto helper validates Uint8Array
 views and reads their current length, including length-tracking resizable
 buffers: this pinned engine's public typed-array accessors return the original
 length after a resize. An engine upgrade must review both private-layout uses.
 [`crypto.c`](crypto.c) handles the binary host ABI without changing upstream code.
 
-Install the matching [WASI SDK 34 release](https://github.com/WebAssembly/wasi-sdk/releases/tag/wasi-sdk-34).
-For the macOS arm64 toolchain used to produce this artifact:
+The Nix development shell provides the matching [WASI SDK 34 release](https://github.com/WebAssembly/wasi-sdk/releases/tag/wasi-sdk-34)
+as a pinned package (`nix build .#wasi-sdk`) and sets `FLOWER_WASI_SDK`, so inside
+`nix develop` (or direnv) the build needs no extra setup:
+
+```sh
+python3 vendor/quickjs-ng/build.py --check
+```
+
+Without Nix, install the release yourself. For the macOS arm64 toolchain used to
+produce this artifact:
 
 ```sh
 curl -fL https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-arm64-macos.tar.gz -o wasi-sdk-34.0-arm64-macos.tar.gz
@@ -173,18 +184,22 @@ musl, dlmalloc, wasi-libc, and LLVM compiler-rt. The libc source revision is
 
 ## Private ABI
 
-This ABI is internal and versioned by the embedded artifact digest. Pointers and
-lengths are 32-bit, all text is UTF-8, and embedded NUL bytes are length-delimited.
-A packed 64-bit result contains its pointer in bits 0–31, byte length in bits
-32–62, and an exception-text flag in bit 63. Setup results from evaluation,
-compilation, bytecode loading, and snapshot preparation own malloc buffers that
-must be released with `flower_free`.
+[`GUEST_ABI.md`](../../GUEST_ABI.md) specifies what every guest implements:
+`flower_alloc`, `flower_invoke`, the `flower.host_call` database import and the
+value encoding. This guest's artifact digest versions it. Pointers and lengths
+are 32-bit and every buffer is length-delimited.
 
-`flower_invoke` is the final execution before the guest heap is discarded or
-restored. Its success and exception results retain QuickJS CString storage until
-that reset; **never pass invocation result pointers to `flower_free`**. Rust
-decodes directly from the suspended guest into owned values before replacing
-the heap, avoiding an extra output allocation/copy and guest heap teardown.
+`flower_invoke(kind, name, name_length, args, args_length)` decodes the
+arguments into JavaScript values, calls the privately retained runner and
+encodes its result or failure as an outcome. It is the final execution before
+the guest heap is discarded or restored, so the outcome buffer, like the result
+graph, is simply left for that reset. Rust decodes it directly from the
+suspended guest into owned values.
+
+The remaining exports serve only the host's image builder. Their packed 64-bit
+results contain a pointer in bits 0–31, a byte length in bits 32–62, and an
+exception-text flag in bit 63; each owns a malloc buffer that must be released
+with `flower_free`.
 
 | Function | Purpose |
 | --- | --- |
@@ -195,17 +210,26 @@ the heap, avoiding an extra output allocation/copy and guest heap teardown.
 | `flower_eval(source, length) -> packed` | Strict script evaluation; return its result as text. |
 | `flower_compile(source, length) -> packed` | Compile a script into trusted QuickJS bytecode. |
 | `flower_load(bytecode, length) -> packed` | Execute trusted bytecode; success is zero, failure is packed exception text. |
-| `flower_invoke(name, name_length, args, args_length, kind, kind_length, bytecode, bytecode_length) -> packed` | Bind invocation strings, optionally load cached bytecode, and call the privately retained cell runner in one crossing. |
+| `flower_invoke(kind, name, name_length, args, args_length) -> outcome` | Run one callback. |
 | `flower_snapshot_prepare() -> packed` | Collect initialization garbage, reset GC headroom, and return setup-only heap diagnostics. |
 
-The database import, `flower.host_call(method, method_length, payload, payload_length)
--> packed`, synchronously invokes Rust's database machinery. The response is a
-JSON envelope allocated in the same guest using `flower_alloc`. The private
-parsed bridge feeds that buffer directly into QuickJS's JSON parser before
-freeing it; the public compatibility bridge creates a JavaScript string instead.
-Guards preserve the original JavaScript expression when application code changes
-its intrinsics. Rust may recursively evaluate a different cell with its own
-fresh Store and memory.
+The database import, `flower.host_call(op, payload, payload_length) -> packed`,
+synchronously invokes Rust's database machinery with the operation's arguments
+as consecutive values. The reply is an outcome allocated in the same guest with
+`flower_alloc`; C decodes it into JavaScript values, or throws its failure as an
+Error carrying `code`, and frees it. Rust may recursively evaluate a different
+cell with its own fresh Store and memory.
+
+The codec in [`wire.c`](wire.c) walks ordinary objects through their shapes and
+dense arrays through their value slots, rejecting accessors, symbol or hidden
+properties, exotic objects, proxies, holes, named array properties, cycles,
+non-finite numbers and nesting beyond 128 levels. Strings, including ropes and
+slices, leave in their stored Latin-1 or UTF-16 form; Rust validates UTF-16 and
+rejects lone surrogates. Map keys are interned per message, so records sharing a
+shape repeat only key references; decoding turns each distinct key into an atom
+once. Decoded arrays are allocated at their final length and filled in place.
+Nothing in either direction calls into JavaScript, so intrinsic monkeypatches,
+`toJSON` hooks and getters are neither observed nor run.
 
 The crypto import is
 `flower.crypto_call(operation, parameter, spans_pointer, span_count, result_pointer) -> i32`.
@@ -249,8 +273,8 @@ ordinary crypto failures use the error result kind.
 
 Entropy operation zero is permitted by C only while `flower_invoke` is calling
 its privately retained runner. The flag is reset on ordinary return and thrown
-exceptions; trapped Stores are discarded. It remains disabled while loading a
-per-invocation bundle before the runner call. The Rust host additionally checks
+exceptions; trapped Stores are discarded. It remains disabled while `flower_load`
+evaluates a per-invocation bundle before the call. The Rust host additionally checks
 that the current callback is a mutation, preventing query/derived callbacks from
 obtaining entropy even when evaluated inside a mutation. Pure crypto operations
 remain available during initialization.
@@ -258,7 +282,7 @@ remain available during initialization.
 Managed-key operation 200 is also restricted to the private runner. Its four
 spans contain a public JSON descriptor and three binary argument slots. Rust
 resolves the declared capability against the invocation's committed catalog;
-the generic JSON host import cannot resolve keys. Unwrapped bytes and prepared
+the database import has no operation that resolves keys. Unwrapped bytes and prepared
 contexts never enter the guest or its reusable COW image. A precomputed NaCl box
 key receives an opaque, invocation-local QuickJS native object backed by a Rust context.
 Its deterministic slot is C-private and exposes no entropy, token, or key bytes.
@@ -270,34 +294,12 @@ length, as required by QuickJS's parser. All other buffers use explicit lengths.
 Bytecode is only generated from the current pinned guest; it is not an external
 serialization format or accepted from clients.
 
-Trusted base initialization captures the native JSON checker and parsed database
-bridge in a private runner closure. `__flowerSetRunner` retains that runner in
-the C image and deletes the temporary bootstrap globals before application initialization. Application code
-can neither replace the runner through a global assignment nor bypass validation
-with a lexical variable named `__flowerCheckJson` or `globalThis`.
-
-The native JSON fast path accepts proven-valid ordinary trees. It checks finite
-numbers, plain/null object prototypes, data descriptors, symbol/non-enumerable
-properties, array holes, cycles, and the 128-level depth limit. Ordinary objects
-and dense fast arrays are inspected directly through the pinned engine's shape
-and value slots, without allocating own-key vectors or property descriptors.
-Array length and class/layout guards prove density before inspecting elements;
-other layouts retain the general property path. Invalid values,
-proxies, global lexical shadows, and relevant intrinsic/prototype monkeypatches
-return to the unchanged JavaScript validator. The native probe performs no
-application callbacks, so restarting through JavaScript preserves proxy trap
-ordering and exact error behavior. `JSON.stringify` remains unchanged, including
-inherited `toJSON` behavior. Guards also cover Set methods, descriptor prototype
-pollution, and array iterator `next`/`return` hooks.
-
-After validation, the private parsed bridge uses QuickJS's exact JSON stringify
-intrinsic and parses the Rust reply directly from its buffer. This avoids an
-intermediate JavaScript response string and additional JavaScript builtin calls.
-Raw guards first verify `JSON`, `JSON.stringify`, `JSON.parse`, and
-`__flowerRead`, including global lexical shadows. Changed bindings fall back to
-the original JavaScript expression before any observable work. Stringification
-hooks still run in order; callees captured before those hooks remain the ones
-used for the in-flight call. The public string-returning `__flowerRead` is unchanged.
+Trusted base initialization captures the native database capability,
+`__flowerHost`, in a private runner closure. `__flowerSetRunner` retains the
+runner's `run` and `describe` functions in the C image and deletes both bootstrap
+globals before application initialization. Application code can neither reach
+the capability nor replace the runner, whether through a global assignment or a
+lexical variable named `__flowerHost` or `globalThis`.
 
 The SDK also captures the immutable `__flowerCanonicalJson` capability. It
 encodes finite JSON scalars and ordinary dense arrays containing only scalars
@@ -315,12 +317,9 @@ Maintainer-only differential/routing tests and an optional microbenchmark run
 directly against the guest:
 
 ```sh
-node vendor/quickjs-ng/check-json.mjs
 node vendor/quickjs-ng/check-canonical.mjs
 node vendor/quickjs-ng/check-crypto.mjs
-node vendor/quickjs-ng/check-read.mjs
 node vendor/quickjs-ng/check-invoke.mjs
-node vendor/quickjs-ng/check-json.mjs vendor/quickjs-ng/quickjs.wasm --bench
 FLOWER_CANONICAL_BENCH=1 node vendor/quickjs-ng/check-canonical.mjs
 ```
 
@@ -328,7 +327,9 @@ The crypto ABI harness checks typed-array offsets, resizing, detachment, UTF-8,
 output ownership, memory growth, error propagation, and the entropy initialization
 guard. Rust tests separately validate the actual algorithms and budgets.
 
-The microbenchmark uses Node's Wasm engine to isolate validator cost; it is not
+The invocation harness drives `flower_invoke` and `flower.host_call` with an
+independent JavaScript implementation of the value encoding. The canonical JSON
+microbenchmark uses Node's Wasm engine to isolate that helper's cost; it is not
 a production Wasmtime or end-to-end throughput measurement. Production tests
 also compare full Rust/Wasm evaluations with the original JavaScript coordinator
 running inside the same vendored QuickJS Wasm guest.
@@ -337,6 +338,6 @@ Wasmtime enforces the shared memory/deadline budgets. The Rust adapter also
 instruments every write of the exported C stack pointer, trapping before the
 1 MiB stack crosses its reserved lower guard region. QuickJS's catchable native
 stack/heap limits are disabled. Compiled code, base snapshots, and explicit
-static-initialization bundle snapshots are reused; each cell gets fresh logical
-memory with copy-on-write where supported. No mutable application heap is pooled
-between invocations.
+static-initialization bundle snapshots are reused; each cell gets logically fresh
+memory, either a copy-on-write instance or an idle one restored to the pristine
+image. No application state survives between invocations.

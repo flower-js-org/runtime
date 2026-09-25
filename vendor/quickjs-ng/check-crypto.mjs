@@ -2,6 +2,7 @@
 // Tests the C/Wasm ABI and ownership, independently of Rust's crypto algorithms.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import * as wire from "./wire.mjs";
 
 const module = new WebAssembly.Module(readFileSync(new URL("./quickjs.wasm", import.meta.url)));
 const encoder = new TextEncoder(), decoder = new TextDecoder();
@@ -99,9 +100,9 @@ for (const source of [
 check(`(() => {const a=__flowerCrypto(8,24*1024*1024);return a.length===24*1024*1024&&a[0]===19&&a[a.length-1]===19})()`);
 check(`(() => {for(let i=0;i<2000;i++){const a=__flowerCrypto(1,0,'test',new Uint8Array([0,255]));if(a.length!==6)return false}return true})()`);
 // Only the private runner enables entropy, and it resets the guard on errors.
-evaluate(`__flowerSetRunner(() => {
- if(__name==='throw')throw Error('callback failed');
- if(__name==='opaque') {
+evaluate(`__flowerSetRunner((kind, name) => {
+ if(name==='throw')throw Error('callback failed');
+ if(name==='opaque') {
    const h=__flowerCrypto(200,0,'{}','','','');
    if(h.kind!=='sharedKey'||!Object.isFrozen(h)||Reflect.ownKeys(h).length||h.token!==undefined)throw Error('observable handle');
    try {JSON.stringify(h);throw Error('serializable')}catch(e){if(!e.message.includes('invocation-local'))throw e}
@@ -114,13 +115,19 @@ evaluate(`__flowerSetRunner(() => {
    return JSON.stringify(Array.from(__flowerCrypto(202,0,h,new Uint8Array([4,5]),new Uint8Array(24))));
  }
  return JSON.stringify(Array.from(__flowerCrypto(0,3)))
-})`);
-function invoke(name, bytecode = [0, 0]) {
-  const fields = [allocate(name), allocate("null"), allocate("mutation")];
-  // Invocation results retain a QuickJS CString until this test instance is
-  // discarded; only setup results are flower_free-owned malloc buffers.
-  try { return unpack(api.flower_invoke(...fields.flat(), ...bytecode), false); }
-  finally { for (const [pointer] of fields) api.flower_free(pointer); }
+}, (kind, e) => ['COMPUTE_ERROR', String(e && e.message || e), undefined], () => null)`);
+function invoke(name, bytecode) {
+  // Bundles without an initialized snapshot load before the callback runs.
+  if (bytecode) unpack(api.flower_load(...bytecode));
+  const [namePointer, nameLength] = allocate(name);
+  const args = wire.encode(null), argsPointer = api.flower_alloc(args.length);
+  new Uint8Array(api.memory.buffer, argsPointer, args.length).set(args);
+  // The outcome stays in guest memory until this test instance is discarded.
+  const packed = BigInt.asUintN(64, api.flower_invoke(1, namePointer, nameLength, argsPointer, args.length));
+  const pointer = Number(packed & 0xffffffffn), length = Number(packed >> 32n);
+  const outcome = wire.outcome(new Uint8Array(api.memory.buffer, pointer, length).slice());
+  if (!outcome.ok) throw new Error(outcome.error.message);
+  return outcome.value;
 }
 assert.equal(invoke("allowed"), "[7,7,7]");
 assert.equal(invoke("opaque"), "[4,5]");

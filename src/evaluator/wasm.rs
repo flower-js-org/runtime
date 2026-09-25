@@ -13,6 +13,7 @@ mod crypto_tests;
 mod dirty;
 mod host;
 mod limits;
+mod module;
 mod native_profile;
 mod recycle;
 mod reset_surface;
@@ -21,13 +22,16 @@ mod surface;
 #[cfg(test)]
 mod tests;
 
+use super::wire;
 use abi::Abi;
 use anyhow::{Result, ensure};
 pub(super) use cache::Prepared;
 use host::Callback;
 pub use limits::Limits;
 use limits::MemoryLimit;
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 use std::sync::Arc;
 use wasmtime::{Engine, Store, UpdateDeadline};
 
@@ -83,14 +87,6 @@ fn store(engine: &Engine, shared: Arc<Limits>, callback: Option<Callback>) -> St
     store
 }
 
-pub(crate) fn recycle_scope() -> impl Drop {
-    recycle::Scope::configured()
-}
-
-pub(crate) fn clear_recycle_idle() {
-    recycle::clear_idle();
-}
-
 /// Compile and initialize the shared sandbox before accepting timed requests.
 pub fn warmup() -> Result<()> {
     cache::runtime().map(|_| ())
@@ -98,6 +94,12 @@ pub fn warmup() -> Result<()> {
 
 pub(super) fn prepare(bundle: &str, shared: Arc<Limits>) -> Result<Arc<Prepared>> {
     cache::runtime()?.prepare(bundle, shared)
+}
+
+/// Prepare a bundle being deployed: JavaScript or a guest module.
+pub(super) fn prepare_bundle(bundle: &Value, shared: Arc<Limits>) -> Result<Arc<Prepared>> {
+    let mut decoded = Vec::new();
+    cache::runtime()?.prepare_source(cache::Source::of(bundle, &mut decoded)?, shared)
 }
 
 pub(super) fn prepare_shared_bundle(
@@ -121,8 +123,8 @@ fn execute(
 }
 
 /// Run one isolated callback from an image acquired once per transaction.
-/// Business errors are returned in {ok:false,error:{code,message}} envelopes;
-/// resource failures remain Err and poison the shared transaction allowance.
+/// Tests see outcomes as {ok:true,value} or {ok:false,error:{code,message}}
+/// envelopes; resource failures remain Err and poison the shared allowance.
 #[cfg(test)]
 pub(super) fn execute_prepared(
     prepared: &Prepared,
@@ -132,7 +134,32 @@ pub(super) fn execute_prepared(
     host: &mut dyn FnMut(&str, Value) -> Result<Value>,
     shared: Arc<Limits>,
 ) -> Result<Value> {
-    execute_prepared_profiled(prepared, name, args, kind, host, shared, &None)
+    Ok(
+        match execute_prepared_profiled(prepared, name, args, kind, host, shared, &None)? {
+            wire::Outcome::Success(value) => json!({"ok": true, "value": value}),
+            wire::Outcome::Failure {
+                code,
+                message,
+                details,
+            } => {
+                let mut error = json!({"code": code, "message": message});
+                if let Some(details) = details {
+                    error["details"] = details;
+                }
+                json!({"ok": false, "error": error})
+            }
+        },
+    )
+}
+
+fn kind_number(kind: &str) -> Result<i32> {
+    Ok(match kind {
+        "query" => 0,
+        "mutation" => 1,
+        "transaction" => 2,
+        "derived" => 3,
+        _ => anyhow::bail!("unknown callback kind {kind}"),
+    })
 }
 
 pub(super) fn execute_prepared_profiled(
@@ -143,10 +170,10 @@ pub(super) fn execute_prepared_profiled(
     host: &mut dyn FnMut(&str, Value) -> Result<Value>,
     shared: Arc<Limits>,
     profile: &Option<Arc<super::profile::Invocation>>,
-) -> Result<Value> {
+) -> Result<wire::Outcome> {
     let _depth = shared.enter()?;
-    check_json(args)?;
-    let args = super::json_order::ordered_value(args)?;
+    let kind_number = kind_number(kind)?;
+    let args = wire::encode(args)?;
     ensure!(
         args.len() <= max_json_bytes()?,
         "INPUT_INVALID: arguments exceed FLOWER_RESULT_MAX_BYTES"
@@ -167,23 +194,15 @@ pub(super) fn execute_prepared_profiled(
         let abi = &cell.abi;
         drop(setup_timer);
         let load_timer = super::profile::timer(profile, super::profile::Stage::CellLoad);
-        let invocation = abi.invocation(
-            store,
-            name,
-            &args,
-            kind,
-            prepared.bytecode.as_deref(),
-            prepared.input_buffer,
-        )?;
+        if let Some(bytecode) = prepared.bytecode.as_deref() {
+            abi.bytecode(store, bytecode)?;
+        }
+        let invocation = abi.invocation(store, kind_number, name, &args, prepared.input_buffer)?;
         drop(load_timer);
         let run_timer = super::profile::timer(profile, super::profile::Stage::CellExecute);
         let encoded = abi.run_once(store, invocation)?;
         drop(run_timer);
-        let value = abi.callback_result(store, encoded)?;
-        if value.get("ok").and_then(Value::as_bool) == Some(true) {
-            check_json(&value["value"])?;
-        }
-        Ok(value)
+        abi.outcome(store, encoded)
     })();
     // Never let the borrowed callback escape, including a failed evaluation.
     cell.store.data_mut().callback = None;
@@ -208,13 +227,14 @@ fn is_guest_trap(error: &anyhow::Error) -> bool {
 }
 
 #[cfg(test)]
-fn manifest(bundle: &str, shared: Arc<Limits>) -> Result<String> {
+pub(super) fn manifest(bundle: &str, shared: Arc<Limits>) -> Result<Value> {
     let prepared = prepare(bundle, shared.clone())?;
     manifest_prepared(&prepared, shared)
 }
 
-/// Validate the manifest in a fresh isolated guest without invocation bindings.
-pub(super) fn manifest_prepared(prepared: &Prepared, shared: Arc<Limits>) -> Result<String> {
+/// The guest's raw manifest, from a fresh isolated instance without host
+/// capabilities. A failure is a deployment error carrying the guest's message.
+pub(super) fn manifest_prepared(prepared: &Prepared, shared: Arc<Limits>) -> Result<Value> {
     let _depth = shared.enter()?;
     let runtime = cache::runtime()?;
     let mut store = store(&runtime.engine, shared.clone(), None);
@@ -225,14 +245,10 @@ pub(super) fn manifest_prepared(prepared: &Prepared, shared: Arc<Limits>) -> Res
         if let Some(bytecode) = &prepared.bytecode {
             abi.bytecode(&mut store, bytecode)?;
         }
-        abi.eval_string(
-            &mut store,
-            &format!(
-                "((__flowerSchema)=>{})({})",
-                super::BUNDLE_MANIFEST,
-                include_str!("schema-manifest.js")
-            ),
-        )
+        match abi.manifest(&mut store)? {
+            wire::Outcome::Success(manifest) => Ok(manifest),
+            wire::Outcome::Failure { message, .. } => anyhow::bail!("{message}"),
+        }
     })();
     drop(store);
     if result.as_ref().err().is_some_and(is_guest_trap) {
@@ -266,57 +282,21 @@ pub(super) fn check_json(value: &Value) -> Result<()> {
     walk(value, 1)
 }
 
-pub(super) fn error_envelope(error: anyhow::Error) -> Value {
-    if let Some(error) = error.downcast_ref::<super::rust_engine::EngineError>() {
-        return json!({"ok": false, "error": error.failure()});
-    }
+/// A host callback's error as the guest sees it: code, message and details.
+pub(super) fn failure_parts(error: anyhow::Error) -> (String, String, Option<Value>) {
+    let error = match error.downcast::<super::rust_engine::EngineError>() {
+        Ok(error) => return (error.code, error.message, error.details),
+        Err(error) => error,
+    };
     let message = error.to_string();
     // Rust coordinator errors have a stable CODE: message display. Arbitrary
     // callback errors get COMPUTE_ERROR; never reinterpret punctuation as a code.
-    let (code, message) = message
-        .split_once(": ")
-        .filter(|(code, _)| {
-            !code.is_empty() && code.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
-        })
-        .unwrap_or(("COMPUTE_ERROR", &message));
-    json!({"ok": false, "error": {"code": code, "message": message}})
-}
-
-// Bound wire nesting before disabling serde's smaller default recursion limit:
-// business JSON permits 128 levels, plus the host call / envelope wrappers.
-pub(super) fn parse_json(encoded: &str) -> Result<Value> {
-    use serde::Deserialize;
-    ensure!(
-        encoded.len() <= max_json_bytes()?,
-        "JSON exceeds FLOWER_RESULT_MAX_BYTES"
-    );
-    let (mut quoted, mut escaped, mut depth) = (false, false, 0usize);
-    for byte in encoded.bytes() {
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                quoted = false;
-            }
-        } else {
-            match byte {
-                b'"' => quoted = true,
-                b'{' | b'[' => {
-                    depth += 1;
-                    ensure!(depth <= 136, "INVALID_VALUE: JSON nesting exceeds limit");
-                }
-                b'}' | b']' => depth = depth.saturating_sub(1),
-                _ => {}
-            }
-        }
+    match message.split_once(": ").filter(|(code, _)| {
+        !code.is_empty() && code.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
+    }) {
+        Some((code, rest)) => (code.to_owned(), rest.to_owned(), None),
+        None => ("COMPUTE_ERROR".to_owned(), message, None),
     }
-    let mut decoder = serde_json::Deserializer::from_str(encoded);
-    decoder.disable_recursion_limit();
-    let result = Value::deserialize(&mut decoder)?;
-    decoder.end()?;
-    Ok(result)
 }
 
 /// Test-only access to the same bounded guest, used by independent JavaScript

@@ -1,8 +1,8 @@
-//! Serialize trusted snapshots with the same UTF-16 key ordering used by the
-//! JavaScript canonical encoder. Values stay borrowed; only key references are
-//! sorted. JSON.parse still applies JavaScript's numeric-index enumeration rules.
+//! Serialize trusted snapshots for the JavaScript reference oracle with the
+//! same UTF-16 key ordering used by the JavaScript canonical encoder. Values
+//! stay borrowed; only key references are sorted. JSON.parse still applies
+//! JavaScript's numeric-index enumeration rules.
 
-#[cfg(test)]
 use std::collections::BTreeMap;
 
 use serde::{
@@ -13,7 +13,6 @@ use serde_json::Value;
 
 /// The caller validates snapshot depth before serialization. Omitting only the
 /// top-level bundle keeps application data and nested fields named bundle intact.
-#[cfg(test)]
 pub(super) fn ordered_snapshot(
     data: &BTreeMap<String, Value>,
     omit_bundle: bool,
@@ -21,7 +20,6 @@ pub(super) fn ordered_snapshot(
     serde_json::to_string(&Snapshot { data, omit_bundle })
 }
 
-#[cfg(test)]
 struct Snapshot<'a> {
     data: &'a BTreeMap<String, Value>,
     omit_bundle: bool,
@@ -49,7 +47,6 @@ fn serialize_object<'a, S: Serializer>(
     output.end()
 }
 
-#[cfg(test)]
 impl Serialize for Snapshot<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serialize_object(
@@ -65,21 +62,6 @@ struct OrderedValue<'a>(&'a Value);
 
 pub(super) fn ordered_value(value: &Value) -> serde_json::Result<String> {
     serde_json::to_string(&OrderedValue(value))
-}
-
-/// Host replies have a fixed outer shape; serialize it without allocating a
-/// JSON map and owned keys around every read result. The field order matches
-/// the normal UTF-16-sorted object encoder exactly.
-pub(super) fn ordered_success(value: &Value) -> serde_json::Result<String> {
-    #[derive(Serialize)]
-    struct Success<'a> {
-        ok: bool,
-        value: OrderedValue<'a>,
-    }
-    serde_json::to_string(&Success {
-        ok: true,
-        value: OrderedValue(value),
-    })
 }
 
 impl Serialize for OrderedValue<'_> {
@@ -102,21 +84,6 @@ impl Serialize for OrderedValue<'_> {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn borrowed_host_success_matches_normal_envelope_encoding() {
-        for value in [
-            Value::Null,
-            json!("quote\"\\\n\0🌸"),
-            json!([true, false, 0, -0.0, 1.0, 1e21]),
-            json!({"10":1,"2":2,"😀":{"\u{e000}":1,"😀":2},"\u{e000}":[1,2]}),
-        ] {
-            assert_eq!(
-                ordered_success(&value).unwrap(),
-                ordered_value(&json!({"ok":true,"value":value})).unwrap(),
-            );
-        }
-    }
 
     #[test]
     fn ascii_fast_path_preserves_nested_unicode_and_numeric_key_order() {

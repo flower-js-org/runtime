@@ -19,7 +19,6 @@ fn recycled_guests_restore_globals_closures_typed_arrays_prototypes_and_host_cal
             )
         );
         let prepared = prepare(&source, limits()).unwrap();
-        let _scope = pool::Scope::enter();
         for (index, args) in [
             json!({"text":"long 🌺".repeat(100)}),
             json!("short\0"),
@@ -45,7 +44,7 @@ fn recycled_guests_restore_globals_closures_typed_arrays_prototypes_and_host_cal
             );
         }
         assert!(
-            pool::stats().reused >= 1,
+            pool::stats(&prepared).reused >= 1,
             "the isolation assertions must exercise Store reuse"
         );
     }
@@ -74,7 +73,6 @@ fn concurrent_cold_bundle_callers_keep_heaps_callbacks_and_budgets_private() {
                         let image = prepare(source, limits());
                         prepared.wait();
                         let image = image.unwrap();
-                        let _scope = pool::Scope::enter();
                         if worker == 0 {
                             // Fail one invocation after image preparation. Its
                             // sticky memory failure must not taint any other
@@ -113,7 +111,11 @@ fn concurrent_cold_bundle_callers_keep_heaps_callbacks_and_budgets_private() {
                                 json!({"ok":true,"value":[1,1,null,args,[worker,round]]})
                             );
                         }
-                        assert!(pool::stats().reused >= 1);
+                        let stats = pool::stats(&image);
+                        assert!(
+                            stats.reused >= 1,
+                            "static_init={static_init} worker={worker} {stats:?}"
+                        );
                     })
                 })
                 .collect::<Vec<_>>();
@@ -134,7 +136,6 @@ fn nested_callbacks_on_the_same_image_keep_distinct_active_heaps_and_bridges() {
         )
     );
     let prepared = prepare(&source, limits()).unwrap();
-    let _scope = pool::Scope::enter();
     for _ in 0..2 {
         let shared = limits();
         let result = execute_prepared(
@@ -166,10 +167,10 @@ fn nested_callbacks_on_the_same_image_keep_distinct_active_heaps_and_bridges() {
         shared.check().unwrap();
     }
     assert!(
-        pool::stats().created >= 2,
+        pool::stats(&prepared).created >= 2,
         "an active Store cannot service its recursive child"
     );
-    assert!(pool::stats().reused > 0);
+    assert!(pool::stats(&prepared).reused > 0);
 }
 
 #[test]
@@ -183,7 +184,6 @@ fn recycled_business_errors_reset_the_next_callback_and_other_bundles_stay_disti
     );
     let first = prepare(&source, limits()).unwrap();
     let second = prepare(&bundle("()=>['second',1]", true), limits()).unwrap();
-    let _scope = pool::Scope::enter();
     let rejected = execute_prepared(
         &first,
         "test",
@@ -214,7 +214,7 @@ fn recycled_business_errors_reset_the_next_callback_and_other_bundles_stay_disti
         };
         assert_eq!(result, json!({"ok":true,"value":[label,1]}));
     }
-    assert!(pool::stats().reused >= 2);
+    assert!(pool::stats(&first).reused + pool::stats(&second).reused >= 2);
 }
 
 #[test]
@@ -247,7 +247,6 @@ fn one_pool_slot_runs_sequential_callbacks_without_retaining_idle_guests() {
         limits(),
     )
     .unwrap();
-    let _scope = pool::Scope::enter();
     for _ in 0..3 {
         let result = execute_prepared(
             &prepared,
@@ -259,10 +258,10 @@ fn one_pool_slot_runs_sequential_callbacks_without_retaining_idle_guests() {
         )
         .unwrap();
         assert_eq!(result, json!({"ok":true,"value":1}));
-        assert_eq!(pool::stats().idle, 0);
+        assert_eq!(pool::stats(&prepared).idle, 0);
     }
-    assert_eq!(pool::stats().created, 3);
-    assert_eq!(pool::stats().reused, 0);
+    assert_eq!(pool::stats(&prepared).created, 3);
+    assert_eq!(pool::stats(&prepared).reused, 0);
 }
 
 #[test]
@@ -299,7 +298,6 @@ fn insufficient_recycle_byte_budgets_execute_without_copying_or_tracking() {
         limits(),
     )
     .unwrap();
-    let _scope = pool::Scope::enter();
     for _ in 0..3 {
         let result = execute_prepared(
             &prepared,
@@ -311,9 +309,9 @@ fn insufficient_recycle_byte_budgets_execute_without_copying_or_tracking() {
         )
         .unwrap();
         assert_eq!(result, json!({"ok":true,"value":[1,7]}));
-        assert_eq!(pool::stats().idle, 0);
+        assert_eq!(pool::stats(&prepared).idle, 0);
     }
-    let stats = pool::stats();
+    let stats = pool::stats(&prepared);
     assert_eq!(stats.created, 3);
     assert_eq!(stats.reused, 0);
     assert_eq!(stats.reset_bytes, 0);
@@ -333,7 +331,6 @@ fn recycled_entropy_permissions_follow_each_callback_kind_and_randomness_is_fres
         }},http:{{}}}}}};"#
     );
     let prepared = prepare(&source, limits()).unwrap();
-    let _scope = pool::Scope::enter();
     let mut samples = Vec::new();
     for (name, kind, allowed) in [
         ("write", "mutation", true),
@@ -363,7 +360,7 @@ fn recycled_entropy_permissions_follow_each_callback_kind_and_randomness_is_fres
         }
     }
     assert_ne!(samples[0], samples[1]);
-    assert!(pool::stats().reused >= 3);
+    assert!(pool::stats(&prepared).reused >= 3);
 }
 
 #[test]
@@ -380,7 +377,6 @@ fn traps_and_memory_growth_discard_stores_and_limits_are_recharged() {
         limits(),
     )
     .unwrap();
-    let _scope = pool::Scope::enter();
     let invoke = |args: &Value, shared: Arc<Limits>| {
         execute_prepared(
             &prepared,
@@ -392,20 +388,20 @@ fn traps_and_memory_growth_discard_stores_and_limits_are_recharged() {
         )
     };
     assert_eq!(invoke(&Value::Null, limits()).unwrap()["value"], 42);
-    let before = pool::stats();
+    let before = pool::stats(&prepared);
     let expired = Limits::new(Instant::now() + Duration::from_millis(30), MAX_MEMORY_BYTES);
     assert!(invoke(&json!("loop"), expired.clone()).is_err());
     assert!(expired.check().is_err());
-    assert!(pool::stats().discarded > before.discarded);
-    let after_trap = pool::stats();
+    assert!(pool::stats(&prepared).discarded > before.discarded);
+    let after_trap = pool::stats(&prepared);
     assert_eq!(invoke(&Value::Null, limits()).unwrap()["value"], 42);
-    assert!(pool::stats().created > after_trap.created);
-    let before_growth = pool::stats();
+    assert!(pool::stats(&prepared).created > after_trap.created);
+    let before_growth = pool::stats(&prepared);
     assert_eq!(
         invoke(&json!("grow"), limits()).unwrap()["value"],
         16 * 1024 * 1024
     );
-    assert!(pool::stats().discarded > before_growth.discarded);
+    assert!(pool::stats(&prepared).discarded > before_growth.discarded);
     assert_eq!(invoke(&Value::Null, limits()).unwrap()["value"], 42);
     // A parked guest must not bypass a later transaction's smaller allowance.
     let tiny = Limits::new(Instant::now() + Duration::from_secs(30), 1);
@@ -415,10 +411,9 @@ fn traps_and_memory_growth_discard_stores_and_limits_are_recharged() {
 }
 
 #[test]
-fn scope_cleanup_releases_idle_guests_on_early_exit_and_unwind() {
-    let prepared = prepare(&bundle("()=>42", true), limits()).unwrap();
-    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _scope = pool::Scope::enter();
+fn unwinding_callbacks_discard_active_stores_and_idle_guests_can_be_released() {
+    let prepared = prepare(&bundle("()=>'released idle'", true), limits()).unwrap();
+    let run = || {
         execute_prepared(
             &prepared,
             "test",
@@ -427,62 +422,36 @@ fn scope_cleanup_releases_idle_guests_on_early_exit_and_unwind() {
             &mut |_, _| Ok(Value::Null),
             limits(),
         )
-        .unwrap();
-        assert!(pool::stats().idle > 0);
-        panic!("test scope unwinding");
+    };
+    run().unwrap();
+    assert_eq!(pool::stats(&prepared).idle, 1);
+    pool::release(&prepared);
+    assert_eq!(pool::stats(&prepared).idle, 0);
+    let before = pool::stats(&prepared);
+    run().unwrap();
+    assert_eq!(pool::stats(&prepared).created, before.created + 1);
+    // A host callback that unwinds mid-invocation drops its active Store; the
+    // returned instance of an earlier call on the same image stays reusable.
+    let calling = prepare(&bundle("ctx=>ctx.get('unwinding',null)", true), limits()).unwrap();
+    let call = |host: &mut dyn FnMut(&str, Value) -> Result<Value>| {
+        execute_prepared(&calling, "test", &Value::Null, "query", host, limits())
+    };
+    call(&mut |_, _| Ok(json!(1))).unwrap();
+    let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        call(&mut |_, _| panic!("test active host callback unwinding")).unwrap();
     }));
     assert!(unwind.is_err());
-    assert_eq!(pool::stats().idle, 0);
-    let early_exit = || -> Result<()> {
-        let _scope = pool::Scope::enter();
-        execute_prepared(
-            &prepared,
-            "test",
-            &Value::Null,
-            "query",
-            &mut |_, _| Ok(Value::Null),
-            limits(),
-        )?;
-        anyhow::bail!("test early exit")
-    };
-    assert!(early_exit().is_err());
-    assert_eq!(pool::stats().idle, 0);
-    let calling = prepare(&bundle("ctx=>ctx.get('panic',null)", true), limits()).unwrap();
-    let active_unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _scope = pool::Scope::enter();
-        execute_prepared(
-            &calling,
-            "test",
-            &Value::Null,
-            "query",
-            &mut |_, _| Ok(json!(1)),
-            limits(),
-        )
-        .unwrap();
-        execute_prepared(
-            &calling,
-            "test",
-            &Value::Null,
-            "query",
-            &mut |_, _| panic!("test active host callback unwinding"),
-            limits(),
-        )
-        .unwrap();
-    }));
-    assert!(active_unwind.is_err());
-    assert_eq!(pool::stats().idle, 0);
-    let _scope = pool::Scope::enter();
-    let before = pool::stats();
-    execute_prepared(
-        &prepared,
-        "test",
-        &Value::Null,
-        "query",
-        &mut |_, _| Ok(Value::Null),
-        limits(),
-    )
-    .unwrap();
-    assert_eq!(pool::stats().created, before.created + 1);
+    let after = pool::stats(&calling);
+    assert_eq!(
+        after.idle, 0,
+        "the unwinding invocation held the only idle guest"
+    );
+    assert_eq!(after.reused, 1);
+    assert_eq!(
+        call(&mut |_, _| Ok(json!(2))).unwrap(),
+        json!({"ok":true,"value":2})
+    );
+    assert_eq!(pool::stats(&calling).created, after.created + 1);
 }
 
 #[test]
@@ -531,7 +500,6 @@ fn managed_authorization_is_resolved_again_after_store_reuse() {
         limits(),
     )
     .unwrap();
-    let _scope = pool::Scope::enter();
     for allowed in [true, false, true] {
         let mut resolutions = 0;
         let value = execute_prepared(
@@ -567,5 +535,5 @@ fn managed_authorization_is_resolved_again_after_store_reuse() {
             );
         }
     }
-    assert!(pool::stats().reused >= 2);
+    assert!(pool::stats(&prepared).reused >= 2);
 }

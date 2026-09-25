@@ -55,7 +55,6 @@ fn dirty_pages_restore_guest_writes_and_track_large_recursive_host_writes() {
         ),
     );
     let prepared = prepare(&source, limits()).unwrap();
-    let _scope = pool::Scope::enter();
     // Later calls touch previously untouched pages; once a page becomes writable
     // it must remain part of every subsequent reset, even if a call skips it.
     for (index, (page, text)) in [
@@ -116,10 +115,10 @@ fn dirty_pages_restore_guest_writes_and_track_large_recursive_host_writes() {
         shared.check().unwrap();
     }
     assert!(
-        pool::stats().reused >= 2,
+        pool::stats(&prepared).reused >= 2,
         "must exercise protected Store reuse"
     );
-    let stats = pool::stats();
+    let stats = pool::stats(&prepared);
     assert!(
         stats.signal_faults > 0,
         "must handle actual guest write faults"
@@ -167,40 +166,39 @@ fn dirty_page_failures_release_protection_and_do_not_reuse_poisoned_guests() {
         );
     };
     {
-        let _scope = pool::Scope::enter();
         check_fresh();
         assert_eq!(
             invoke(&json!("business"), limits()).unwrap()["error"]["code"],
             "DECLINED"
         );
         check_fresh();
-        let before = pool::stats();
+        let before = pool::stats(&prepared);
         let short = Limits::new(Instant::now() + Duration::from_millis(30), MAX_MEMORY_BYTES);
         assert!(invoke(&json!("loop"), short.clone()).is_err());
         assert!(short.check().is_err());
-        assert!(pool::stats().discarded > before.discarded);
+        assert!(pool::stats(&prepared).discarded > before.discarded);
         check_fresh();
-        let before = pool::stats();
+        let before = pool::stats(&prepared);
         assert_eq!(
             invoke(&json!("grow"), limits()).unwrap()["value"],
             16 * 1024 * 1024
         );
-        assert!(pool::stats().discarded > before.discarded);
+        assert!(pool::stats(&prepared).discarded > before.discarded);
         check_fresh();
         let tiny = Limits::new(Instant::now() + Duration::from_secs(30), 1);
         assert!(invoke(&Value::Null, tiny.clone()).is_err());
         assert!(tiny.check().is_err());
         check_fresh();
     }
-    assert_eq!(pool::stats().idle, 0);
+    pool::release(&prepared);
+    assert_eq!(pool::stats(&prepared).idle, 0);
+    // The panicking invocation takes the only idle guest and must discard it.
     let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _scope = pool::Scope::enter();
         check_fresh();
         invoke(&json!("host"), limits()).unwrap();
     }));
     assert!(unwind.is_err());
-    assert_eq!(pool::stats().idle, 0);
-    let _scope = pool::Scope::enter();
+    assert_eq!(pool::stats(&prepared).idle, 0);
     check_fresh();
 }
 
