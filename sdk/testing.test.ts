@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import pizza from "../examples/goblin-pizza.ts";
+import pizza from "../examples/goblin-pizza-ts/goblin-pizza.ts";
 import { FlowerError, type FlowerClient, type Update } from "./client.ts";
 import { collection, define, derive, fail, mutation, participant, query, task, transaction, v } from "./index.ts";
 import type { Context } from "./index.ts";
@@ -101,8 +104,25 @@ const timed = define({
   },
 });
 
+test("path mode passes credentials into the isolated module", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "flower-testing-"));
+  const entry = join(directory, "guarded.ts");
+  const sdk = fileURLToPath(new URL("./index.ts", import.meta.url));
+  await writeFile(entry, `import { define, query } from ${JSON.stringify(sdk)};
+export default define({
+  auth: { authenticate: (_ctx, credentials) => credentials === null ? null : { subject: String(credentials.user) } },
+  http: { whoami: query("whoami", (ctx) => ctx.principal()?.subject ?? null) },
+});`);
+  try {
+    const db = await testDatabase(entry, { credentials: { user: "ann" } });
+    assert.equal(db.query("whoami"), "ann");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("module and path modes run an application to the same results, errors and state", async () => {
-  const entry = fileURLToPath(new URL("../examples/goblin-pizza.ts", import.meta.url));
+  const entry = fileURLToPath(new URL("../examples/goblin-pizza-ts/goblin-pizza.ts", import.meta.url));
   const scenario = (db: TestDatabase<typeof pizza>) => {
     const results: unknown[] = [];
     const attempt = (action: () => unknown) => {

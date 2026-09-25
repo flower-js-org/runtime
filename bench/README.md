@@ -8,7 +8,7 @@ cargo build --release --locked --bin flower --bin flower-bench-driver
 npm run bench:stress
 ```
 
-The application runs as either guest. By default it is [the TypeScript bundle](../examples/goblin-pizza.ts) on QuickJS. `--guest wasm` deploys [its Rust port](../examples/goblin-pizza-rs), built with the [`flower-sdk`](../crates/flower-sdk) crate into a WebAssembly module that implements [GUEST_ABI.md](../GUEST_ABI.md) directly. The port declares the same manifest, makes the same host calls in the same order and writes the same records, so the customer driver, workers and audit are unchanged. Build it inside `nix develop`, which provides the `wasm32-unknown-unknown` target:
+The application runs as either guest. By default it is [the TypeScript bundle](../examples/goblin-pizza-ts/goblin-pizza.ts) on QuickJS. `--guest wasm` deploys [its Rust port](../examples/goblin-pizza-rs), built with the [`flower-sdk`](../crates/flower-sdk) crate into a WebAssembly module that implements [GUEST_ABI.md](../GUEST_ABI.md) directly. The port declares the same manifest, makes the same host calls in the same order and writes the same records, so the customer driver, workers and audit are unchanged. Build it inside `nix develop`, which provides the `wasm32-unknown-unknown` target:
 
 ```sh
 cargo build --release --locked -p goblin-pizza --target wasm32-unknown-unknown
@@ -40,7 +40,7 @@ Publication validates and retains compact measurement JSON under `docs/bench/`, 
 
 ## Workload and accounting
 
-[The application](../examples/goblin-pizza.ts) uses composite `[tenant, store]` identities and store-local order IDs. Its durable equality index and incremental reducers update order statistics in proportion to changed orders. Rankings and delivery queue scopes are per tenant. Tenant assignment to groups is static; this workload exercises no migration, cross-group transaction, global leaderboard, or global atomic snapshot. Logical tenant separation in this unauthenticated demo is not authorization.
+[The application](../examples/goblin-pizza-ts/goblin-pizza.ts) uses composite `[tenant, store]` identities and store-local order IDs. Its durable equality index and incremental reducers update order statistics in proportion to changed orders. Rankings and delivery queue scopes are per tenant. Tenant assignment to groups is static; this workload exercises no migration, cross-group transaction, global leaderboard, or global atomic snapshot. Logical tenant separation in this unauthenticated demo is not authorization.
 
 Initially customer choices are 30% orders, 40% reads, and 30% tips. After the order cap, order choices become reads: approximately **70% reads / 30% durable mutations**. Tenants are selected uniformly. By default 80% of store choices use one hot store, with the rest uniform across four stores, so that store receives approximately 85% of its tenant's calls.
 

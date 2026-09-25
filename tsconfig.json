@@ -24,5 +24,8 @@
     "sdk/**/*.ts",
     "examples/**/*.ts",
     "docs/*.ts"
+  ],
+  "exclude": [
+    "examples/trinity"
   ]
 }

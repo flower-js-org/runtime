@@ -358,7 +358,9 @@ export async function testDatabase<App extends Manifest = Manifest>(app: App | s
     const sandbox = createContext(Object.create(null));
     runInContext(bundle.javascript, sandbox, { timeout: 10_000 });
     runInContext(source, sandbox, { timeout: 10_000 });
-    const local = <T>(value: T): T => sandbox.JSON.parse(JSON.stringify(value));
+    // A context's globals are not properties of its contextified object; read JSON from inside.
+    const contextJSON = runInContext("JSON", sandbox) as typeof JSON;
+    const local = <T>(value: T): T => contextJSON.parse(JSON.stringify(value));
     return new TestDatabase<App>(sandbox.__flowerBundle.default, sandbox as unknown as Engine, options, local);
   }
   const scope = Object.create(null) as Engine;

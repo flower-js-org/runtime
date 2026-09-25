@@ -34,8 +34,8 @@ reports customer goodput separately from offered and driver-dropped arrivals.
   --seed VALUE               Reproducible workload seed (default 42)
   --nodes N                  Raft cluster size: 1 or 3 (default 3)
   --binary PATH              Flower binary (default target/release/flower)
-  --guest KIND               js (default): examples/goblin-pizza.ts on QuickJS, or
-                             wasm: its Rust port, examples/goblin-pizza-rs
+  --guest KIND               js (default): examples/goblin-pizza-ts/goblin-pizza.ts
+                             on QuickJS, or wasm: its Rust port, examples/goblin-pizza-rs
   --guest-wasm PATH          Wasm guest module (default
                              target/wasm32-unknown-unknown/release/goblin_pizza.wasm)
   --initialization MODE      static (default) or per-invocation bundle initialization

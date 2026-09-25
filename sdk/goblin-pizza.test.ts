@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import app from "../examples/goblin-pizza.ts";
+import app from "../examples/goblin-pizza-ts/goblin-pizza.ts";
 import { FlowerError, type Update } from "./client.ts";
 import { canonicalJson, type Json } from "./json.ts";
 import { testDatabase, type TestDatabase } from "./testing.ts";
 
 // The bundled example runs in an isolated context on Flower's reference engine,
 // as the server runs it; the imported module is only read for its manifest.
-const entry = fileURLToPath(new URL("../examples/goblin-pizza.ts", import.meta.url));
+const entry = fileURLToPath(new URL("../examples/goblin-pizza-ts/goblin-pizza.ts", import.meta.url));
 const T0 = 1_000_000;
 const tenant = "tenant-0";
 const shop = (index: number, owner = tenant): [string, string] => [owner, `store-${index}`];

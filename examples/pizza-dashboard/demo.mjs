@@ -301,7 +301,7 @@ export async function startPizzaDemo({ port = 0, binary, auto = true, signal, ra
     shutdown.signal.throwIfAborted();
     await cluster.start();
     shutdown.signal.throwIfAborted();
-    const bundle = await buildBundle(resolve(root, "examples/goblin-pizza.ts"), { initialization: "static" });
+    const bundle = await buildBundle(resolve(root, "examples/goblin-pizza-ts/goblin-pizza.ts"), { initialization: "static" });
     shutdown.signal.throwIfAborted();
     await new FlowerAdmin(cluster.url, { adminToken: cluster.adminToken }).deploy(
       bundle, { signal: shutdown.signal });

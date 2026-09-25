@@ -1,7 +1,7 @@
-import { aggregate, canonicalJson, collection, define, derive, fail, mutation, query, v } from "../sdk/index.ts";
-import type { Context } from "../sdk/index.ts";
-import { scheduler } from "../sdk/scheduler.ts";
-import { queue } from "../sdk/temporal.ts";
+import { aggregate, canonicalJson, collection, define, derive, fail, mutation, query, v } from "../../sdk/index.ts";
+import type { Context } from "../../sdk/index.ts";
+import { scheduler } from "../../sdk/scheduler.ts";
+import { queue } from "../../sdk/temporal.ts";
 
 // Goblins run the kitchens; drones carry the pizzas. Everything here, including
 // oven timers, lease policy, stock accounting, and the leaderboard, is TypeScript.

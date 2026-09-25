@@ -1,6 +1,6 @@
 import { FlowerClient } from "../../sdk/index.ts";
-import type pizza from "../goblin-pizza.ts";
-import type { PizzaDashboard, PizzaOrder } from "../goblin-pizza.ts";
+import type pizza from "../goblin-pizza-ts/goblin-pizza.ts";
+import type { PizzaDashboard, PizzaOrder } from "../goblin-pizza-ts/goblin-pizza.ts";
 
 // The launcher's own view of the whole demo: its load, the replicas' Raft
 // metrics and the latency of the calls it made. The database never sees this.

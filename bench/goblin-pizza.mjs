@@ -201,7 +201,7 @@ export async function run(options, { ready, hostCrash } = {}) {
     await cluster.start();
     const bundle = await goblinBundle(options);
     report.bundleHash = bundle.hash;
-    report.guest = { kind: options.guest ?? "js", source: options.guest === "wasm" ? "examples/goblin-pizza-rs" : "examples/goblin-pizza.ts",
+    report.guest = { kind: options.guest ?? "js", source: options.guest === "wasm" ? "examples/goblin-pizza-rs" : "examples/goblin-pizza-ts/goblin-pizza.ts",
       bytes: Buffer.byteLength(bundle.javascript ?? Buffer.from(bundle.wasm, "base64")) };
     await client.deploy(bundle);
     settings = (await client.call("pizza.setup", {

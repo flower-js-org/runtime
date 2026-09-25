@@ -1,4 +1,4 @@
-//! Goblin Pizza as a Rust guest module: examples/goblin-pizza.ts, callback
+//! Goblin Pizza as a Rust guest module: examples/goblin-pizza-ts/goblin-pizza.ts, callback
 //! for callback. It declares the same manifest, writes the same records and
 //! makes the same host calls, so the benchmark and its audit run unchanged
 //! against either guest. Money is an integer number of copper coins.

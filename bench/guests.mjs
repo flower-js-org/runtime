@@ -26,7 +26,7 @@ export async function buildWasmGuest() {
 export async function goblinBundle({ guest = "js", guestWasm = WASM_GUEST, initialization } = {}) {
   if (guest === "js") {
     const { buildBundle } = await import("../sdk/bundle.ts");
-    return buildBundle(resolve(root, "examples/goblin-pizza.ts"), { initialization });
+    return buildBundle(resolve(root, "examples/goblin-pizza-ts/goblin-pizza.ts"), { initialization });
   }
   if (guest !== "wasm") throw new TypeError(`Unknown guest ${guest}`);
   let wasm;

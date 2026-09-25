@@ -4,7 +4,7 @@
 //! ```sh
 //! node -e 'import("./sdk/bundle.ts").then(async ({buildBundle}) => {
 //!   const fs = await import("node:fs");
-//!   fs.writeFileSync("/tmp/goblin.js", (await buildBundle("examples/goblin-pizza.ts")).javascript);
+//!   fs.writeFileSync("/tmp/goblin.js", (await buildBundle("examples/goblin-pizza-ts/goblin-pizza.ts")).javascript);
 //!   fs.writeFileSync("/tmp/ops.js", (await buildBundle("bench/guest-ops.ts")).javascript);
 //! })'
 //! FLOWER_GOBLIN_BUNDLE=/tmp/goblin.js FLOWER_MICRO_BUNDLE=/tmp/ops.js \

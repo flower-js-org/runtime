@@ -1,0 +1,32 @@
+{
+  "name": "trinity",
+  "private": true,
+  "type": "module",
+  "description": "An agent loop hosted in Flower",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "dev": "bin/dev",
+    "deploy": "node scripts/deploy.ts",
+    "gateway": "node gateway/main.ts",
+    "test": "node --test test/*.test.ts",
+    "e2e": "node test/e2e.ts",
+    "bench": "node bench/drive.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
+    "@flower-js/sdk": "file:../..",
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "typescript": "^7.0.2"
+  },
+  "bin": {
+    "trinity": "bin/trinity"
+  }
+}

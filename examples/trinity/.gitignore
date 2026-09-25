@@ -1,0 +1,7 @@
+*.log
+.DS_Store
+/.dev/
+/.direnv/
+/.env.local
+/.flower/
+/node_modules/

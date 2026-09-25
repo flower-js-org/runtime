@@ -1,0 +1,15 @@
+#!/bin/sh
+# The development stack in one command. `--sim` simulates the model; other flags pass through to `process-compose up`.
+set -eu
+root="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -z "${TRINITY_PORT:-}" ]; then
+  command -v direnv >/dev/null || { echo "dev needs direnv (and \`direnv allow\` in $root)" >&2; exit 1; }
+  exec direnv exec "$root" "$0" "$@"
+fi
+cd "$root"
+if [ "${1:-}" = "--sim" ]; then
+  shift
+  export TRINITY_SIM=1
+fi
+mkdir -p .dev/logs
+exec process-compose up --use-uds "$@"

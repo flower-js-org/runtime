@@ -173,6 +173,8 @@
             })
             pkgs.nodejs_26
             pkgs.stdenv.cc
+            # examples/trinity runs its development stack under process-compose.
+            pkgs.process-compose
             xmit.packages.${pkgs.stdenv.hostPlatform.system}.default
           ];
 

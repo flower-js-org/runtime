@@ -359,7 +359,7 @@ Every two seconds the launcher calls `pizza.archive`, which folds deliveries old
 Store identity is the tuple `[tenant, store]`. Shops are keyed by that tuple and orders by `[tenant, store, orderId]`, both declared with `.key(v.tuple(...))`. Different tenants and stores can reuse the same local order ID. Each tenant claims deliveries from its own scope of one queue and has its own derived leaderboard. Order statistics are an incremental aggregate, and one store summary per shop row stays materialized through `materialize: { each: shops }`; rankings compute from those summaries when read, so tips do not sort or replicate whole rankings. The scheduler uses composite timer IDs; order and dashboard queries use the durable store index.
 
 ```ts
-import type pizza from "./examples/goblin-pizza.ts";
+import type pizza from "./examples/goblin-pizza-ts/goblin-pizza.ts";
 
 const client = new FlowerClient<typeof pizza>("http://127.0.0.1:7101");
 await client.mutate("pizza.setup", {
@@ -683,7 +683,7 @@ npm run bench:stress     # More concurrency plus a leader crash during load
 npm run bench -- --help
 ```
 
-See [the example](examples/goblin-pizza.ts) and [benchmark guide](bench/README.md)
+See [the example](examples/goblin-pizza-ts/goblin-pizza.ts) and [benchmark guide](bench/README.md)
 for workload controls and measurement limits. Reports default to
 `bench/results/latest.json` and a self-contained HTML report with charts at
 `bench/results/latest.html`. Use `--baseline earlier.json` for a before/after

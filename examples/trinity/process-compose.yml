@@ -1,0 +1,156 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/F1bonacc1/process-compose/main/schemas/process-compose-schema.json
+# The development stack. Run `dev` (bin/dev) inside the direnv environment.
+version: "0.5"
+name: trinity
+log_location: .dev/logs/process-compose.log
+# Bash expands variables when each command runs, so shell defaults like ${FLOWER_BIN:-…} work.
+disable_env_expansion: true
+shell:
+  shell_command: bash
+  # Not -lc: a login shell would reset PATH and lose the dev shell's tools.
+  shell_argument: -c
+
+processes:
+  install:
+    description: Install Trinity's dependencies.
+    command: npm install --no-audit --no-fund
+    log_location: .dev/logs/install.log
+    availability:
+      restart: no
+
+  flower-sdk:
+    description: Build Flower's SDK, which Trinity imports from the repository's dist/.
+    command: cd "$FLOWER_DIR" && { [ -d node_modules ] || npm ci --no-audit --no-fund; } && npm run build
+    log_location: .dev/logs/flower-sdk.log
+    availability:
+      restart: no
+
+  flower-build:
+    description: Build the Flower server from this repository, unless FLOWER_BIN names one.
+    command: |
+      if [ -n "${FLOWER_BIN:-}" ]; then echo "using $FLOWER_BIN"; exit 0; fi
+      cd "$FLOWER_DIR" && cargo build --release --bin flower
+    log_location: .dev/logs/flower-build.log
+    availability:
+      restart: no
+
+  flower:
+    description: A single-node Flower cluster, with its data in .dev/flower.
+    command: RUST_LOG="${RUST_LOG:-warn}" exec "${FLOWER_BIN:-$FLOWER_DIR/target/release/flower}" --id 1 --listen "127.0.0.1:$TRINITY_FLOWER_PORT" --data .dev/flower
+    log_location: .dev/logs/flower.log
+    depends_on:
+      flower-build:
+        condition: process_completed_successfully
+    readiness_probe:
+      exec:
+        command: curl -fsS "http://127.0.0.1:$TRINITY_FLOWER_PORT/health" >/dev/null
+      initial_delay_seconds: 1
+      period_seconds: 1
+      failure_threshold: 60
+    availability:
+      restart: on_failure
+      backoff_seconds: 2
+
+  flower-init:
+    description: Make the node a one-member cluster once, and wait until it leads.
+    command: node scripts/init.ts
+    log_location: .dev/logs/flower-init.log
+    depends_on:
+      install:
+        condition: process_completed_successfully
+      flower:
+        condition: process_healthy
+    availability:
+      restart: no
+
+  deploy:
+    description: Deploy the application, and again whenever app/ changes.
+    command: node --watch-path=app scripts/deploy.ts
+    log_location: .dev/logs/deploy.log
+    ready_log_line: "deployed "
+    depends_on:
+      flower-sdk:
+        condition: process_completed_successfully
+      flower-init:
+        condition: process_completed_successfully
+    availability:
+      restart: on_failure
+      backoff_seconds: 2
+
+  gateway:
+    description: The web client, sign-in and the public API, on TRINITY_URL.
+    command: PORT="$TRINITY_PORT" exec node --watch gateway/main.ts
+    log_location: .dev/logs/gateway.log
+    depends_on:
+      deploy:
+        condition: process_log_ready
+    readiness_probe:
+      exec:
+        command: curl -fsS "http://127.0.0.1:$TRINITY_PORT/healthz" >/dev/null
+      period_seconds: 1
+      failure_threshold: 60
+    availability:
+      restart: always
+      backoff_seconds: 2
+
+  llm:
+    description: Streams completions from Claude (needs ANTHROPIC_API_KEY or an `ant auth login` profile), or simulates them and the sim computers under `dev --sim`.
+    command: |
+      if [ -n "${TRINITY_SIM:-}" ]; then exec node --watch workers/cli.ts sim; fi
+      exec node --watch workers/cli.ts llm
+    log_location: .dev/logs/llm.log
+    depends_on:
+      deploy:
+        condition: process_log_ready
+    availability:
+      restart: always
+      backoff_seconds: 5
+
+  service:
+    description: MCP calls, stored outputs, sealing, titles and surface replies.
+    command: exec node --watch workers/cli.ts service
+    log_location: .dev/logs/service.log
+    depends_on:
+      deploy:
+        condition: process_log_ready
+    availability:
+      restart: always
+      backoff_seconds: 5
+
+  sandboxes:
+    description: Docker sandboxes, when Docker is running.
+    command: |
+      if ! docker version >/dev/null 2>&1; then
+        echo "Docker is not running, so sandboxes are unavailable. Start it, then restart this process."
+        exec sleep infinity
+      fi
+      exec node --watch workers/cli.ts sandboxes
+    log_location: .dev/logs/sandboxes.log
+    depends_on:
+      deploy:
+        condition: process_log_ready
+    availability:
+      restart: always
+      backoff_seconds: 5
+
+  slack:
+    description: Slack over Socket Mode. Waits until `trinity slack setup` has put SLACK_APP_TOKEN in .env.local.
+    command: exec node --watch workers/cli.ts slack
+    log_location: .dev/logs/slack.log
+    depends_on:
+      deploy:
+        condition: process_log_ready
+    availability:
+      restart: always
+      backoff_seconds: 5
+
+  computer:
+    description: Organization "dev" with this machine as its computer, working in .dev/workspace.
+    command: exec node --watch scripts/dev-computer.ts
+    log_location: .dev/logs/computer.log
+    depends_on:
+      deploy:
+        condition: process_log_ready
+    availability:
+      restart: always
+      backoff_seconds: 5
