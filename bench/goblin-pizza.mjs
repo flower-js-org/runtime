@@ -416,7 +416,7 @@ export async function run(options, { ready, hostCrash } = {}) {
     report.application = summarizeApplication(report);
     report.profilePassed = options.cpuProfile ? report.cpuProfile?.status === "complete" : null;
     report.passed &&= report.profilePassed !== false;
-    report.dataDirectory = options.keepData ? cluster.directory : null;
+    report.dataDirectory = options.keepData ? cluster.directories.join(", ") : null;
     if (!report.passed) report.clusterLogs = logs;
     await mkdir(dirname(options.json), { recursive: true });
     await writeFile(options.json, JSON.stringify(report, null, 2) + "\n");

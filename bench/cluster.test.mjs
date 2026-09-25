@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { access, rm } from "node:fs/promises";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:net";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
@@ -70,6 +70,21 @@ test("keepData retains only the harness-created directory for inspection", async
     for (const node of cluster.members) await assertPortReleased(node.address);
   } finally {
     if (cluster.directory) await rm(cluster.directory, { recursive: true, force: true });
+  }
+});
+
+test("data roots receive servers in turn and are all removed", async () => {
+  const roots = await Promise.all(["a", "b"].map((name) => mkdtemp(join(tmpdir(), `flower-root-${name}-`))));
+  try {
+    const cluster = new LocalCluster({ binary: process.execPath, data: roots, startupTimeoutMs: 10_000 });
+    await assert.rejects(cluster.start(), /exited unexpectedly/);
+    assert.deepEqual(cluster.directories.map((directory) => dirname(directory)), roots);
+    assert.equal(cluster.directory, cluster.directories[0]);
+    assert.deepEqual(cluster.members.map((node) => dirname(node.directory)), [0, 1, 0].map((index) => cluster.directories[index]));
+    for (const directory of cluster.directories) await assert.rejects(access(directory), { code: "ENOENT" });
+    await cluster.close();
+  } finally {
+    await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
   }
 });
 

@@ -68,6 +68,12 @@ By default every replica is its own server process with its own database, so the
 
 ```sh
 npm run bench -- --groups 8 --http2 --hosted --chaos
+```
+
+Databases go in a fresh directory under the system temporary directory. `--data DIR[,DIR…]` creates one under each named directory instead, and servers (hosts, with `--hosted`) take them in turn: `--data /tmp,/Volumes/Data,/tmp` puts the second host on another disk. Every directory is removed afterward unless `--keep-data` is given.
+
+```sh
+npm run bench:stress -- --data /tmp,/Volumes/Data,/tmp
 ``` `--driver-binary PATH` selects the Rust executable, defaulting to `target/release/flower-bench-driver`. The driver E2E checks real HTTP/2 pooling, replica routing, uncertain retries, receipt replay, histograms, and business accounting against a test server.
 
 By default each customer waits for its response before issuing more work: this is a closed-loop capacity measurement. Independent arrivals expose overload differently:

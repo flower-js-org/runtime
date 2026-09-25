@@ -57,6 +57,9 @@ reports customer goodput separately from offered and driver-dropped arrivals.
                              audits always use fresh reads
   --driver-binary PATH       Rust customer driver (default target/release/flower-bench-driver)
   --keep-data                Preserve temporary cluster data after completion
+  --data DIR[,DIR...]        Parent directories for server data (default: the system
+                             temporary directory); servers alternate between them,
+                             e.g. to give replicas separate disks
   --help                     Show this help; use alone
 
 Seconds can be fractional; counts and milliseconds must be integers.
@@ -88,7 +91,7 @@ const NUMERIC = {
 };
 
 const BOOLEAN = { chaos: "chaos", hosted: "hosted", http2: "http2", "keep-data": "keepData", help: "help" };
-const TEXT = { seed: "seed", guest: "guest", "guest-wasm": "guestWasm", initialization: "initialization", "query-routing": "queryRouting", "read-consistency": "readConsistency", "driver-binary": "driverBinary", binary: "binary", json: "json", html: "html", baseline: "baseline", "cpu-profile": "cpuProfile" };
+const TEXT = { seed: "seed", guest: "guest", "guest-wasm": "guestWasm", initialization: "initialization", "query-routing": "queryRouting", "read-consistency": "readConsistency", "driver-binary": "driverBinary", binary: "binary", json: "json", html: "html", baseline: "baseline", "cpu-profile": "cpuProfile", data: "data" };
 const NUMBER_PATTERN = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
 
 function defaults() {
@@ -107,6 +110,7 @@ function defaults() {
     html: null,
     baseline: null,
     cpuProfile: null,
+    data: null,
     chaos: false,
     hosted: false,
     http2: false,
@@ -163,6 +167,10 @@ export function parseOptions(argv) {
     if (Object.hasOwn(NUMERIC, name)) {
       const rule = NUMERIC[name];
       options[rule.field] = parseNumber(name, raw, rule);
+    } else if (name === "data") {
+      const roots = raw.split(",");
+      if (roots.some((root) => root.trim() === "")) throw new Error("--data requires nonempty directories");
+      options.data = roots.map((root) => resolve(root));
     } else options[TEXT[name]] = ["seed", "guest", "initialization", "query-routing", "read-consistency"].includes(name) ? raw : resolve(raw);
   }
   if (options.help && argv.length !== 1) throw new Error("--help must be used alone");

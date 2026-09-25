@@ -58,6 +58,19 @@ async function waitForDiscovery(promise, timeoutMs) {
   } finally { clearTimeout(timer); }
 }
 
+/**
+ * A fresh directory under each root, by default the system temporary
+ * directory. Servers alternate between them, e.g. to put replicas on
+ * separate disks.
+ */
+async function dataDirectories(roots, prefix) {
+  const created = await Promise.allSettled((roots?.length ? roots : [tmpdir()]).map((parent) => mkdtemp(join(parent, prefix))));
+  const failure = created.find(({ status }) => status === "rejected");
+  if (!failure) return created.map(({ value }) => value);
+  await Promise.all(created.filter(({ status }) => status === "fulfilled").map(({ value }) => rm(value, { recursive: true, force: true })));
+  throw failure.reason;
+}
+
 /** An isolated, disposable cluster. Never connects to or deletes an existing database. */
 export class LocalCluster {
   constructor(options = {}) {
@@ -67,6 +80,7 @@ export class LocalCluster {
     this.startupTimeoutMs = positiveInteger(options.startupTimeoutMs ?? 30_000, "startupTimeoutMs");
     this.requestTimeoutMs = positiveInteger(options.requestTimeoutMs ?? 2_000, "requestTimeoutMs");
     this.keepData = options.keepData ?? false;
+    this.dataRoots = options.data ?? null;
     this.onProcess = options.onProcess;
     // Replicas served by shared host processes (HostCluster): never spawned,
     // restarted or deleted here.
@@ -75,6 +89,7 @@ export class LocalCluster {
     this.members = [];
     this.leader = null;
     this.directory = null;
+    this.directories = [];
     this.events = [];
     this._generations = [];
     this._reservations = [];
@@ -202,13 +217,14 @@ export class LocalCluster {
     }
     this._starting = (async () => {
       await access(this.binary, constants.X_OK);
-      this.directory = await mkdtemp(join(tmpdir(), "flower-bench-"));
+      this.directories = await dataDirectories(this.dataRoots, "flower-bench-");
+      [this.directory] = this.directories;
       for (let index = 0; index < this.nodeCount; index++) {
         const reservation = await reservePort();
         this._reservations.push(reservation);
         const id = index + 1;
         const address = `127.0.0.1:${reservation.port}`;
-        this.members.push({ id, address, url: `http://${address}`, directory: join(this.directory, `node-${id}`) });
+        this.members.push({ id, address, url: `http://${address}`, directory: join(this.directories[index % this.directories.length], `node-${id}`) });
       }
       for (const [index, node] of this.members.entries()) {
         await releasePort(this._reservations[index]);
@@ -421,7 +437,7 @@ export class LocalCluster {
         }
       }));
       await Promise.allSettled([this._recovering, this._discovering]);
-      if (this.directory && !this.keepData) await rm(this.directory, { recursive: true, force: true });
+      if (!this.keepData) await Promise.all(this.directories.map((directory) => rm(directory, { recursive: true, force: true })));
     })();
     return this._closing;
   }
@@ -439,10 +455,12 @@ export class HostCluster {
     this.binary = resolve(options.binary ?? join(root, "target/release/flower"));
     this.startupTimeoutMs = positiveInteger(options.startupTimeoutMs ?? 30_000, "startupTimeoutMs");
     this.keepData = options.keepData ?? false;
+    this.dataRoots = options.data ?? null;
     this.onProcess = options.onProcess;
     this.adminToken = randomUUID();
     this.hosts = [];
     this.directory = null;
+    this.directories = [];
     this._reservations = [];
     this._generations = [];
     this._controller = new AbortController();
@@ -514,7 +532,8 @@ export class HostCluster {
 
   async start() {
     await access(this.binary, constants.X_OK);
-    this.directory = await mkdtemp(join(tmpdir(), "flower-bench-hosts-"));
+    this.directories = await dataDirectories(this.dataRoots, "flower-bench-hosts-");
+    [this.directory] = this.directories;
     for (let index = 0; index < this.nodeCount; index++) {
       const addresses = [];
       for (let group = 0; group < this.groups; group++) {
@@ -522,7 +541,7 @@ export class HostCluster {
         this._reservations.push(reservation);
         addresses.push(`127.0.0.1:${reservation.port}`);
       }
-      this.hosts.push({ id: index + 1, addresses, directory: join(this.directory, `host-${index + 1}`) });
+      this.hosts.push({ id: index + 1, addresses, directory: join(this.directories[index % this.directories.length], `host-${index + 1}`) });
     }
     await Promise.all(this._reservations.map(releasePort));
     for (const host of this.hosts) this._startHost(host);
@@ -593,6 +612,6 @@ export class HostCluster {
         await waitForExit(runtime, 5_000);
       }
     }));
-    if (this.directory && !this.keepData) await rm(this.directory, { recursive: true, force: true });
+    if (!this.keepData) await Promise.all(this.directories.map((directory) => rm(directory, { recursive: true, force: true })));
   }
 }

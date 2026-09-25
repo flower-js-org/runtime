@@ -15,7 +15,7 @@ test("defaults are bounded and resolve paths from the checkout", () => {
     driver: "rust", driverBinary: fileURLToPath(new URL("../target/release/flower-bench-driver", import.meta.url)),
     binary: fileURLToPath(new URL("../target/release/flower", import.meta.url)),
     json: fileURLToPath(new URL("../bench/results/latest.json", import.meta.url)),
-    html: fileURLToPath(new URL("../bench/results/latest.html", import.meta.url)), baseline: null, cpuProfile: null,
+    html: fileURLToPath(new URL("../bench/results/latest.html", import.meta.url)), baseline: null, cpuProfile: null, data: null,
     chaos: false, hosted: false, http2: false, keepData: false, help: false,
   });
   result.duration = 123;
@@ -39,7 +39,7 @@ test("all numeric, text, and boolean options parse into driver fields", () => {
     guest: "js", guestWasm: fileURLToPath(new URL("../target/wasm32-unknown-unknown/release/goblin_pizza.wasm", import.meta.url)),
     driver: "rust", driverBinary: fileURLToPath(new URL("../target/release/flower-bench-driver", import.meta.url)),
     binary: resolve("a flower"), json: resolve("output report.json"),
-    html: resolve("output report.html"), baseline: null, cpuProfile: null,
+    html: resolve("output report.html"), baseline: null, cpuProfile: null, data: null,
     chaos: true, hosted: false, http2: true, keepData: true, help: false,
   });
   assert.equal(parseOptions(["--seed=0"]).seed, "0");
@@ -58,6 +58,8 @@ test("all numeric, text, and boolean options parse into driver fields", () => {
   assert.equal(parseOptions(["--html", "custom.html"]).html, resolve("custom.html"));
   assert.equal(parseOptions(["--baseline", "before.json"]).baseline, resolve("before.json"));
   assert.equal(parseOptions(["--cpu-profile", "cpu sample.txt"]).cpuProfile, resolve("cpu sample.txt"));
+  assert.deepEqual(parseOptions(["--data", "/Volumes/Data,internal disk"]).data, ["/Volumes/Data", resolve("internal disk")]);
+  assert.throws(() => parseOptions(["--data", "a,,b"]), /nonempty directories/);
   assert.throws(() => parseOptions(["--html", "same", "--json", "same"]), /different/);
   assert.throws(() => parseOptions(["--baseline", "same", "--json", "same"]), /overwrite/);
   for (const flag of ["--json", "--html", "--baseline", "--binary"]) {
