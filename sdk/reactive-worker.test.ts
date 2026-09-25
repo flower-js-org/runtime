@@ -1,139 +1,145 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createContext, runInContext } from "node:vm";
-import { build } from "esbuild";
-import { canonicalJson } from "./index.ts";
+import type app from "../docs/reactive-worker.ts";
+import { FlowerError } from "./client.ts";
+import { canonicalJson } from "./json.ts";
+import { testDatabase } from "./testing.ts";
 
-// Bundle the actual download against current source, without depending on dist/.
-const bundle = await build({
-  entryPoints: [fileURLToPath(new URL("../docs/reactive-worker.ts", import.meta.url))],
-  alias: { "@flower-js/sdk": fileURLToPath(new URL("./index.ts", import.meta.url)) },
-  bundle: true,
-  write: false,
-  format: "iife",
-  globalName: "__flowerBundle",
-  platform: "neutral",
-  target: "es2020",
-  logLevel: "silent",
-});
-const engine = readFileSync(new URL("../runtime/engine.js", import.meta.url), "utf8");
-const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value));
-const digest = (text: string) => createHash("sha256").update(text).digest("hex");
+// The downloadable app, bundled against current SDK source and run isolated.
+const entry = fileURLToPath(new URL("../docs/reactive-worker.ts", import.meta.url));
+const application = () => testDatabase<typeof app>(entry);
+const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+const input = (text: string) => ({ recipe: "sha256-v1", text });
+const pending = { status: "pending" } as const;
+const ready = (text: string) => ({ status: "ready", value: sha(text) }) as const;
 
-function application() {
-  const sandbox = createContext(Object.create(null));
-  runInContext(bundle.outputFiles[0].text, sandbox, { timeout: 1_000 });
-  runInContext(engine, sandbox, { timeout: 1_000 });
-  const module = sandbox.__flowerBundle.default;
-  let state: Record<string, unknown> = {};
-  let sequence = 0;
-  return {
-    get state() { return plain(state); },
-    call(alias: string, args: unknown) {
-      const method = module.http[alias];
-      assert.ok(method, `No public method ${alias}`);
-      const output = plain(sandbox.flowerInvoke(state,
-        { kind: method.kind, name: method.name, args, requestId: `worker-${sequence++}` },
-        (name: string, input: unknown, ctx: unknown) => module.definitions[name].compute(ctx, input),
-        (name: string, input: unknown, ctx: unknown) => module.definitions[name].compute(ctx, input), 1_000));
-      state = { ...state, ...output.puts };
-      for (const key of output.deletes) delete state[key];
-      return output.value;
-    },
-  };
+function fails(action: () => unknown, code: string): FlowerError {
+  let caught: unknown;
+  assert.throws(action, (error) => { caught = error; return true; });
+  assert.ok(caught instanceof FlowerError, String(caught));
+  assert.equal(caught.failure?.code, code, caught.message);
+  return caught;
 }
 
-test("worker publication feeds a guarded derive and immediately hides obsolete results", () => {
-  const db = application();
-  assert.equal(db.call("document.get", "one"), null);
-  assert.equal(db.call("worker.pending", "one"), null);
-  db.call("document.put", { id: "one", text: "A" });
-  const work = db.call("worker.pending", "one");
-  assert.deepEqual(work, {
-    key: canonicalJson(["one", { recipe: "sha256-v1", text: "A" }]),
-    input: { recipe: "sha256-v1", text: "A" },
-  });
-  assert.deepEqual(db.call("document.get", "one"), { text: "A", result: null });
-  assert.deepEqual(db.call("worker.publish", { id: "one", key: work.key, result: digest("A") }), { accepted: true });
-  assert.deepEqual(db.call("document.get", "one"), { text: "A", result: digest("A") });
-  assert.equal(db.call("worker.pending", "one"), null);
+test("publishing moves a digest from pending to ready, and an edit makes it pending again", async () => {
+  const db = await application();
+  assert.equal(db.query("document.get", "one"), null);
+  assert.equal(db.query("digest.pending", "one"), null);
+  db.mutate("document.put", { id: "one", text: "A" });
+  const work = db.query("digest.pending", "one");
+  assert.deepEqual(work, { args: "one", key: canonicalJson(["one", input("A")]), input: input("A") });
+  assert.deepEqual(db.query("document.get", "one"), { text: "A", digest: pending });
+  assert.deepEqual(db.mutate("digest.publish", { args: "one", key: work.key, value: sha("A") }), { accepted: true });
+  assert.deepEqual(db.query("document.get", "one"), { text: "A", digest: ready("A") });
+  assert.equal(db.query("digest.pending", "one"), null);
 
-  db.call("document.put", { id: "one", text: "B" });
-  assert.deepEqual(db.call("document.get", "one"), { text: "B", result: null });
-  assert.deepEqual(db.call("worker.pending", "one").input, { recipe: "sha256-v1", text: "B" });
-  assert.deepEqual(db.call("worker.publish", { id: "one", key: work.key, result: digest("A") }), { accepted: false });
-  assert.deepEqual(db.call("document.get", "one"), { text: "B", result: null });
+  db.mutate("document.put", { id: "one", text: "B" });
+  assert.deepEqual(db.query("document.get", "one"), { text: "B", digest: pending });
+  assert.deepEqual(db.query("digest.pending", "one")?.input, input("B"));
+  assert.deepEqual(db.mutate("digest.publish", { args: "one", key: work.key, value: sha("A") }), { accepted: false }, "stale work is rejected");
+  assert.deepEqual(db.query("document.get", "one"), { text: "B", digest: pending });
 });
 
-test("superseded and deleted work cannot publish", () => {
-  const db = application();
-  db.call("document.put", { id: "one", text: "A" });
-  const workA = db.call("worker.pending", "one");
-  db.call("document.put", { id: "one", text: "B" });
-  const workB = db.call("worker.pending", "one");
-  assert.deepEqual(db.call("worker.publish", { id: "one", key: workA.key, result: digest("A") }), { accepted: false });
-  db.call("document.delete", "one");
-  assert.deepEqual(db.call("worker.publish", { id: "one", key: workB.key, result: digest("B") }), { accepted: false });
-  assert.equal(db.call("worker.pending", "one"), null);
-  assert.equal(db.call("document.get", "one"), null);
+test("superseded and deleted work cannot publish, and deleting a document removes its result", async () => {
+  const db = await application();
+  const results = `source:${canonicalJson(["digest.results", canonicalJson("one")])}`;
+  db.mutate("document.put", { id: "one", text: "A" });
+  const workA = db.query("digest.pending", "one")!;
+  db.mutate("digest.publish", { args: "one", key: workA.key, value: sha("A") });
+  assert.ok(Object.hasOwn(db.data, results));
+  db.mutate("document.put", { id: "one", text: "B" });
+  const workB = db.query("digest.pending", "one")!;
+  assert.deepEqual(db.mutate("digest.publish", { args: "one", key: workA.key, value: sha("A") }), { accepted: false });
+  db.mutate("document.delete", "one");
+  assert.deepEqual(db.mutate("digest.publish", { args: "one", key: workB.key, value: sha("B") }), { accepted: false });
+  assert.equal(db.query("digest.pending", "one"), null);
+  assert.equal(db.query("document.get", "one"), null);
+  assert.deepEqual(db.query("digest.next"), []);
+  assert.deepEqual(Object.keys(db.data), ["clock"], "the result and the stale marker are gone with the document");
+  assert.deepEqual(db.mutate("digest.publish", { args: "never", key: workA.key, value: sha("A") }), { accepted: false });
 });
 
-test("duplicate computation preserves the first accepted result and stops pending work", () => {
-  const db = application();
-  db.call("document.put", { id: "one", text: "A" });
-  const work = db.call("worker.pending", "one");
-  for (const result of [digest("A"), digest("a duplicate must not overwrite")]) {
-    assert.deepEqual(db.call("worker.publish", { id: "one", key: work.key, result }), { accepted: true });
+test("racing workers keep the first accepted result", async () => {
+  const db = await application();
+  db.mutate("document.put", { id: "one", text: "A" });
+  const work = db.query("digest.pending", "one")!;
+  for (const value of [sha("A"), sha("a duplicate must not overwrite")]) {
+    assert.deepEqual(db.mutate("digest.publish", { args: "one", key: work.key, value }), { accepted: true });
   }
-  assert.deepEqual(db.call("document.get", "one"), { text: "A", result: digest("A") });
-  assert.equal(db.call("worker.pending", "one"), null);
+  assert.deepEqual(db.query("document.get", "one"), { text: "A", digest: ready("A") });
+  assert.equal(db.query("digest.pending", "one"), null);
 });
 
-test("A → B → A accepts equivalent old work and reuses an existing matching result", () => {
-  const db = application();
-  db.call("document.put", { id: "one", text: "A" });
-  const workA = db.call("worker.pending", "one");
-  db.call("document.put", { id: "one", text: "B" });
-  const workB = db.call("worker.pending", "one");
-  db.call("document.put", { id: "one", text: "A" });
-  assert.deepEqual(db.call("worker.pending", "one"), workA);
-  assert.deepEqual(db.call("worker.publish", { id: "one", key: workA.key, result: digest("A") }), { accepted: true });
-  assert.deepEqual(db.call("worker.publish", { id: "one", key: workB.key, result: digest("B") }), { accepted: false });
+test("A → B → A accepts equivalent old work and reuses a stored matching result", async () => {
+  const db = await application();
+  db.mutate("document.put", { id: "one", text: "A" });
+  const workA = db.query("digest.pending", "one")!;
+  db.mutate("document.put", { id: "one", text: "B" });
+  const workB = db.query("digest.pending", "one")!;
+  db.mutate("document.put", { id: "one", text: "A" });
+  assert.deepEqual(db.query("digest.pending", "one"), workA);
+  assert.deepEqual(db.mutate("digest.publish", { args: "one", key: workA.key, value: sha("A") }), { accepted: true });
+  assert.deepEqual(db.mutate("digest.publish", { args: "one", key: workB.key, value: sha("B") }), { accepted: false });
 
-  db.call("document.put", { id: "one", text: "B" });
-  assert.deepEqual(db.call("document.get", "one"), { text: "B", result: null });
-  db.call("document.put", { id: "one", text: "A" });
-  assert.equal(db.call("worker.pending", "one"), null);
-  assert.deepEqual(db.call("document.get", "one"), { text: "A", result: digest("A") });
+  db.mutate("document.put", { id: "one", text: "B" });
+  assert.deepEqual(db.query("document.get", "one"), { text: "B", digest: pending });
+  db.mutate("document.put", { id: "one", text: "A" });
+  assert.equal(db.query("digest.pending", "one"), null);
+  assert.deepEqual(db.query("document.get", "one"), { text: "A", digest: ready("A") });
 });
 
-test("irrelevant edits do not invalidate work and identical documents have distinct identities", () => {
-  const db = application();
-  db.call("document.put", { id: "one", text: "A" });
-  const work = db.call("worker.pending", "one");
-  db.call("document.put", { id: "two", text: "A" });
-  assert.notEqual(db.call("worker.pending", "two").key, work.key);
-  assert.deepEqual(db.call("worker.publish", { id: "two", key: work.key, result: digest("A") }), { accepted: false });
-  db.call("document.put", { id: "two", text: "B" });
-  assert.deepEqual(db.call("worker.publish", { id: "one", key: work.key, result: digest("A") }), { accepted: true });
-  assert.deepEqual(db.call("document.get", "one"), { text: "A", result: digest("A") });
-  assert.deepEqual(db.call("document.get", "two"), { text: "B", result: null });
+test("edits to other documents neither invalidate work nor share identities", async () => {
+  const db = await application();
+  db.mutate("document.put", { id: "one", text: "A" });
+  const work = db.query("digest.pending", "one")!;
+  db.mutate("document.put", { id: "two", text: "A" });
+  assert.notEqual(db.query("digest.pending", "two")!.key, work.key);
+  assert.deepEqual(db.mutate("digest.publish", { args: "two", key: work.key, value: sha("A") }), { accepted: false });
+  db.mutate("document.put", { id: "two", text: "B" });
+  assert.deepEqual(db.mutate("digest.publish", { args: "one", key: work.key, value: sha("A") }), { accepted: true });
+  assert.deepEqual(db.query("document.get", "one"), { text: "A", digest: ready("A") });
+  assert.deepEqual(db.query("document.get", "two"), { text: "B", digest: pending });
 });
 
-test("invalid document inputs and malformed results leave state unchanged", () => {
-  const db = application();
-  db.call("document.put", { id: "one", text: "" });
-  const work = db.call("worker.pending", "one");
-  const before = db.state;
-  for (const input of [null, {}, { id: "", text: "A" }, { id: "one", text: 42 },
-    { id: "one", text: "A".repeat(100_001) }]) {
-    assert.throws(() => db.call("document.put", input));
+test("next lists pending documents oldest first, in limits and disjoint shards, and drains as results arrive", async () => {
+  const db = await application();
+  for (const [id, text] of [["one", "A"], ["two", "B"], ["three", "C"]]) {
+    db.mutate("document.put", { id, text });
+    db.now += 1;
   }
-  for (const result of [null, 42, "a".repeat(63), "g".repeat(64), "A".repeat(64)]) {
-    assert.throws(() => db.call("worker.publish", { id: "one", key: work.key, result }), /SHA-256/);
+  const ids = (options: Parameters<typeof db.query<"digest.next">>[1] = null) => db.query("digest.next", options).map((work) => work.args);
+  assert.deepEqual(ids(), ["one", "two", "three"]);
+  assert.deepEqual(db.query("digest.next")[1], db.query("digest.pending", "two"));
+  assert.deepEqual(ids({ limit: 2 }), ["one", "two"]);
+  const shards = [ids({ shard: [0, 2] }), ids({ shard: [1, 2] })];
+  assert.deepEqual(shards.flat().sort(), ["one", "three", "two"]);
+  assert.equal(new Set(shards.flat()).size, 3);
+
+  const two = db.query("digest.pending", "two")!;
+  db.mutate("digest.publish", { args: "two", key: two.key, value: sha("B") });
+  db.mutate("document.put", { id: "one", text: "A, edited" });
+  assert.deepEqual(ids(), ["one", "three"], "an edit keeps its place in line");
+  db.mutate("document.put", { id: "two", text: "B, edited" });
+  assert.deepEqual(ids(), ["one", "three", "two"], "a fresh edit of a finished document joins the end");
+  for (const options of [{ limit: 0 }, { limit: 1025 }, { shard: [2, 2] }, { shard: [0, 0] }, { batch: 1 }]) {
+    assert.throws(() => db.query("digest.next", options as never), FlowerError);
   }
-  assert.deepEqual(db.state, before);
+});
+
+test("invalid documents and malformed results leave state unchanged", async () => {
+  const db = await application();
+  db.mutate("document.put", { id: "one", text: "" });
+  const work = db.query("digest.pending", "one")!;
+  const before = db.data;
+  for (const args of [null, {}, { id: "", text: "A" }, { id: "one", text: 42 }, { id: "one", text: "A".repeat(100_001) }, { id: "one", text: "A", extra: true }]) {
+    fails(() => db.mutate("document.put", args as never), "INVALID_ARGUMENT");
+  }
+  for (const value of [null, 42, "a".repeat(63), "g".repeat(64), "A".repeat(64)]) {
+    const error = fails(() => db.mutate("digest.publish", { args: "one", key: work.key, value } as never), "INVALID_ARGUMENT");
+    assert.match(error.failure!.message, /^value must (be a string|match)/);
+  }
+  fails(() => db.mutate("digest.publish", { args: "one", key: work.key } as never), "INVALID_ARGUMENT");
+  assert.deepEqual(db.data, before);
 });

@@ -1,167 +1,246 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
-import test from "node:test";
-import { build } from "esbuild";
+import app from "../examples/workers.ts";
+import { FlowerClient, FlowerError, type FlowerFetch } from "./client.ts";
+import { testDatabase, type TestDatabase } from "./testing.ts";
+import { runQueueWorker, type QueueWorkerEvent, type QueueWorkerOptions } from "./worker.ts";
 
-// Exercise the downloadable worker against current SDK source, never dist/.
-const bundle = await build({
-  stdin: {
-    contents: 'export { runWorker } from "./docs/job-worker.ts"; export { FlowerError } from "./sdk/client.ts";',
-    resolveDir: fileURLToPath(new URL("../", import.meta.url)),
-  },
-  alias: { "@flower-js/sdk": fileURLToPath(new URL("./index.ts", import.meta.url)) },
-  define: { "import.meta.url": JSON.stringify(new URL("../docs/job-worker.ts", import.meta.url).href) },
-  bundle: true, write: false, format: "esm", platform: "node", logLevel: "silent",
-});
-const { runWorker, FlowerError } = await import("data:text/javascript;base64," + Buffer.from(bundle.outputFiles[0].text).toString("base64"));
+type Db = TestDatabase<typeof app>;
+type Call = { name: string; args: Record<string, unknown>; requestId?: string };
 
-type Job = { id: string; state: string; attempts: number; lease: { owner: string; token: number; expiresAt: number } | null; result?: unknown; error?: any };
+// Workers keep local deadlines with Date.now(), so the server clock starts there.
+async function queue(ids: string[]): Promise<Db> {
+  const db = await testDatabase(app, { now: Date.now() });
+  for (const id of ids) db.mutate("jobs.enqueue", { id, payload: { id } });
+  return db;
+}
 
-// An in-memory queue with the contract of examples/workers.ts: request-ID
-// receipts, fencing tokens, LEASE_LOST, and a readiness watch.
-function queue(ids: string[], hooks: { lose?: (name: string) => boolean; reject?: (name: string) => Error | undefined } = {}) {
-  const jobs: Job[] = ids.map((id) => ({ id, state: "pending", attempts: 0, lease: null }));
-  const receipts = new Map<string, unknown>();
-  const calls: { name: string; args: any; requestId: string }[] = [];
-  const waiters = new Set<() => void>();
-  let token = 0, watches = 0;
-  const claimable = (job: Job) => job.state === "pending" || (job.state === "leased" && job.lease!.expiresAt <= Date.now());
-  const notify = () => { for (const wake of [...waiters]) wake(); };
-  const client = {
-    async mutate(name: string, args: any, { requestId }: { requestId: string }) {
-      calls.push({ name, args, requestId });
-      const rejected = hooks.reject?.(name);
-      if (rejected) throw rejected;
-      if (receipts.has(requestId)) return { value: receipts.get(requestId), duplicate: true };
-      let value: unknown;
-      if (name === "jobs.claim") {
-        const job = jobs.find(claimable);
-        if (job) {
-          job.state = "leased";
-          job.attempts++;
-          job.lease = { owner: args.owner, token: ++token, expiresAt: Date.now() + args.leaseMs };
-        }
-        value = job ? { id: job.id, payload: null, ...job.lease, attempt: job.attempts } : null;
-      } else {
-        const job = jobs.find((candidate) => candidate.id === args.id);
-        if (!job || job.state !== "leased" || job.lease!.token !== args.token || job.lease!.expiresAt <= Date.now()) {
-          throw new FlowerError("EVALUATION_FAILED (422): LEASE_LOST: Job lease is missing, expired, or held by another claim", 422, "EVALUATION_FAILED");
-        }
-        Object.assign(job, { state: name === "jobs.complete" ? "completed" : "failed", result: args.result, error: args.error, lease: null });
-        value = { ...job };
-      }
-      receipts.set(requestId, value);
-      notify();
-      if (hooks.lose?.(name)) throw new FlowerError("reply lost", 503, "UNAVAILABLE");
-      return { value, duplicate: false };
-    },
-    async *watch(_name: string, _args: null, { signal }: { signal: AbortSignal }) {
-      watches++;
-      for (let last: boolean | undefined; !signal.aborted;) {
-        const ready = jobs.some(claimable);
-        if (ready !== last) yield { revision: 1, value: (last = ready) };
-        await new Promise<void>((resolve) => {
-          const wake = () => { waiters.delete(wake); resolve(); };
-          waiters.add(wake);
-          signal.addEventListener("abort", wake, { once: true });
-          setTimeout(wake, 20); // Leases expire without a write.
-        });
-      }
-      signal.throwIfAborted();
-    },
+/** Keep server time in step with the wall clock, running due maintenance like a leader. */
+function wallClock(db: Db): () => void {
+  const timer = setInterval(() => db.advance(Math.max(0, Date.now() - db.now)), 5);
+  return () => clearInterval(timer);
+}
+
+/** A client over the database that records every call; intercept may drop or replace replies. */
+function recording(db: Db, intercept?: (call: Call, reply: Response) => Response | Promise<Response>) {
+  const calls: Call[] = [];
+  const fetch: FlowerFetch = async (url, init) => {
+    const reply = await db.fetch(url, init);
+    if (url.endsWith("/v1/watch")) return reply;
+    const call: Call = JSON.parse(init.body);
+    calls.push({ name: call.name, args: call.args, requestId: call.requestId });
+    return intercept ? intercept(call, reply) : reply;
   };
-  return { client, jobs, calls, expire: (id: string) => { jobs.find((job) => job.id === id)!.lease!.expiresAt = 0; }, get watches() { return watches; } };
+  return { client: new FlowerClient<typeof app>("http://flower.test", { fetch }), calls };
+}
+
+function start(client: FlowerClient<typeof app>, options: Partial<QueueWorkerOptions> & Pick<QueueWorkerOptions, "work">) {
+  const stop = new AbortController();
+  const events: QueueWorkerEvent[] = [];
+  const done = runQueueWorker(client, { queue: "jobs", signal: stop.signal, onEvent: (event) => events.push(event), ...options });
+  return { events, done, stop: () => { stop.abort(); return done; }, types: () => events.map((event) => event.type) };
 }
 
 async function until(condition: () => boolean) {
-  for (const started = Date.now(); !condition(); await sleep(5)) {
-    if (Date.now() - started > 5_000) throw new Error("Timed out waiting for the worker");
+  for (const started = Date.now(); !condition(); await sleep(2)) {
+    if (Date.now() - started > 3_000) throw new Error("Timed out waiting for the worker");
   }
 }
 
-const options = (work: (job: any, signal: AbortSignal) => Promise<unknown>, extra = {}) =>
-  ({ owner: "test-worker", lanes: 2, leaseMs: 10_000, work, log: () => {}, ...extra });
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
+}
 
-test("lanes drain the queue, complete every job once, and re-arm a fresh watch", async () => {
-  const fake = queue(["a", "b", "c", "d", "e"]);
-  const stop = new AbortController();
-  const running = runWorker(fake.client, options(async (job) => ({ done: job.id })), stop.signal);
-  await until(() => fake.jobs.every((job) => job.state === "completed"));
-  stop.abort();
-  await running;
-  assert.deepEqual(fake.jobs.map((job) => [job.id, job.attempts, job.result]), ["a", "b", "c", "d", "e"].map((id) => [id, 1, { done: id }]));
-  assert.ok(fake.watches >= 3, "each lane waits on a new watch after draining");
-  const completions = fake.calls.filter((call) => call.name === "jobs.complete");
-  assert.deepEqual(completions[0].args, { id: completions[0].args.id, owner: "test-worker", token: completions[0].args.token, result: completions[0].args.result });
+const job = (db: Db, id: string) => {
+  const found = db.query("jobs.get", { id });
+  assert.ok(found, `no job ${id}`);
+  return found;
+};
+const leaseEnd = (signal: AbortSignal) => new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+
+test("lanes drain the queue concurrently and complete every job exactly once", async () => {
+  const ids = ["a", "b", "c", "d", "e"];
+  const db = await queue(ids);
+  const both = deferred();
+  let running = 0;
+  const worker = start(db.client, {
+    owner: "test-worker", lanes: 2,
+    async work(claim) {
+      if (++running === 2) both.resolve();
+      await both.promise;
+      await sleep(1);
+      running--;
+      return { done: claim.id, by: claim.owner };
+    },
+  });
+  await until(() => worker.types().filter((type) => type === "completed").length === ids.length);
+  await worker.stop();
+  assert.deepEqual(ids.map((id) => [job(db, id).state, job(db, id).attempts, job(db, id).result]), ids.map((id) => ["completed", 1, { done: id, by: "test-worker" }]));
+  assert.deepEqual(new Set(worker.events.map((event) => "lane" in event ? event.lane : 0)), new Set([1, 2]));
+  assert.equal(db.query("jobs.ready"), false);
 });
 
-test("a lost reply is retried with the same request ID and applied once", async () => {
-  let lost = false;
-  const fake = queue(["a"], { lose: (name) => name === "jobs.complete" && !lost && (lost = true) });
-  const stop = new AbortController();
-  const running = runWorker(fake.client, options(async () => "ok", { lanes: 1 }), stop.signal);
-  await until(() => fake.calls.filter((call) => call.name === "jobs.complete").length === 2);
-  stop.abort();
-  await running;
-  const [first, second] = fake.calls.filter((call) => call.name === "jobs.complete");
-  assert.equal(first.requestId, second.requestId);
-  assert.equal(fake.jobs[0].state, "completed");
+test("a failed attempt is reported, requeued with backoff, and retried once it becomes ready", async () => {
+  const db = await queue(["flaky"]);
+  const worker = start(db.client, {
+    work(claim) {
+      if (claim.attempt === 1) throw new Error("upstream said no");
+      return { attempt: claim.attempt };
+    },
+  });
+  await until(() => worker.types().includes("failed"));
+  const failed = job(db, "flaky");
+  assert.deepEqual([failed.state, failed.attempts, failed.error, failed.availableAt], ["pending", 1, { message: "upstream said no" }, db.now + 1_000]);
+  db.advance(999);
+  await sleep(20);
+  assert.deepEqual(worker.types(), ["claimed", "failed"], "the worker waits out the backoff");
+  db.advance(1);
+  await until(() => worker.types().includes("completed"));
+  await worker.stop();
+  assert.deepEqual(worker.types(), ["claimed", "failed", "claimed", "completed"]);
+  assert.deepEqual(worker.events[1], { type: "failed", lane: 1, id: "flaky", error: "upstream said no" });
+  const done = job(db, "flaky");
+  assert.deepEqual([done.state, done.attempts, done.result], ["completed", 2, { attempt: 2 }]);
 });
 
-test("a job that outlives its lease is logged as lost, then redone by the next claim", async () => {
-  const lines: string[] = [];
-  const fake = queue(["a"]);
-  const stop = new AbortController();
-  const running = runWorker(fake.client, options(async (job) => {
-    if (job.attempt === 1) fake.expire(job.id); // Another worker could now claim it.
-    return { attempt: job.attempt };
-  }, { lanes: 1, log: (line: string) => lines.push(line) }), stop.signal);
-  await until(() => fake.jobs[0].state === "completed");
-  stop.abort();
-  await running;
-  assert.ok(lines.some((line) => /lost a, its lease ran out first/.test(line)), lines.join("\n"));
-  assert.deepEqual(fake.jobs[0].result, { attempt: 2 });
+test("renewal keeps a job alive through many short leases", async () => {
+  const db = await queue(["long"]);
+  const { client, calls } = recording(db);
+  const stopClock = wallClock(db);
+  try {
+    const worker = start(client, {
+      leaseMs: 300,
+      async work(_claim, signal) {
+        await sleep(900, undefined, { signal });
+        return "survived";
+      },
+    });
+    await until(() => worker.events.length === 2);
+    await worker.stop();
+    assert.deepEqual(worker.types(), ["claimed", "completed"]);
+  } finally { stopClock(); }
+  const done = job(db, "long");
+  assert.deepEqual([done.state, done.attempts, done.result], ["completed", 1, "survived"]);
+  assert.ok(calls.filter((call) => call.name === "jobs.renew").length >= 5, "renewed well past the first lease");
 });
 
-test("a job that runs out of time is marked failed with a clear reason", async () => {
-  const fake = queue(["slow"]);
-  const stop = new AbortController();
-  const running = runWorker(fake.client, options((_job, signal) => sleep(5_000, undefined, { signal }), { lanes: 1, leaseMs: 1_050 }), stop.signal);
-  await until(() => fake.jobs[0].state === "failed");
-  stop.abort();
-  await running;
-  assert.match(fake.jobs[0].error.message, /Ran out of time after \d+ ms/);
+test("work still running at the end of its lease is aborted and failed with the reason", async () => {
+  const db = await queue(["slow"]);
+  const worker = start(db.client, { leaseMs: 100, renew: false, work: (_claim, signal) => sleep(5_000, null, { signal }) });
+  await until(() => worker.types().includes("failed"));
+  await worker.stop();
+  const failed = job(db, "slow");
+  assert.deepEqual([failed.state, failed.attempts, failed.error], ["pending", 1, { message: "The lease ran out" }]);
 });
 
-test("stopping finishes the held job and claims nothing new", async () => {
-  const fake = queue(["a", "b"]);
-  const stop = new AbortController();
-  let started!: () => void, release!: () => void;
-  const working = new Promise<void>((resolve) => { started = resolve; });
-  const running = runWorker(fake.client, options(async () => {
-    started();
-    await new Promise<void>((done) => { release = done; });
-    return "finished";
-  }, { lanes: 1 }), stop.signal);
-  await working;
-  stop.abort();
-  release();
-  await running;
-  assert.deepEqual(fake.jobs.map((job) => job.state), ["completed", "pending"]);
-  assert.equal(fake.calls.filter((call) => call.name === "jobs.claim").length, 1);
+test("a completion after another worker took over the expired lease is reported as lost", async () => {
+  const db = await queue(["contested"]);
+  const started = deferred(), release = deferred();
+  const worker = start(db.client, {
+    renew: false, leaseMs: 10_000,
+    async work() { started.resolve(); await release.promise; return "too late"; },
+  });
+  await started.promise;
+  db.advance(10_000);
+  const thief = db.mutate("jobs.claim", { owner: "thief" });
+  assert.ok(thief);
+  assert.equal(thief.attempt, 2);
+  release.resolve();
+  await until(() => worker.types().includes("lost"));
+  await worker.stop();
+  assert.deepEqual(worker.types(), ["claimed", "lost"]);
+  assert.equal(job(db, "contested").lease?.owner, "thief", "the lost completion changed nothing");
+  db.mutate("jobs.complete", { id: thief.id, owner: thief.owner, token: thief.token, result: "rescued" });
+  assert.equal(job(db, "contested").result, "rescued");
 });
 
-test("a permanent claim error stops the worker instead of spinning", async () => {
-  const fake = queue(["a"], { reject: (name) => name === "jobs.claim" ? new FlowerError("Lease duration exceeds the configured maximum", 422, "EVALUATION_FAILED") : undefined });
-  await assert.rejects(runWorker(fake.client, options(async () => null, { lanes: 1 }), new AbortController().signal), /Lease duration exceeds/);
-  assert.equal(fake.calls.length, 1);
+test("renewal notices a lease taken over after expiry and stops the work early", async () => {
+  const db = await queue(["contested"]);
+  const started = deferred();
+  let reason: unknown;
+  const worker = start(db.client, {
+    leaseMs: 300,
+    async work(_claim, signal) { started.resolve(); try { return await leaseEnd(signal); } catch (error) { reason = error; throw error; } },
+  });
+  await started.promise;
+  db.advance(300);
+  assert.ok(db.mutate("jobs.claim", { owner: "thief" }));
+  await until(() => worker.types().includes("lost"));
+  await worker.stop();
+  assert.deepEqual(worker.types(), ["claimed", "lost"]);
+  assert.equal((reason as Error).message, "The lease was lost");
+  assert.equal(job(db, "contested").lease?.owner, "thief");
 });
 
-test("the worker pools page shows the backlog query that examples/workers.ts deploys", () => {
+test("a completion whose reply is lost is retried with the same request ID and applied once", async () => {
+  const db = await queue(["a"]);
+  let dropped = 0;
+  const { client, calls } = recording(db, (call, reply) => {
+    if (call.name === "jobs.complete" && dropped++ === 0) throw new TypeError("fetch failed");
+    return reply;
+  });
+  const worker = start(client, { retry: { initialDelayMs: 1 }, work: () => "ok" });
+  await until(() => worker.events.length === 2);
+  await worker.stop();
+  assert.deepEqual(worker.types(), ["claimed", "completed"]);
+  const completions = calls.filter((call) => call.name === "jobs.complete");
+  assert.equal(completions.length, 2);
+  assert.equal(completions[0].requestId, completions[1].requestId);
+  const done = job(db, "a");
+  assert.deepEqual([done.state, done.attempts, done.result], ["completed", 1, "ok"]);
+});
+
+test("stopping lets the held job finish and claims nothing new", async () => {
+  const db = await queue(["a", "b"]);
+  const { client, calls } = recording(db);
+  const started = deferred(), release = deferred();
+  const worker = start(client, {
+    async work(_claim, signal) { started.resolve(); await release.promise; return { interrupted: signal.aborted }; },
+  });
+  await started.promise;
+  const stopped = worker.stop();
+  release.resolve();
+  await stopped;
+  assert.deepEqual(["a", "b"].map((id) => job(db, id).state), ["completed", "pending"]);
+  assert.deepEqual(job(db, "a").result, { interrupted: false }, "stopping does not abort work in progress");
+  assert.deepEqual(calls.map((call) => call.name), ["jobs.claim", "jobs.complete"]);
+});
+
+test("a permanent claim error rejects the worker instead of spinning", async () => {
+  const db = await queue(["a"]);
+  const { client, calls } = recording(db);
+  await assert.rejects(runQueueWorker(client, { queue: "jobs", signal: new AbortController().signal, leaseMs: 60_000, work: () => null }),
+    (error) => error instanceof FlowerError && error.failure?.code === "LEASE_TOO_LONG");
+  assert.deepEqual(calls.map((call) => call.name), ["jobs.claim"]);
+  assert.equal(job(db, "a").state, "pending");
+});
+
+test("a permanent error in one lane stops the others once they finish their held jobs", async () => {
+  const db = await queue(["a", "b", "c"]);
+  let claims = 0;
+  const denied = () => new Response(JSON.stringify({ error: { code: "FORBIDDEN", message: "Authorization denied", failure: { code: "FORBIDDEN", message: "Access revoked" } } }),
+    { status: 403, headers: { "content-type": "application/json" } });
+  const client = new FlowerClient<typeof app>("http://flower.test", {
+    fetch: async (url, init) => JSON.parse(init.body).name === "jobs.claim" && ++claims === 2 ? denied() : db.fetch(url, init),
+  });
+  const worker = start(client, { lanes: 2, async work(claim) { await sleep(20); return claim.id; } });
+  await assert.rejects(worker.done, (error) => error instanceof FlowerError && error.status === 403 && error.failure?.code === "FORBIDDEN");
+  assert.deepEqual(worker.types(), ["claimed", "completed"]);
+  assert.deepEqual(["a", "b", "c"].map((id) => job(db, id).state), ["completed", "pending", "pending"]);
+});
+
+test("the worker pools backlog check subscribes to a method examples/workers.ts exposes, reading fields it returns", async () => {
   const page = readFileSync(new URL("../docs/guide/worker-pools.html", import.meta.url), "utf8");
-  const block = page.match(/<span>examples\/workers\.ts<\/span>[\s\S]*?<code class="language-ts">([\s\S]*?)<\/code>/)![1];
+  const block = page.match(/<span>Backlog check<\/span>[\s\S]*?<code class="language-ts">([\s\S]*?)<\/code>/)![1];
   const code = block.replace(/<\/?span[^>]*>/g, "").replaceAll("&gt;", ">").replaceAll("&lt;", "<").replaceAll("&amp;", "&");
-  assert.ok(readFileSync(new URL("../examples/workers.ts", import.meta.url), "utf8").includes(code), code);
+  const [, alias, args] = code.match(/client\.subscribe\("([^"]+)", ([^)]+)\)/)!;
+  const db = await queue(["a"]);
+  const stats = db.query(alias as "jobs.stats", JSON.parse(args));
+  for (const [, field] of code.matchAll(/value\.(\w+)/g)) assert.ok(field in stats, field);
+  assert.equal(typeof stats.oldestReadyAt, "number");
+  assert.ok(page.includes("<code>nextAvailableAt</code>") && "nextAvailableAt" in stats);
 });

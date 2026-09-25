@@ -1,19 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { FlowerClient, FlowerError } from "./client.ts";
+import { FlowerAdmin, FlowerClient, FlowerError } from "./client.ts";
 import type { FlowerRequestInit } from "./client.ts";
 
-test("parallel queries rotate replicas while writes, call, and admin stay primary", async () => {
+test("parallel queries rotate replicas while writes, call, and operator calls stay primary", async () => {
   const calls: { url: string; init: FlowerRequestInit }[] = [];
   const origins = ["http://replica-1:7101/", "http://replica-2:7101/"];
-  const client = new FlowerClient("http://primary:7101", {
-    queryUrls: origins,
-    adminToken: "test-secret",
-    fetch: async (url, init) => {
-      calls.push({ url, init });
-      return Response.json({ revision: 1, value: null, duplicate: false });
-    },
-  });
+  const fetch = async (url: string, init: FlowerRequestInit) => {
+    calls.push({ url, init });
+    return Response.json({ revision: 1, value: null, duplicate: false });
+  };
+  const client = new FlowerClient("http://primary:7101", { queryUrls: origins, fetch });
+  const admin = new FlowerAdmin("http://primary:7101", { adminToken: "test-secret", fetch });
   origins[0] = "http://changed:7101";
   const signal = new AbortController().signal;
   await Promise.all(Array.from({ length: 6 }, (_, args) => client.query("read", args, { signal })));
@@ -26,14 +24,16 @@ test("parallel queries rotate replicas while writes, call, and admin stay primar
   }
   await client.mutate("write", null, { requestId: "stable" });
   await client.call("readOrWrite");
-  await client.deploy({ hash: "h", javascript: "bundle" });
-  await client.initialize({ "1": "primary:7101" });
+  await admin.deploy({ hash: "h", javascript: "bundle" });
+  await admin.initialize({ "1": "primary:7101" });
   assert.deepEqual(calls.slice(6).map(({ url }) => url), [
     "http://primary:7101/v1/mutate", "http://primary:7101/v1/call",
     "http://primary:7101/admin/deploy", "http://primary:7101/raft/initialize",
   ]);
   assert.equal(calls[6].init.headers.authorization, undefined);
+  assert.equal(calls[7].init.headers.authorization, undefined);
   assert.equal(calls[8].init.headers.authorization, "Bearer test-secret");
+  assert.equal(calls[9].init.headers.authorization, "Bearer test-secret");
 });
 
 test("new SSE watches share query rotation and remain on their selected endpoint", async () => {

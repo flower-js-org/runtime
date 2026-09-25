@@ -260,17 +260,19 @@ function union<const S extends readonly [SchemaLike<any>, ...SchemaLike<any>[]]>
 function json(): Schema<Json> {
   return make("JSON", (value, path) => {
     const pending: [unknown, number][] = [[value, 0]];
+    // Ancestors only: shared (acyclic) subvalues are valid JSON. depth -1 marks leaving a container.
     const active = new Set<object>();
     while (pending.length) {
       const [item, depth] = pending.pop()!;
+      if (depth < 0) { active.delete(item as object); continue; }
       if (depth > 128) fail(path, "nests deeper than 128 levels");
       if (item === null || typeof item === "string" || typeof item === "boolean") continue;
       if (typeof item === "number") { if (!Number.isFinite(item)) fail(path, "must contain only finite numbers"); continue; }
-      if (Array.isArray(item)) { for (const child of item) pending.push([child, depth + 1]); continue; }
-      if (!plain(item)) fail(path, "must be JSON");
-      if (active.has(item)) fail(path, "must not contain cycles");
-      active.add(item);
-      for (const key of Object.keys(item)) pending.push([item[key], depth + 1]);
+      if (!Array.isArray(item) && !plain(item)) fail(path, "must be JSON");
+      if (active.has(item as object)) fail(path, "must not contain cycles");
+      active.add(item as object);
+      pending.push([item, -1]);
+      for (const child of Array.isArray(item) ? item : Object.values(item as object)) pending.push([child, depth + 1]);
     }
   });
 }

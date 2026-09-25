@@ -57,7 +57,7 @@ impl Budget {
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.strip_prefix("Bearer "));
             if token != Some(expected.as_str()) {
-                return Err(ApiError(
+                return Err(ApiError::new(
                     StatusCode::UNAUTHORIZED,
                     "UNAUTHORIZED",
                     "valid control-plane bearer token required".into(),
@@ -88,7 +88,7 @@ impl AsRef<[u8]> for Buffered {
 }
 
 fn too_large(limit: usize) -> ApiError {
-    ApiError(
+    ApiError::new(
         StatusCode::PAYLOAD_TOO_LARGE,
         "BODY_TOO_LARGE",
         format!("request body exceeds configured {limit}-byte transport limit"),
@@ -107,7 +107,7 @@ async fn collect(
     let mut chunks = body.into_data_stream();
     while let Some(chunk) = chunks.next().await {
         let chunk = chunk.map_err(|error| {
-            ApiError(StatusCode::BAD_REQUEST, "INVALID_BODY", error.to_string())
+            ApiError::new(StatusCode::BAD_REQUEST, "INVALID_BODY", error.to_string())
         })?;
         let needed = bytes
             .len()
@@ -162,7 +162,7 @@ pub(in crate::service) async fn handle(
         tokio::time::timeout(budget.timeout, collect(&budget.pool, class, limit, body))
             .await
             .map_err(|_| {
-                ApiError(
+                ApiError::new(
                     StatusCode::REQUEST_TIMEOUT,
                     "BODY_TIMEOUT",
                     "request body exceeded FLOWER_READ_TIMEOUT_MS".into(),
@@ -225,7 +225,11 @@ mod tests {
             Ok(Bytes::from_static(b"123456789")),
         ]));
         assert_eq!(
-            collect(&pool, Class::User, 16, body).await.err().unwrap().0,
+            collect(&pool, Class::User, 16, body)
+                .await
+                .err()
+                .unwrap()
+                .status,
             StatusCode::PAYLOAD_TOO_LARGE
         );
         assert_eq!(pool.metrics()["classes"][0]["retainedInputBytes"], 0);

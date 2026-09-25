@@ -219,6 +219,7 @@ impl Runtime {
             if attempted.insert(address.clone()) {
                 match self.send_to(group, address, path, body).await {
                     Ok(result) => return Ok(result),
+                    Err(error) if super::engine_failure(&error).is_some() => return Err(error),
                     Err(error) => last = error.to_string(),
                 }
             }
@@ -238,6 +239,7 @@ impl Runtime {
                 if attempted.insert(leader.address.clone()) {
                     match self.send_to(group, &leader.address, path, body).await {
                         Ok(result) => return Ok(result),
+                        Err(error) if super::engine_failure(&error).is_some() => return Err(error),
                         Err(error) => last = error.to_string(),
                     }
                 }
@@ -284,7 +286,14 @@ impl Runtime {
             );
             bytes.extend_from_slice(&chunk);
         }
-        ensure!(status.is_success(), "{}", String::from_utf8_lossy(&bytes));
+        if !status.is_success() {
+            if matches!(status, reqwest::StatusCode::UNPROCESSABLE_ENTITY | reqwest::StatusCode::FORBIDDEN)
+                && let Some(failure) = super::remote_failure(&bytes)
+            {
+                return Err(failure);
+            }
+            anyhow::bail!("{}", String::from_utf8_lossy(&bytes));
+        }
         ensure!(
             compatible,
             "partition control response compatibility mismatch"

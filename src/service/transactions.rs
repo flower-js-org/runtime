@@ -145,6 +145,8 @@ struct Coordinator {
     phase: Phase,
     results: Option<String>,
     reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failure: Option<Value>,
     complete: bool,
 }
 
@@ -213,24 +215,28 @@ struct PlanCall {
 }
 
 fn conflict(message: impl Into<String>) -> ApiError {
-    ApiError(StatusCode::CONFLICT, "TRANSACTION_CONFLICT", message.into())
+    ApiError::new(StatusCode::CONFLICT, "TRANSACTION_CONFLICT", message.into())
 }
 fn reused() -> ApiError {
-    ApiError(
+    ApiError::new(
         StatusCode::CONFLICT,
         "REQUEST_ID_REUSED",
         "requestId was already used for different content".into(),
     )
 }
 fn aborted(record: &Coordinator) -> ApiError {
-    ApiError(
+    let error = ApiError::new(
         StatusCode::UNPROCESSABLE_ENTITY,
         "TRANSACTION_ABORTED",
         record
             .reason
             .clone()
             .unwrap_or_else(|| "transaction aborted".into()),
-    )
+    );
+    match &record.failure {
+        Some(failure) => error.with_failure(failure.clone()),
+        None => error,
+    }
 }
 fn coordinator_key(id: &str) -> String {
     format!("{COORDINATOR}{id}")
@@ -285,7 +291,7 @@ fn record(state: &Snapshot, reference: &Reference) -> Result<Coordinator, ApiErr
 
 pub(super) fn ensure_unlocked(state: &Snapshot) -> Result<(), ApiError> {
     if state.data.contains_key(PARTICIPANT) {
-        return Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "TRANSACTION_PREPARED",
+        return Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "TRANSACTION_PREPARED",
             "group is prepared for a cross-group transaction; retry after its durable decision is applied".into()));
     }
     Ok(())
@@ -320,7 +326,7 @@ fn authenticate_headers(app: &App, headers: &HeaderMap) -> Result<(), ApiError> 
         .and_then(|value| value.to_str().ok())
         != Some(format!("Bearer {}", app.consensus.peer_token()).as_str())
     {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
             "operator bearer token required".into(),
@@ -401,7 +407,7 @@ async fn authenticated_request(
     authenticate_headers(app, request.headers())?;
     let Json(request) = Json::<Request>::from_request(request, app)
         .await
-        .map_err(|error| ApiError(error.status(), "INPUT_INVALID", error.body_text()))?;
+        .map_err(|error| ApiError::new(error.status(), "INPUT_INVALID", error.body_text()))?;
     validate_target(app, &request)?;
     Ok(request)
 }
@@ -535,6 +541,11 @@ async fn remote_contact(
             continue;
         }
         if !status.is_success() {
+            if matches!(status, StatusCode::UNPROCESSABLE_ENTITY | StatusCode::FORBIDDEN)
+                && let Some(failure) = remote_failure(&body)
+            {
+                return Err(evaluation_error(failure));
+            }
             last = String::from_utf8_lossy(&body).into_owned();
             continue;
         }
@@ -601,7 +612,7 @@ async fn persist_in_term(
 }
 
 fn exhausted() -> ApiError {
-    ApiError(
+    ApiError::new(
         StatusCode::INSUFFICIENT_STORAGE,
         "REVISION_EXHAUSTED",
         "insufficient safe revisions remain to finish outstanding cross-group transactions".into(),
@@ -760,6 +771,7 @@ fn plan(
         phase: Phase::Preparing,
         results: None,
         reason: None,
+        failure: None,
         complete: false,
     })
 }
@@ -997,7 +1009,7 @@ fn check_command_limit(command: &Commit, max_bytes: usize) -> Result<(), ApiErro
     serde_json::from_slice::<Commit>(&encoded).map_err(|error| invalid(error.into()))?;
     let bytes = encoded.len();
     if bytes > max_bytes {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
             "TRANSACTION_TOO_LARGE",
             "cross-group transaction exceeds FLOWER_TRANSACTION_MAX_BYTES".into(),
@@ -1067,6 +1079,7 @@ async fn decide(
     phase: Phase,
     results: Option<String>,
     reason: Option<String>,
+    failure: Option<Value>,
 ) -> Result<Coordinator, ApiError> {
     let _writer = app.writer.lock().await;
     let state = app.consensus.read_for_writer().await.map_err(unavailable)?;
@@ -1081,6 +1094,7 @@ async fn decide(
     };
     record.phase = phase;
     record.reason = reason;
+    record.failure = failure;
     if record.phase == Phase::Commit {
         crate::consensus::retention::validate_capacity_for(
             &state,
@@ -1263,7 +1277,7 @@ pub(super) async fn execute(app: Arc<App>, input: Value) -> Result<Value, ApiErr
                 .and_then(Value::as_u64)
                 .is_some_and(|expected| expected != state.revision)
             {
-                return Err(ApiError(
+                return Err(ApiError::new(
                     StatusCode::CONFLICT,
                     "REVISION_CONFLICT",
                     format!("current revision is {}", state.revision),
@@ -1328,6 +1342,7 @@ pub(super) async fn execute(app: Arc<App>, input: Value) -> Result<Value, ApiErr
     let decision = if initial.phase == Phase::Preparing {
         let mut ordered: Vec<Option<Value>> = vec![None; initial.calls.len()];
         let mut failure = None;
+        let mut detail = None;
         for group in participants(&initial) {
             let response = contact(&app, &group, "prepare", &reference).await;
             match response.and_then(|value| decode::<Vec<IndexedResult>>(&value)) {
@@ -1343,13 +1358,16 @@ pub(super) async fn execute(app: Arc<App>, input: Value) -> Result<Value, ApiErr
                         match unpacked(&result.value) {
                             Ok(value) => ordered[result.index] = Some(value),
                             Err(error) => {
-                                failure = Some(error.2);
+                                failure = Some(error.message);
                                 break;
                             }
                         }
                     }
                 }
-                Err(error) => failure = Some(error.2),
+                Err(error) => {
+                    detail = error.failure.as_deref().cloned();
+                    failure = Some(error.message);
+                }
             }
             if failure.is_some() {
                 break;
@@ -1381,7 +1399,7 @@ pub(super) async fn execute(app: Arc<App>, input: Value) -> Result<Value, ApiErr
                 result,
             };
             if let Err(error) = check_command_budget(&app, &command) {
-                failure = Some(error.2);
+                failure = Some(error.message);
             }
         }
         let phase = if failure.is_none() {
@@ -1389,7 +1407,7 @@ pub(super) async fn execute(app: Arc<App>, input: Value) -> Result<Value, ApiErr
         } else {
             Phase::Abort
         };
-        decide(&app, &reference, phase, results, failure).await?
+        decide(&app, &reference, phase, results, failure, detail).await?
     } else {
         initial
     };
@@ -1407,7 +1425,7 @@ pub(super) async fn run(weak: Weak<App>) {
         if app.consensus.metrics().state == openraft::ServerState::Leader
             && let Err(error) = recover(&app).await
         {
-            tracing::debug!(message = %error.2, "cross-group transaction recovery will retry");
+            tracing::debug!(message = %error.message, "cross-group transaction recovery will retry");
         }
         let cadence = app
             .consensus
@@ -1459,6 +1477,7 @@ async fn recover(app: &App) -> Result<(), ApiError> {
                 Phase::Abort,
                 None,
                 Some("coordinator recovered an unfinished preparation".into()),
+                None,
             )
             .await?
         } else {

@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { Stats } from "./metrics.mjs";
+import { Histogram, Stats } from "./metrics.mjs";
 import { summarizeGroups } from "./multi-group.mjs";
 import { childPath, publishBenchResults, renderPublishedSummary, replaceSummary } from "../scripts/publish-bench-results.mjs";
 
@@ -30,9 +30,10 @@ test("public summary preserves measured scope, consistency, audits and failure r
   input.latencyMs.all.p99 = 99.99;
   const html = renderPublishedSummary(input);
   assert.match(html, /1,000/);
-  assert.match(html, /<dt>Read p99<\/dt><dd>5 <small>ms/);
-  assert.match(html, /<dt>Write p99<\/dt><dd>12\.3 <small>ms/);
-  assert.doesNotMatch(html, /Customer p99|100 <small>ms/);
+  assert.match(html, /aria-label="Customer reads: 70 calls; p50 5 ms, p99 5 ms, max 5 ms\./);
+  assert.match(html, /aria-label="Customer writes: 30 calls; p50 12\.3 ms, p99 12\.3 ms, max 12\.3 ms\./);
+  assert.match(html, /<caption>Customer reads, all groups<\/caption>/);
+  assert.doesNotMatch(html, /Customer p99|100 ms/);
   assert.match(html, /Replica-local reads: lag is allowed/);
   assert.match(html, /70% reads \/ 30% mutations/);
   assert.match(html, /1\/1 group audits passed/);
@@ -53,14 +54,16 @@ test("public summary leaves missing or empty split latencies unmeasured instead 
   delete input.latencyMs.read;
   input.latencyMs.mutation = { samples: 0, p99: 0 };
   let html = renderPublishedSummary(input);
-  assert.match(html, /<dt>Read p99<\/dt><dd>—<\/dd>/);
-  assert.match(html, /<dt>Write p99<\/dt><dd>—<\/dd>/);
-  assert.doesNotMatch(html, /Customer p99|<small>ms<\/small>/);
-  input.latencyMs.read = { samples: 1, p99: 0 };
+  assert.match(html, /No customer reads measurements/);
+  assert.match(html, /No customer writes measurements/);
+  assert.doesNotMatch(html, /Customer p99|<svg /);
+  const instant = new Histogram();
+  instant.record(0);
+  input.latencyMs.read = instant.snapshot();
   input.latencyMs.mutation = { samples: 1, p99: null };
   html = renderPublishedSummary(input);
-  assert.match(html, /<dt>Read p99<\/dt><dd>0 <small>ms/);
-  assert.match(html, /<dt>Write p99<\/dt><dd>—<\/dd>/);
+  assert.match(html, /aria-label="Customer reads: 1 call; p50 0 ms, p99 0 ms, max 0 ms\./);
+  assert.match(html, /No customer writes measurements/);
 });
 
 test("publication requires explicit markers and only reads child JSON within its source directory", () => {

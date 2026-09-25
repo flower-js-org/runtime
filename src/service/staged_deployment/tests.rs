@@ -163,7 +163,7 @@ async fn staged_backfill_dual_maintenance_and_atomic_policy_cutover() {
     )
     .await
     .unwrap_err();
-    assert_eq!(denied.1, "FORBIDDEN");
+    assert_eq!(denied.code, "FORBIDDEN");
     let replay = administer(&app, input).await.unwrap();
     assert_eq!(replay["duplicate"], true);
     assert_eq!(replay["revision"], activated["revision"]);
@@ -211,7 +211,7 @@ async fn staged_cancel_preserves_shared_indexes_and_request_fence() {
     )
     .await
     .unwrap_err();
-    assert!(competing.2.contains("staged deployment"));
+    assert!(competing.message.contains("staged deployment"));
     administer(
         &app,
         json!({"operation":"cancel","requestId":"canceled-build"}),
@@ -418,7 +418,7 @@ async fn staged_activation_replay_checks_retirement_before_retained_receipt() {
         administer(&app, json!({"operation":"activate","requestId":id}))
             .await
             .unwrap_err()
-            .1,
+            .code,
         "RETRY_WINDOW_EXPIRED"
     );
     collect_all(&app, &id).await;
@@ -434,7 +434,7 @@ async fn staged_activation_replay_checks_retirement_before_retained_receipt() {
         administer(&app, json!({"operation":"activate","requestId":id}))
             .await
             .unwrap_err()
-            .1,
+            .code,
         "RETRY_WINDOW_EXPIRED"
     );
     app.consensus.shutdown().await.unwrap();
@@ -462,14 +462,14 @@ async fn staged_request_identity_is_reserved_from_mutations_and_key_operations()
     )
     .await
     .unwrap_err();
-    assert_eq!(ordinary.1, "REQUEST_ID_REUSED");
+    assert_eq!(ordinary.code, "REQUEST_ID_REUSED");
     let keys = super::super::keys::commit(
         app.clone(),
         json!({"operation":"unbind","name":"unused","requestId":"reserved-build"}),
     )
     .await
     .unwrap_err();
-    assert_eq!(keys.1, "REQUEST_ID_REUSED");
+    assert_eq!(keys.code, "REQUEST_ID_REUSED");
     assert_eq!(app.consensus.read_for_writer().await.unwrap(), state);
     finish(&app, "reserved-build").await;
     administer(

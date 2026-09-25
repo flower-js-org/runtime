@@ -105,8 +105,10 @@ storage format:
    active HTTP bodies for up to `FLOWER_SHUTDOWN_TIMEOUT_MS` (30 seconds by
    default). It then closes remaining connections, including SSE, shuts down
    Raft, and waits for durable storage to drain. The setting bounds the HTTP
-   drain, not disk I/O. Interrupted clients retry their original request IDs;
-   watch clients reconnect on another replica with a fresh snapshot.
+   drain, not disk I/O. Interrupted clients retry their original request IDs
+   (the SDK's `retry` option does so); watch clients reconnect on another
+   replica with a fresh snapshot (`subscribe()` reconnects by itself, rotating
+   through its `queryUrls`).
 3. Restart that node with the new binary, the **same** ID, address, token and
    data directory. Do not initialize or re-add it. Confirm it catches up and
    serves a fresh application query before putting it back into routing.

@@ -4,26 +4,27 @@ The [web handbook](https://flower-js-org.github.io/runtime/) walks through appli
 
 Flower is a working prototype of a **Raft-backed database of reactive TypeScript values**. TypeScript defines both the dependency graph and the database's public methods. Every external data read or write goes through a named method.
 
-The [external worker guide](https://flower-js-org.github.io/runtime/guide/workers.html) designs reactive result reconciliation and durable job processing, including worker pools, sharding, and high availability. Its runnable [application](docs/reactive-worker.ts) and [client](docs/reactive-worker-client.ts) demonstrate conditional result publication.
+The [external worker guide](https://flower-js-org.github.io/runtime/guide/workers.html) designs reactive result reconciliation (`external()` values kept current by `reconcile`) and durable job processing (`queue()` drained by `runQueueWorker`), including worker pools, sharding, and high availability. Its runnable [application](docs/reactive-worker.ts) and [client](docs/reactive-worker-client.ts) demonstrate conditional result publication.
 
 The [architecture review](DESIGN.md) records the implemented improvements and larger experiments still under consideration. The [retention contract](RETENTION.md) covers bounded retries, acknowledgements, transaction closure, key lifecycle and recovery fencing.
 
 ```ts
-import { collection, define, derive, mutation, query } from "./sdk/index.ts";
+import { collection, define, derive, mutation, query, v } from "@flower-js/sdk";
 
-const counters = collection<number>("counters");
+const counters = collection("counters", v.int({ min: 0 }));
+const id = v.string({ min: 1, max: 64 });
 
 const doubled = derive("counter.doubled", (ctx, id: string) =>
   (ctx.get(counters, id) ?? 0) * 2,
+  { materialize: { each: counters } },
 );
 
-const increment = mutation("internal.counter.increment", (ctx, id: string) => {
+const increment = mutation("internal.counter.increment", { args: id }, (ctx, id) => {
   ctx.set(counters, id, (ctx.get(counters, id) ?? 0) + 1);
-  ctx.materialize(doubled, id);
   return ctx.get(doubled, id); // sees this mutation's writes
 });
 
-const get = query("internal.counter.get", (ctx, id: string) => ({
+const get = query("internal.counter.get", { args: id }, (ctx, id) => ({
   count: ctx.get(counters, id) ?? 0,
   doubled: ctx.get(doubled, id),
 }));
@@ -37,7 +38,9 @@ export default define({
 });
 ```
 
-The complete [order example](examples/orders.ts) uses collections, equality queries, derived subtotals, input validation, mutation methods, and a public query. Bundles run in QuickJS inside Wasmtime. Each callback starts from an isolated pristine Wasm image; module globals do not persist between calls. Rust owns database state, transaction overlays, queries, and dependency-graph maintenance.
+Schemas (`v`) validate the method argument and every record written through `counters`; their types flow into the callbacks and into typed clients. `materialize: { each: counters }` keeps one maintained `counter.doubled` instance per counter row. Derived values that other code reads are listed in `definitions`; exposed methods register themselves through `http`.
+
+The complete [order example](examples/orders.ts) uses record and argument schemas, an equality index, derived subtotals, per-order materialization, coded failures, mutation methods, and a public query. Bundles run in QuickJS inside Wasmtime. Each callback starts from an isolated pristine Wasm image; module globals do not persist between calls. Rust owns database state, transaction overlays, queries, and dependency-graph maintenance.
 
 `import { nacl, jwt } from "@flower-js/sdk/crypto"` exposes native cryptography inside those callbacks: TweetNaCl's high-level byte API, HS256/RS256/ES256/EdDSA JWT signing and verification, and authenticated `dir`/`A256GCM` JWT encryption/decryption. Binary inputs go straight from Wasm memory to native code. Fresh randomness is mutation-only; JWT validation uses the invocation clock and disables stale query caching. See the [ticket example](examples/crypto.ts), [API and tradeoffs](https://flower-js-org.github.io/runtime/reference/crypto.html), and `node tests/e2e-crypto.mjs` after building the server.
 
@@ -57,12 +60,14 @@ npx flower --help
 ```
 
 ```ts
-import { collection, define, mutation, query, FlowerClient } from "@flower-js/sdk";
+import { collection, define, fail, mutation, query, v, FlowerClient } from "@flower-js/sdk";
 import { scheduler } from "@flower-js/sdk/scheduler";
-import { workQueue } from "@flower-js/sdk/temporal";
+import { expiringCollection, queue } from "@flower-js/sdk/temporal";
+import { reconcile, runQueueWorker } from "@flower-js/sdk/worker";
+import { testDatabase } from "@flower-js/sdk/testing";
 ```
 
-The npm `flower` command builds modules, deploys and calls methods; the server executable is distributed separately. Use `./flower` to select a downloaded server if both commands are on your path. Node-specific H2 transport and bundling helpers are available from `@flower-js/sdk/http2` and `@flower-js/sdk/bundle`. Releases include compiled ESM and TypeScript declarations.
+The npm `flower` command builds modules, deploys and calls methods; the server executable is distributed separately. Use `./flower` to select a downloaded server if both commands are on your path. `@flower-js/sdk/client` exports the clients alone: `FlowerClient`, `FlowerAdmin`, `FlowerError`, `isTransient` and `backoff`. `@flower-js/sdk/worker` uses no Node APIs, so workers can run in Node or a browser. The in-process test database (`@flower-js/sdk/testing`), the H2 transport (`@flower-js/sdk/http2`) and bundling (`@flower-js/sdk/bundle`) are Node-only. Releases include compiled ESM and TypeScript declarations. The SDK was redesigned on 2026-09-24 without backward compatibility; code written for `workQueue`, `define({ maintenance, authorize })` or operator methods on `FlowerClient` must be ported.
 
 ## Run it
 
@@ -102,7 +107,12 @@ node sdk/cli.ts query order.get '"order-42"'
 # value: { order: { shippingCents: 500 }, subtotal: 4600, total: 5100 }
 
 node sdk/cli.ts watch order.get '"order-42"'
+
+node sdk/cli.ts call order.create @examples/orders.create.json --request-id create-order-43
+# flower: ORDER_EXISTS: Order already exists
 ```
+
+A method's own failure keeps its code: the CLI prints `CODE: message` and any JSON details, then exits with status 1. `--credentials JSON` (or `FLOWER_CREDENTIALS`; `@FILE` reads a file) sends application credentials with `call`, `mutate`, `query` and `watch`.
 
 The cluster needs a brief election after initialization. If a request reports `UNAVAILABLE` immediately after bootstrap, retry when authenticated `/raft/metrics` reports `state: "Leader"`. Do not initialize again when restarting an existing data directory.
 
@@ -139,38 +149,99 @@ node tests/e2e.mjs
 
 | Definition | Capabilities | External invocation |
 | --- | --- | --- |
+| `derive(name, fn, { materialize? })` | Read sources and derived values; return JSON | Internal only |
 | `aggregate(name, options)` | Maintain indexed groups with add/remove deltas | Internal only |
-| `transaction(name, planner)` | Coordinate exposed methods across Raft groups | Only when listed in `http` |
-| `derive(name, fn)` | Read sources and derived values; return JSON | Internal only |
-| `query(name, fn, options?)` | Read one consistent snapshot; fresh by default | Only when listed in `http` |
-| `mutation(name, fn)` | Read, stage writes, change materialization, return JSON | Only when listed in `http` |
+| `external(name, options)` | A value computed by workers outside the database | Internal; `.http(prefix)` generates worker methods |
+| `query(name, spec?, fn)` | Read one consistent snapshot; fresh by default | Only when listed in `http` |
+| `mutation(name, spec?, fn)` | Read, stage writes, change materialization, return JSON | Only when listed in `http` |
+| `transaction(name, spec?, planner)` | Coordinate exposed methods across logical databases | Only when listed in `http` |
 
-`define({ collections, definitions, http })` owns the complete HTTP allowlist. Definitions are private unless explicitly exposed in `http`; exposed methods are registered automatically. Public aliases can differ from internal names, and several aliases can share a method. Derived values cannot be exposed directly.
+A method `spec` is `{ args?, access? }`, plus `consistency` for queries. `define({ uses, collections, definitions, tasks, triggers, keys, http, auth })` declares the application and owns the complete HTTP allowlist. Definitions are private unless explicitly exposed in `http`; exposed methods are registered automatically. Public aliases can differ from internal names, and several aliases can share a method. Derived values cannot be exposed directly. `uses` takes components: bundles of collections, definitions, maintenance tasks, triggers and keys, made with `component()` or returned by `scheduler()`, `queue()`, `expiringCollection()` and `external()`. Components never add HTTP aliases; helpers that generate public methods return them from `.http(prefix)` for you to spread into `http`. Names beginning with `$flower.` are reserved.
 
 `POST /v1/call` invokes a public alias; Flower determines whether it is a query, mutation, or cross-group transaction from the deployed code. The SDK's `call` and CLI's `call` command use this endpoint. `/v1/query` and `/v1/mutate` use the same allowlist and additionally assert the method's kind. Unknown or removed aliases return `404 METHOD_NOT_FOUND`.
 
 There are no public record, snapshot, transaction-patch, or raw changefeed endpoints. Callers cannot invoke a derived definition directly, invoke a mutation through the query route, or attach raw writes to a method call.
 
-Query and mutation methods can contain arbitrary synchronous application logic, including argument validation and reads across collections. Methods decide what data to expose. TypeScript types assist authors; this version validates JSON structure but does not enforce application record schemas automatically.
+Query and mutation methods can contain arbitrary synchronous application logic, including reads across collections. Methods decide what data to expose. An `args` schema runs before the method body; a violation fails with `INVALID_ARGUMENT` and `details.path`. A collection declared with a record schema, `collection("orders", schema)`, validates every `ctx.set` through that reference (`INVALID_RECORD`). `.key(schema)` makes keys typed JSON values, stored as canonical JSON (`INVALID_KEY`). Schemas are `v.string`, `v.number`, `v.int`, `v.boolean`, `v.null`, `v.literal`, `v.enum`, `v.array`, `v.tuple`, `v.object` (closed: unknown properties are rejected; `v.optional` marks optional ones), `v.nullable`, `v.union`, `v.record`, `v.json`, `v.refine` and `v.lazy`; any synchronous Standard Schema, such as zod, is accepted in their place. Validation is SDK code inside the callback: reads do not revalidate stored records, and a reference declared without the schema writes unchecked.
 
-Inside functions, `ctx.get(collection, key)` returns a record or `null`. `ctx.scan(collection, options?)` returns `{key, value}` rows. Options select an ordered `index`, constrain its `prefix` and `gt`/`gte`/`lt`/`lte` bounds, and apply `reverse`, `offset`, and `limit`. Without an index, scans order and constrain source keys. `ctx.query(collection.by(index).eq(value))` returns matching record values. Plain scans and equality queries use lexical primary-key order; multi-field equality indexes accept a tuple.
+Inside functions, `ctx.get(collection, key)` returns a record or `null`. `ctx.scan(collection, options?)` returns `{key, value}` rows, decoding typed keys. Options select an ordered `index`, constrain its `prefix` and `gt`/`gte`/`lt`/`lte` bounds, and apply `reverse`, `offset`, and `limit`. Without an index, scans order and constrain source keys; on a tuple-keyed collection, `prefix` selects leading key components and bounds require an index. `ctx.query(collection.by(index).eq(value))` returns matching record values; index names, fields and equality values are typed from the collection. Plain scans and equality queries use lexical primary-key order, which for typed keys is the order of their canonical JSON text, not of component values. Multi-field equality indexes accept a tuple.
 
-Declare indexed collections in `define({ collections: [orders], ... })` to persist equality and ordered scalar indexes and track dependencies. `aggregate` maintains retained group accumulators from changed rows; see the [complete indexed aggregate example](INDEXES.md). Use `ctx.range(ref.by(index).range({prefix, gte, lte, limit, after, reverse}))` for bounded `{rows,cursor}` pages; bounds select the field after the prefix. Cursors continue against the next invocation’s snapshot. Undeclared collections retain a Rust scan fallback. Ordered ranges conservatively depend on their entire index; equality queries depend on matching buckets.
+Indexed collections must reach `define`, through `collections`, a component in `uses`, an aggregate's `source` or a trigger's collection, to persist equality and ordered scalar indexes and track dependencies. `aggregate` maintains retained group accumulators from changed rows; see the [complete indexed aggregate example](INDEXES.md). Use `ctx.range(ref.by(index).range({prefix, gte, lte, limit, after, reverse}))` for bounded `{rows,cursor}` pages; bounds select the field after the prefix. Cursors continue against the next invocation’s snapshot. Undeclared collections retain a Rust scan fallback. Ordered ranges conservatively depend on their entire index; equality queries depend on matching buckets.
 
-Mutation methods additionally have `ctx.set`, `ctx.delete`, `ctx.materialize`, and `ctx.unmaterialize`. All reads see prior writes from the same invocation, including fresh derived results. A thrown method error aborts the entire mutation. Returning an error object is a successful result unless the method throws.
+Mutation methods additionally have `ctx.set`, `ctx.delete`, `ctx.materialize`, and `ctx.unmaterialize`. All reads see prior writes from the same invocation, including fresh derived results. A thrown method error aborts the entire mutation. Returning an error object is a successful result unless the method throws. A `trigger(name, collection, (ctx, { key, before, after }) => …)` runs inside every mutation method that changed a row of its collection, once per changed key, after the method body and before commit. Its writes can trigger further rounds, up to 32 (`TRIGGER_LOOP`).
+
+### Failures keep their codes
+
+`fail(code, message, details?)` aborts with a structured failure: an UPPER_SNAKE_CASE code, a message and optional JSON details. Any thrown error with a string `code` property is reported the same way; other exceptions become `COMPUTE_ERROR`, and exhausted execution or memory budgets `EVALUATION_BUDGET`. The caller receives HTTP 422:
+
+```json
+{"error":{"code":"EVALUATION_FAILED","failure":{"code":"OUT_OF_STOCK","details":{"available":1,"item":"dough"},"message":"Not enough stock"},"message":"OUT_OF_STOCK: Not enough stock"}}
+```
+
+Match on `failure.code`; the outer `code` names the transport outcome. Details survive only for methods: a derived value's stored error keeps `{code, message}`, so a method reading it fails with that code and no details. Authorization hook failures arrive as `403 FORBIDDEN` with `failure`, and a participant's failure in a cross-group transaction as `422 TRANSACTION_ABORTED` with `failure`. [PROTOCOL.md](PROTOCOL.md#errors) specifies every shape, including SSE error events.
 
 ```ts
-import { FlowerClient } from "./sdk/index.ts";
+import { FlowerClient, FlowerError } from "@flower-js/sdk";
+import type counter from "./counter.ts"; // the module above
 
-const client = new FlowerClient("http://127.0.0.1:7101");
-const receipt = await client.call("counter.increment", "visits", {
-  requestId: "visit-123",
+const client = new FlowerClient<typeof counter>("http://127.0.0.1:7101");
+const receipt = await client.mutate("counter.increment", "visits", {
+  requestId: "visit-123", retry: true,
 });
-// { revision, value, duplicate }
+// { revision, value: 2, duplicate: false }
 
-const result = await client.call("counter.get", "visits");
-// { revision, value, duplicate: false }
+const { value } = await client.query("counter.get", "visits");
+// { count: 1, doubled: 2 }
+
+try {
+  await client.mutate("counter.increment", "");
+} catch (error) {
+  if (!(error instanceof FlowerError)) throw error;
+  // error.status 422, error.code "EVALUATION_FAILED", error.failure
+  // { code: "INVALID_ARGUMENT", message: "must not be empty", details: { path: [] } }
+}
 ```
+
+`FlowerClient<typeof app>` types aliases, arguments and results from the module; without the type argument, aliases are strings and values are JSON. `query` accepts query aliases, `mutate` mutation aliases and `call` any alias, including transactions. `client.partition(name)` addresses a named logical database. Operator endpoints (deployment, initialization, keys, retention, partitions and transaction closure) belong to `FlowerAdmin`, which holds the operator token; `FlowerClient` never sends it.
+
+### Authenticate callers
+
+```ts
+import { collection, define, fail, jwtBearer, key, mutation, query, v } from "@flower-js/sdk";
+
+const sessions = key("sessions", { algorithm: "Ed25519", usages: ["verify"] });
+const shops = collection("shops", v.object({ name: v.string({ min: 1, max: 80 }) }));
+
+const catalog = query("catalog.list", { access: "public" }, (ctx) =>
+  ctx.scan(shops).map((row) => row.value.name));
+const me = query("me", (ctx) => ctx.principal());
+const rename = mutation("shop.rename", {
+  args: v.object({ shop: v.string({ min: 1 }), name: v.string({ min: 1, max: 80 }) }),
+  access: (_ctx, principal, args) => principal?.tenant === args.shop,
+}, (ctx, { shop, name }) => {
+  if (ctx.get(shops, shop) === null) fail("SHOP_NOT_FOUND", `No shop ${shop}`);
+  ctx.set(shops, shop, { name });
+  return null;
+});
+
+export default define({
+  auth: {
+    authenticate: jwtBearer({ key: sessions, issuer: "shop", audience: ["shop-api"] }),
+  },
+  http: { "catalog.list": catalog, me, "shop.rename": rename },
+});
+```
+
+`define` compiles `auth` and each exposed method's `access` into the application's single authorization hook, a pure query that the server runs on every request before receipt replay, query-cache reuse and watch delivery. Clients send credentials beside the arguments, never inside retry fingerprints: `new FlowerClient(url, { credentials: async () => ({ token: await currentToken() }) })` evaluates the function for each call and connection.
+
+- `authenticate(ctx, credentials, request)` returns a principal `{subject, tenant?, claims?}`, returns `null` for an anonymous caller, or `fail()`s to reject. `jwtBearer({ key, algorithms?, issuer?, audience?, clockToleranceSeconds?, principal? })` verifies `"Bearer …"`, a bare token or `{ token }` natively. Missing credentials are anonymous and an invalid token fails `UNAUTHENTICATED`. By default `sub` becomes the subject and a string `tenant` claim the tenant. A managed key joins `define({ keys })` automatically; raw keys require `algorithms`.
+- `access` is `"public"`, `"authenticated"` or a predicate `(ctx, principal, args) => boolean` that sees arguments already validated by the method's `args` schema. Methods without `access` use `auth.default`: `"authenticated"` when `authenticate` is set, otherwise `"public"`.
+- Anonymous callers are admitted as subject `$anonymous`, which `authenticate` cannot return; methods see `ctx.principal() === null`. All anonymous callers share one receipt-owner scope.
+- `auth.sessions` sets access to retry sessions (default `auth.default`). `auth.delegation(ctx, coordinator, principal)` decides whether to accept a principal delegated by a transaction coordinator; by default cluster peers are trusted.
+
+Denials return `403 FORBIDDEN` with the hook's failure: `UNAUTHENTICATED` for missing or invalid credentials, `FORBIDDEN` when a predicate returns false, or `INVALID_ARGUMENT` when a predicate's arguments fail the schema. On a named partition the server admits only principals whose tenant equals the partition name: `authenticate` must return that tenant (for `jwtBearer`, a matching `tenant` claim), while anonymous callers and principals delegated by a transaction coordinator are admitted as that partition's tenant.
+
+`define` compiles a hook only when a call could be refused or a delegation judged: when `auth.authenticate` or `auth.delegation` is set, or an exposed method's `access` is a predicate. `access: "public"` alone adds none. A hook has costs: replica-local queries and watches then obtain a quorum-backed snapshot, public cache hits take the fully admitted path, and mutations no longer use the serial batched-preparation path. Without a hook, calls are anonymous and `ctx.principal()` is null. The hook reads policy but must not perform once-only effects; consume one-time challenges or quotas inside the mutation.
 
 ### Spread reads across replicas
 
@@ -188,22 +259,21 @@ const client = new FlowerClient("http://127.0.0.1:7101", {
 });
 await client.query("counter.get", "visits");
 // Concurrent queries rotate through these endpoints.
-const updates = client.watch("counter.get", "visits");
+const updates = client.subscribe("counter.get", "visits");
 ```
 
-`query()`, new `watch()`/`watchDeltas()` subscriptions, and new `watchPoll()` subscriptions share a round-robin endpoint list. Each watch stays on its selected endpoint for its lifetime. Mutations, deployments, initialization, and generic `call()` use the primary URL. That URL may name any reachable member: servers forward writes and deployments to the current leader with the original request identity. Initialization still addresses the uninitialized group directly. A query through `/v1/call` can run on a follower, but use `client.query()` to distribute SDK reads. Omitting `queryUrls` retains one-endpoint behavior. Endpoint selection does not change consistency, retry failed requests, or discover members automatically; the HTTP/2 transport pools a session per configured origin.
+`query()` attempts, new `watch()`/`watchDeltas()`/`subscribe()` connections, and new `watchPoll()` subscriptions share a round-robin endpoint list. Each connection stays on its selected endpoint for its lifetime; `subscribe()` takes the next endpoint when it reconnects. Mutations and generic `call()` use the primary URL, as do `FlowerAdmin` deployments and initialization. That URL may name any reachable member: servers forward writes and deployments to the current leader with the original request identity. Initialization still addresses the uninitialized group directly. A query through `/v1/call` can run on a follower, but use `client.query()` to distribute SDK reads. Omitting `queryUrls` retains one-endpoint behavior. Endpoint selection does not change consistency or discover members automatically; a query retried under `retry` takes the next endpoint for each attempt. The HTTP/2 transport pools a session per configured origin.
 
 For a read that may tolerate lag, opt in within the deployed TypeScript:
 
 ```ts
-const getLocal = query("internal.counter.local", (ctx, id: string) =>
-  ctx.get(counters, id) ?? 0,
-  { consistency: "replica-local" },
-);
+const getLocal = query("internal.counter.local", {
+  args: id, consistency: "replica-local",
+}, (ctx, id) => ctx.get(counters, id) ?? 0);
 // Expose getLocal through define({ http: { "counter.local": getLocal } }).
 ```
 
-Replica-local queries and watches use one coherent, locally applied committed snapshot without a per-read quorum fence. After startup recovery completes, they can run during a partition, but there is **no bounded-staleness guarantee**. A restarted node whose durable log extends beyond its recovered application checkpoint first needs a quorum-confirmed read fence and local replay before serving these reads. State, deployed code, and the HTTP allowlist can all lag; removing a local-read alias takes effect on a disconnected replica only when it applies that deployment. Separate calls on different replicas may return decreasing revisions. A deployed authorization hook or managed-key declaration requires fresh policy, so those queries and watches obtain a quorum-backed snapshot even when declared replica-local. Neither an HTTP caller nor a client option can weaken a method's declared policy. Omitting the option, or explicitly selecting `"linearizable"`, keeps fresh-read semantics; mutations and maintenance reject consistency metadata.
+Replica-local queries and watches use one coherent, locally applied committed snapshot without a per-read quorum fence. After startup recovery completes, they can run during a partition, but there is **no bounded-staleness guarantee**. A restarted node whose durable log extends beyond its recovered application checkpoint first needs a quorum-confirmed read fence and local replay before serving these reads. State, deployed code, and the HTTP allowlist can all lag; removing a local-read alias takes effect on a disconnected replica only when it applies that deployment. Separate calls on different replicas may return decreasing revisions. An authorization hook (from `auth` or any method's `access`) or a managed-key declaration requires fresh policy, so those queries and watches obtain a quorum-backed snapshot even when declared replica-local. Neither an HTTP caller nor a client option can weaken a method's declared policy. Omitting the option, or explicitly selecting `"linearizable"`, keeps fresh-read semantics; mutations and maintenance reject consistency metadata.
 
 ### HTTP/2 from Node.js
 
@@ -212,15 +282,16 @@ The same server port accepts HTTP/1.1 and HTTP/2. By default it serves cleartext
 To multiplex Node.js application calls over HTTP/2, use the optional transport:
 
 ```ts
-import { FlowerClient } from "./sdk/index.ts";
-import { createHttp2Transport } from "./sdk/http2.ts";
+import { FlowerClient } from "@flower-js/sdk";
+import { createHttp2Transport } from "@flower-js/sdk/http2";
+import type counter from "./counter.ts";
 
 const transport = createHttp2Transport({ requestTimeoutMs: 10_000 });
-const client = new FlowerClient("http://127.0.0.1:7101", {
+const client = new FlowerClient<typeof counter>("http://127.0.0.1:7101", {
   fetch: transport.fetch,
 });
 try {
-  const result = await client.call("counter.increment", "visits", {
+  const result = await client.mutate("counter.increment", "visits", {
     requestId: "visit-over-h2-001",
     signal: AbortSignal.timeout(5_000),
   });
@@ -230,7 +301,7 @@ try {
 }
 ```
 
-The package subpath is `@flower-js/sdk/http2`. It is Node-only and stays out of application bundles and browser clients. It accepts `http://` and `https://` origins, reuses a multiplexed session per origin and buffers bounded ordinary JSON responses with a 30-second default whole-request deadline. SSE watches stream their response body immediately; that deadline covers response headers only, and the caller’s signal or `close()` controls their lifetime. `close()` cancels active streams and closes owned sessions. The transport does not automatically retry, redirect, or downgrade to HTTP/1.1; preserve request IDs after uncertain responses. Aborting a request stops waiting, not a mutation that may already have committed. HTTPS validates certificates and hostnames; optional `ca` accepts PEM strings, Uint8Arrays or arrays of them to replace the transport’s trusted roots. Otherwise Node’s configured trust defaults apply. There is no verification bypass.
+The package subpath is `@flower-js/sdk/http2`. It is Node-only and stays out of application bundles and browser clients. It accepts `http://` and `https://` origins, reuses a multiplexed session per origin and buffers bounded ordinary JSON responses with a 30-second default whole-request deadline. SSE watches stream their response body immediately; that deadline covers response headers only, and the caller’s signal or `close()` controls their lifetime. `close()` cancels active streams and closes owned sessions. The transport itself does not retry, redirect, or downgrade to HTTP/1.1; the client's `retry` option retries above it with the same request ID, and callers must otherwise preserve request IDs after uncertain responses. `FlowerAdmin` accepts the same `fetch` option. Aborting a request stops waiting, not a mutation that may already have committed. HTTPS validates certificates and hostnames; optional `ca` accepts PEM strings, Uint8Arrays or arrays of them to replace the transport’s trusted roots. Otherwise Node’s configured trust defaults apply. There is no verification bypass.
 
 An HTTP/2-enabled curl can check the cleartext listener:
 
@@ -242,27 +313,31 @@ curl --http2-prior-knowledge -i http://127.0.0.1:7101/health
 
 An optional `expectedRevision` on mutations rejects stale writes. Keep the **same request ID and arguments** after an uncertain response. Request receipts persist the original method result, so retries after failover or code deployment return that result without executing the method again, provided the alias remains exposed as a mutation. Exposure is checked before receipt lookup: removing an alias also blocks retries through it. Reusing an ID with different request content is a conflict. Separate CLI invocations generate different IDs unless `--request-id` is supplied.
 
+`retry: true`, per call or as a `FlowerClient` default, retries transient failures (network errors, per-attempt timeouts, 408, 425, 429 and 5xx) with jittered exponential backoff, reusing the request ID chosen for the call. A method's own failure is never retried, nor are 409 conflicts such as `REQUEST_ID_REUSED` or `RETRY_WINDOW_EXPIRED`. A `RetryPolicy` object sets `attempts` (default 8, including the first), `until` (no retry starts after this epoch-millisecond deadline; the first attempt always runs), `initialDelayMs` (250), `maxDelayMs` (30,000), `timeoutMs` per attempt (10,000) and `retryable` (default `isTransient`). Aborting the call's signal stops retrying; it does not undo a mutation that may already have committed.
+
 ### Watch a query over SSE
 
 `watch(query, args, {signal})` opens `POST /v1/watch` and yields reconstructed `{revision, value}` results. The server sends an initial snapshot, then JSON Patch deltas when the returned value changes; small replacements can use another snapshot. Unrelated revisions with identical values produce no event. Watch one query that returns all related values to keep a page consistent.
 
 ```ts
 const stop = new AbortController();
-for await (const { revision, value } of client.watch("counter.get", "visits", {
+for await (const { revision, value, reset } of client.subscribe("counter.get", "visits", {
   signal: stop.signal,
 })) {
-  console.log(revision, value);
+  console.log(revision, value, reset);
   // Break the loop or call stop.abort() to close the stream.
 }
 ```
 
-Identical invocations share evaluation, diffing, and immutable encoded updates within a node and logical database, scoped by the full admitted principal, deployment, and consistency. Each subscriber independently runs authorization and its read fence, including idle ticks; credentials are never shared. A consumer that misses a producer update receives a full reset snapshot at an increasing sequence. Patches always name the exact preceding sequence. Deployment or principal-scope changes end the stream with `WATCH_SCOPE_CHANGED` and require a new watch.
+`subscribe()` turns watches into a live value. It reconnects with jittered backoff after disconnects and transient errors, treats `stallMs` without any bytes (heartbeats included; default 45,000) as a disconnect, and marks the first snapshot of every connection `reset: true`, because intermediate values may have been skipped. `monotonic: true` drops values older than the newest revision already delivered, as a lagging replica can produce after a reconnect. `reconnect` accepts `false` or `{ initialDelayMs, maxDelayMs }`. Non-transient errors, including the query's own failure and authorization denial, end the subscription with `FlowerError`. `waitUntil(alias, args, predicate, options)` resolves with the first update whose value satisfies the predicate.
+
+Identical invocations share evaluation, diffing, and immutable encoded updates within a node and logical database, scoped by the full admitted principal, deployment, and consistency. Each subscriber independently runs authorization and its read fence, including idle ticks; credentials are never shared. A consumer that misses a producer update receives a full reset snapshot at an increasing sequence. Patches always name the exact preceding sequence. Deployment or principal-scope changes end the stream with `503 WATCH_SCOPE_CHANGED`; `subscribe()` treats that as transient and reconnects for a fresh snapshot, while `watch()` needs a new call.
 
 Use `watchDeltas(...)` to receive `{type: "snapshot", sequence, revision, value}` and `{type: "patch", sequence, baseSequence, revision, patch}` directly. Patches use RFC 6902 `add`, `remove`, and `replace`, with escaped JSON Pointer paths. SDK reconstruction isolates yielded values, so editing a received object does not corrupt the next update. Explicit `watchPoll(query, args, {intervalMs, signal})` retains polling compatibility; `intervalMs` does not apply to SSE.
 
 Every reevaluation rechecks the exposed-query allowlist and its declared consistency. Fresh watches establish a quorum-backed read fence for each evaluation; idle clock-independent watches still check quorum on the 250 ms tick. Replica-local watches use the local applied state and registry, including their replication lag. Commits wake watchers; the tick reevaluates clock-dependent queries, which can change at the same revision. Tick processing can be delayed by load. Streams send updates immediately while their one-item output queue has room. When a changed update finds the queue full, they wait for space and batch intermediate changes into one refresh of the latest value, rechecking admission, the read fence and authorization before sending. This can skip intermediate commits. There is no fixed watch-count ceiling. Each stream has bounded buffering and a configurable timeout for waiting for room to send a changed update (five seconds by default); the shared node preparation pool bounds evaluation concurrency. Refresh and heartbeat intervals are configurable too.
 
-A terminal server error becomes `FlowerError` and closes the watch. The SDK does not reconnect automatically: start a new watch after a disconnect, on any reachable replica that can serve its consistency policy. `queryUrls` spreads new subscriptions but never moves an existing stream. Every new connection begins with a full snapshot at the shared producer’s current sequence (which may be nonzero); `Last-Event-ID` does not resume history. This is a live view, not a durable event log. Both HTTP/1.1 and the Node HTTP/2 transport support watches.
+A terminal server error arrives as an SSE `error` event and becomes `FlowerError`, with `failure` when the query itself failed. `watch()` and `watchDeltas()` then end and never reconnect; `subscribe()` reconnects after transient errors, taking the next endpoint in `queryUrls`. No connection moves once established. Every new connection begins with a full snapshot at the shared producer’s current sequence (which may be nonzero); `Last-Event-ID` does not resume history. This is a live view, not a durable event log. Both HTTP/1.1 and the Node HTTP/2 transport support watches.
 
 ### A live pizza dashboard
 
@@ -277,9 +352,12 @@ npm run demo:pizza -- --port 3030 --paused --duration 120
 
 Open the printed local URL. The launcher creates a fresh three-node Rust/QuickJS cluster with three tenants and two stores each, runs tenant-scoped delivery workers, and offers buttons to place an order, tip a kitchen, pause arrivals, or crash the leader. Pausing arrivals leaves workers running. Order creation is capped at 160 attempts, including button clicks; workers continue polling until shutdown, and the board includes the latest 120 orders while totals cover the whole run. Ctrl+C stops owned processes and removes their temporary data. It never attaches to an existing database.
 
-Store identity is the tuple `[tenant, store]`. Shops use its canonical JSON encoding as a key; order keys encode `[tenant, store, orderId]`. Different tenants and stores can reuse the same local order ID. Each tenant has its own delivery queue and derived leaderboard. Store summaries and order totals are materialized; rankings compute from those summaries when read, so tips do not sort or replicate whole rankings. The scheduler uses composite timer IDs; order and dashboard queries use the durable store index.
+Store identity is the tuple `[tenant, store]`. Shops are keyed by that tuple and orders by `[tenant, store, orderId]`, both declared with `.key(v.tuple(...))`. Different tenants and stores can reuse the same local order ID. Each tenant claims deliveries from its own scope of one queue and has its own derived leaderboard. Order statistics are an incremental aggregate, and one store summary per shop row stays materialized through `materialize: { each: shops }`; rankings compute from those summaries when read, so tips do not sort or replicate whole rankings. The scheduler uses composite timer IDs; order and dashboard queries use the durable store index.
 
 ```ts
+import type pizza from "./examples/goblin-pizza.ts";
+
+const client = new FlowerClient<typeof pizza>("http://127.0.0.1:7101");
 await client.mutate("pizza.setup", {
   tenants: ["goblins", "elves"], storesPerTenant: 2,
   stockPerShop: 1_000, bakeMs: 1_800, leaseMs: 4_000,
@@ -295,75 +373,119 @@ Customer previews use `pizza.shop.local` by default in the benchmark; pass `--re
 
 ## Durable scheduled business logic
 
-Use the [TypeScript scheduler](sdk/scheduler.ts) to run a private method after a deadline. It stores named callbacks and JSON arguments as ordinary records. Scheduling a callback inside a mutation commits the timer and the business update together.
+Use the [TypeScript scheduler](sdk/scheduler.ts) to run a private mutation after a deadline. It stores named callbacks and JSON arguments as ordinary records. Scheduling a callback inside a mutation commits the timer and the business update together.
 
 ```ts
-import { collection, define, mutation, query } from "flower";
+import { collection, define, mutation, query, v } from "@flower-js/sdk";
 import { scheduler } from "@flower-js/sdk/scheduler";
 
-const invoices = collection<{ total: number; status: string }>("invoices");
-const finalize = mutation("internal.invoice.finalize", (ctx, id: string) => {
+const invoices = collection<{ total: number; status: "draft" | "ready" }>("invoices");
+const id = v.string({ min: 1 });
+
+const finalize = mutation("internal.invoice.finalize", { args: id }, (ctx, id) => {
   const invoice = ctx.get(invoices, id);
   if (invoice) ctx.set(invoices, id, { ...invoice, status: "ready" });
   return null;
 });
 const timers = scheduler("invoiceTimers", { finalize });
 
-const update = mutation("internal.invoice.update", (ctx, args: { id: string; total: number }) => {
-  ctx.set(invoices, args.id, { total: args.total, status: "draft" });
-  return timers.after(ctx, `finalize:${args.id}`, 5_000, "finalize", args.id);
+const update = mutation("internal.invoice.update", {
+  args: v.object({ id, total: v.int({ min: 0 }) }),
+}, (ctx, { id, total }) => {
+  ctx.set(invoices, id, { total, status: "draft" });
+  return timers.after(ctx, `finalize:${id}`, 5_000, "finalize", id);
 });
-const get = query("internal.invoice.get", (ctx, id: string) => ctx.get(invoices, id));
+const get = query("internal.invoice.get", { args: id }, (ctx, id) => ctx.get(invoices, id));
 
 export default define({
-  collections: [timers.records],
-  maintenance: timers.maintenance,
+  uses: [timers],
   http: { "invoice.update": update, "invoice.get": get },
 });
 ```
 
 Every update replaces the pending timer with the same ID. The example finalizes an invoice after five seconds without another update. Use a distinct ID for each update when every update needs its own later action. This is explicit application code in the mutation method, so derived functions remain pure.
 
-`timers.at(ctx, id, epochMilliseconds, handler, args)` sets an absolute deadline. `cancel` removes a pending or failed timer, `get` and `scan` inspect timers, and `retry` requeues a failed timer. Handler aliases come from the scheduler's TypeScript registry and are separate from HTTP aliases. Captured closures are not serialized; arguments are JSON, and pending timers use the currently deployed handler code. Renaming a handler requires migrating pending records or keeping its old alias available.
+A scheduler is a component: `uses: [timers]` declares its timer collection, indexed by `(state, dueAt)`, and contributes one maintenance task. `timers.after(ctx, id, delayMs, handler, args)` and `timers.at(ctx, id, epochMilliseconds, handler, args)` return the stored timer. Handler names and argument types are checked against the registry when compiling, and arguments against the handler's `args` schema when scheduling (`INVALID_ARGUMENT`). `cancel` removes a pending or failed timer, `get(ctx, id)` and `scan(ctx, { state? })` inspect timers in deadline order, and `retry(ctx, id, delayMs?)` requeues a failed timer (`TIMER_NOT_FAILED` otherwise). A timer records `state`, `handler`, `args`, `dueAt`, `attempts`, its last `error` as `{code, message, details?}`, and creation and update times. Handler aliases are separate from HTTP aliases, and handlers need no exposure. Captured closures are not serialized; arguments are JSON, and pending timers use the currently deployed handler code. Renaming a handler requires migrating pending records or keeping its old alias available; an unknown alias fails the timer with `SCHEDULER_HANDLER_MISSING`.
 
-One due callback runs per maintenance transaction, selected through the declared `(state, dueAt)` index and ordered by deadline and ID. Its database changes and timer removal commit atomically through Raft. A callback may reschedule its own ID, including to implement recurring work. If it throws or exhausts its execution budget, the host discards all its writes and runs a separate private error handler against the original snapshot. That TypeScript handler records the error and applies bounded retries with backoff, eventually retaining a failed timer for inspection. Other due timers remain eligible between retries.
+One due callback runs per maintenance transaction, selected through the `(state, dueAt)` index and ordered by deadline and ID. Its database changes and timer removal commit atomically through Raft. A callback may reschedule its own ID, including to implement recurring work. If it throws or exhausts its execution budget, the host discards all its writes and runs the private error handler against the original snapshot and time, which reselects the same timer. The scheduler records the failure and applies bounded retries with backoff, eventually retaining a failed timer for inspection. Other due timers and tasks remain eligible between retries.
 
 The scheduler's third argument configures `{maxAttempts, retryDelayMs, maxRetryDelayMs}`. Defaults are three attempts, an initial 1,000 ms retry delay, and a 60,000 ms cap. Delays double after each failure and start when the failed attempt finishes. Replacing a timer or explicitly retrying a failed timer starts a new attempt budget. If the private error handler itself fails, neither patch commits; the error is logged and replacement code can be deployed.
 
 Deadlines mean **not before**, using Flower's server time. Execution can be late during load, elections, or quorum loss. A 250 ms maintenance poll starts a bounded catch-up burst when callbacks remain due. Each callback has its own transaction; a burst stops at its serialized-batch budget or after an invocation takes it past the configured time window, 50 ms by default. Timer records survive restart and failover. Callback code can execute again before a successful commit, while the timer removal and database effects commit together once for that timer. For network calls or other external work, have the callback enqueue a job for the leased worker queue.
 
-The complete [scheduling example](examples/scheduling.ts) includes delayed business updates, cancellation, and timer inspection. TTL deletion can be just another scheduled callback; the expiration helper below additionally hides expired values before physical cleanup runs.
+The complete [scheduling example](examples/scheduling.ts) includes delayed business updates, cancellation, retries, and timer inspection. TTL deletion can be just another scheduled callback; the expiration helper below additionally hides expired values before physical cleanup runs.
 
 ## Worker leases and expiring keys
 
-These policies live in [TypeScript helpers](sdk/temporal.ts), built from ordinary records and methods. The [worker example](examples/workers.ts) exposes enqueue, claim, complete, fail, retry, and expiring-cache methods. Deploy it to a fresh cluster with `node sdk/cli.ts deploy examples/workers.ts`.
+These policies live in [TypeScript helpers](sdk/temporal.ts), built from ordinary records, methods and maintenance tasks. The [worker example](examples/workers.ts) exposes a queue's generated methods and an expiring cache, and [docs/job-worker.ts](docs/job-worker.ts) is a worker for it. Deploy it to a fresh cluster with `node sdk/cli.ts deploy examples/workers.ts`.
 
 ```ts
-import { expiringCollection, workQueue } from "./sdk/temporal.ts";
+import { define, mutation, v } from "@flower-js/sdk";
+import { expiringCollection, queue } from "@flower-js/sdk/temporal";
 
-const jobs = workQueue("jobs", { maxLeaseMs: 30_000 });
+const jobs = queue<{ url: string }, { status: number }>("jobs", {
+  lease: { defaultMs: 10_000, maxMs: 30_000 },
+  retry: { maxAttempts: 5, initialDelayMs: 1_000, maxDelayMs: 60_000 },
+  payload: v.object({ url: v.string({ pattern: /^https:\/\// }) }),
+});
 const sessions = expiringCollection("sessions", {
   expiration: { afterUpdateMs: 60_000 },
 });
-const tokens = expiringCollection("tokens", {
-  expiration: { afterCreationMs: 10_000 },
+
+const fetchLater = mutation("internal.fetch", { args: v.object({ id: v.string({ min: 1 }), url: v.string() }) },
+  (ctx, { id, url }) => jobs.enqueue(ctx, id, { url }, { delayMs: 1_000 }));
+
+export default define({
+  uses: [jobs, sessions],
+  http: { "fetch.later": fetchLater, ...jobs.http("jobs") },
 });
 ```
 
-Inside mutation methods, `jobs.enqueue(ctx, id, payload)` creates work and `jobs.claim(ctx, owner, leaseMs)` atomically claims one available job, returning `{id, payload, owner, token, expiresAt, attempt, history?}` or `null`. Expired claims become available again even if cleanup has not run. The configured maximum bounds each claim; there is no renewal operation.
+`queue()` returns a component holding its jobs collection (keys `[scope, id]`, three indexes), the shared fencing counters and a lease-reclaim task. Inside mutation methods:
 
-`jobs.complete(ctx, identity, result)` and `jobs.fail(ctx, identity, error)` require the current, unexpired claim. Pass its `{id, owner, token, history?}` fields unchanged; after retention initialization, the optional history binds database/incarnation and rejects restored-history claims. Each new claim gets a strictly increasing fencing token, retained independently of job deletion or replacement. An old worker cannot finish a newer worker's claim. Failed jobs remain visible until explicitly retried with `jobs.retry(ctx, id)`; `jobs.get(ctx, id)` reports the current effective state.
+- `jobs.enqueue(ctx, id, payload, { delayMs?, at?, replace? })` creates a pending job, available now or later. An existing ID fails with `JOB_EXISTS` unless `replace: true` and that job is completed or failed.
+- `jobs.claim(ctx, owner, { leaseMs? })` leases the job that has waited longest and returns `{scope, id, payload, owner, token, expiresAt, attempt, history?}`, or `null`. Jobs whose lease expired are claimable at once, before cleanup runs. Leases default to 30,000 ms and cannot exceed `lease.maxMs` (default 300,000; `LEASE_TOO_LONG`).
+- `jobs.renew(ctx, lease, { leaseMs? })` extends the current lease and keeps its fencing token.
+- `jobs.complete(ctx, lease, result)` and `jobs.fail(ctx, lease, error, { retry?, delayMs? })` require the current, unexpired lease (`LEASE_LOST` otherwise).
+- `jobs.retry(ctx, id, { delayMs? })` requeues a failed job with a fresh attempt budget (`JOB_NOT_FAILED` otherwise). `cancel` deletes a job. `get`, `scan`, `ready` and `stats` report effective state; `stats` returns `{ready, oldestReadyAt, nextAvailableAt}`.
 
-For example, a worker calling the deployed example uses:
+Every claim counts an attempt, so an expired lease counts as a failed one. Under the default retry policy (five attempts, a 1,000 ms delay doubling to a 60,000 ms cap), `fail` returns the job to pending after that backoff, or after `delayMs`, until attempts run out or it passes `{ retry: false }`; a lease that expires on the last attempt fails the job with `LEASE_EXPIRED`. With `retry: false` in the queue options, `fail` is final, while expired leases still return jobs to pending. `payload` and `result` schemas reject invalid values with `INVALID_ARGUMENT`.
+
+Pass a claim's `{id, owner, token, history?}` fields back unchanged; after retention initialization, `history` binds database and incarnation and rejects restored-history leases. Fencing tokens increase strictly per queue and scope and are retained in `$flower.fencing` independently of job deletion or replacement, so an old worker cannot finish a newer worker's claim. `jobs.scope(name)` returns the same API over one namespace of the shared collection; `scan` inspects only that scope. Completed jobs and valid leases never block claims. Scopes provide logical separation, not authentication.
+
+`jobs.http(prefix, { methods?, scope?, access? })` generates public methods named `${prefix}.claim`, `.renew`, `.complete`, `.fail`, `.get`, `.ready` and `.stats` by default; `enqueue` (with `delayMs` and `replace`), `retry` and `cancel` exist only when listed in `methods`. `scope: "argument"` adds a required `scope` argument to each method, and `scope: (ctx) => string` derives the scope from the caller, for example from `ctx.principal()?.tenant`; otherwise methods use the default scope. `access` applies to every generated method.
+
+`runQueueWorker` from `@flower-js/sdk/worker` drives those methods:
 
 ```ts
-import type { Claim } from "./sdk/temporal.ts";
+import { FlowerClient } from "@flower-js/sdk";
+import { runQueueWorker } from "@flower-js/sdk/worker";
 
-const claimArgs = { owner: "worker-1", leaseMs: 10_000 };
-const { value: lease } = await client.call<typeof claimArgs, Claim | null>("jobs.claim", claimArgs);
+const stop = new AbortController();
+process.once("SIGTERM", () => stop.abort());
+await runQueueWorker<{ url: string }, { status: number }>(new FlowerClient("http://127.0.0.1:7101"), {
+  queue: "jobs",
+  signal: stop.signal,
+  lanes: 4,
+  leaseMs: 10_000,
+  work: async (job, signal) => {
+    const response = await fetch(job.payload.url, { signal, headers: { "idempotency-key": job.id } });
+    return { status: response.status };
+  },
+});
+```
+
+Each lane waits for `${queue}.ready` through a subscription rather than polling, claims until the queue is empty, and runs `work` with a signal that aborts `marginMs` (default a fifth of `leaseMs`) before the lease ends, or when a renewal reports `LEASE_LOST`. While work runs, the lane renews every `(leaseMs − marginMs) / 3`. It then completes the job, or fails it with `{ message }` when `work` throws, leaving the retry decision to the queue. Its mutations retry transient errors with one request ID, and no attempt starts after the lease would end. Aborting `signal` stops claiming, lets held jobs finish, and resolves; a non-transient error in any lane stops every lane the same way and then rejects. `onEvent` reports `claimed`, `completed`, `failed`, `lost`, `unreported` and `waiting`. Calling the methods directly works too:
+
+```ts
+import { FlowerClient } from "@flower-js/sdk";
+import type workers from "./examples/workers.ts";
+
+const client = new FlowerClient<typeof workers>("http://127.0.0.1:7101");
+const { value: lease } = await client.mutate("jobs.claim", { owner: "worker-1", leaseMs: 10_000 });
 if (lease) {
-  // After doing the work, send the claim's id, owner, and token:
-  await client.call("jobs.complete", {
+  // After doing the work, send the claim's identity back unchanged:
+  await client.mutate("jobs.complete", {
     id: lease.id, owner: lease.owner, token: lease.token,
     ...(lease.history ? { history: lease.history } : {}),
     result: { processed: true },
@@ -373,37 +495,137 @@ if (lease) {
 
 Check for a `null` claim before starting work. Use stable request IDs for retries of one invocation. A retried claim returns its original receipt and can already be expired; use a new request ID to acquire fresh work. Lease expiry cannot stop a worker process or undo external effects. Downstream services should enforce fencing tokens or accept idempotency keys when duplicate work would matter.
 
-Expiring collections provide `set`, `get`, `entry`, `scan`, `delete`, and `sweep`. Reads hide a record at `ctx.now() >= expiresAt`, including inside reactive functions. `entry` returns its value and `createdAt`, `updatedAt`, and `expiresAt` metadata. Updates preserve a live record's creation time; replacing an expired record starts a new lifetime.
+Expiring collections are components too. `expiringCollection(name, { expiration?, value? })` provides `set`, `get`, `entry`, `scan`, and `delete`, and contributes a task that deletes expired records in pages of 64. Reads hide a record at `ctx.now() >= expiresAt`, including inside reactive functions, before the task reclaims it. `entry` returns its value and `createdAt`, `updatedAt`, and `expiresAt` metadata. Updates preserve a live record's creation time; replacing an expired record starts a new lifetime. A `value` schema rejects invalid values with `INVALID_ARGUMENT`.
 
 Each `set(ctx, key, value, expiration?)` uses its supplied policy or the collection default. Supported policies are `{afterCreationMs: n}`, `{afterUpdateMs: n}`, `{at: epochMilliseconds}`, and `null` for no expiry. The override applies to that write. Absolute deadlines let TypeScript implement other rules, such as the earlier of an idle timeout and a maximum lifetime. Internal code can access `.records` for raw envelopes; application methods should use the helpers when they want expiration filtering.
 
 Expiry after access can be an ordinary mutation method that reads the live value and writes it back with an updated deadline. Policies remain application code; a read-only query never silently refreshes a lifetime. The helpers are also available through the package's `@flower-js/sdk/temporal` export.
 
-Declare `cache.records` and `jobs.records` in `define({collections})` for indexed expiry and lease selection. Work queues support `{scope: tenant}` on one shared backing collection; their raw keys are canonical `[scope,id]` tuples. `queue.scan(ctx)` inspects only the selected scope. Claims seek pending jobs and inspect expired leases in bounded pages to preserve creation-order FIFO; completed history and valid leases are excluded. Scopes provide logical separation, not authentication.
+## Maintenance tasks
 
-For physical cleanup, register a private mutation with `define({ maintenance, http, definitions })`. The example's maintenance method calls `cache.sweep(ctx)` and `jobs.sweep(ctx)`. Flower attempts this on the leader every 250 ms, with an ordinary atomic mutation context and `null` arguments. The handler is not callable over HTTP unless separately exposed. Its code and registration replicate with the bundle. Exceptions roll back cleanup; public methods and deployment remain usable. Cleanup can be delayed by load, election, or quorum loss, and must be safe to repeat. Idle sweeps do not advance revisions; actual changes can invalidate `expectedRevision`. Background commits do not accumulate client retry receipts.
+Background work is a set of tasks. `task(name, { due, run, onError? })` declares one: `due(ctx)` returns the earliest time it has work, or `null`, and must depend only on data and time; `run(ctx)` performs one bounded unit in an ordinary mutation context and stays eligible while `due` remains in the past. Pass tasks to `define({ tasks })` or `component({ tasks })`. Schedulers, queues, expiring collections and `materialize` policies contribute their own.
 
-A maintenance result containing `{ $flower: { continue: true } }` requests another invocation against its successful staged patch. The host stops after the first invocation that takes the configured burst past its time budget (50 ms by default), when the serialized Raft batch would exceed its byte budget, or on an idle patch. There is no independent callback-count cap. The scheduler supplies this hint when more timers are already due. Each invocation gets a fresh time, resource budget, rollback boundary, and application revision. Successful patches share a durable group commit; a later callback failure still allows the preceding successful patches to commit. Handlers without the hint retain the ordinary polling cadence.
+```ts
+import { collection, define, task } from "@flower-js/sdk";
+
+const sessions = collection<{ user: string; expiresAt: number }>("sessions")
+  .index("expiry", ["expiresAt"]);
+
+const purge = task("sessions.purge", {
+  due: (ctx) => ctx.range(sessions.by("expiry").range({ limit: 1 })).rows[0]?.value.expiresAt ?? null,
+  run(ctx) {
+    const { rows } = ctx.range(sessions.by("expiry").range({ lte: ctx.now(), limit: 64 }));
+    for (const row of rows) ctx.delete(sessions, row.key);
+    return { purged: rows.length };
+  },
+});
+
+export default define({ collections: [sessions], tasks: [purge] });
+```
+
+`define` compiles every task into one private handler pair and registers it as the application's maintenance. On the leader, every 250 ms by default, the handler evaluates each task's `due` and runs the task due earliest. A task that fails without `onError` backs off for 1 s, doubling to 60 s; its failure count, retry time and last failure live in the reserved collection `$flower.tasks` until its next success, and other tasks stay eligible meanwhile. A task with `onError(ctx, { error, failedAt })` handles its own failures instead, as the scheduler does per timer. `error` is the real failure `{code, message, details?}`: the task's `fail()` code, `COMPUTE_ERROR` for an exception without a code, `EVALUATION_BUDGET` for an exhausted budget, and `MAINTENANCE_FAILED` only for errors outside evaluation, such as a panic.
+
+Maintenance handlers are not callable over HTTP. Their code and registration replicate with the bundle. A failed run rolls back; public methods and deployment remain usable. Maintenance can be delayed by load, election, or quorum loss, and must be safe to repeat. Idle runs do not advance revisions; actual changes can invalidate `expectedRevision`. Background commits do not accumulate client retry receipts.
+
+While another task is already due, the handler's result carries `{ $flower: { continue: true } }`, requesting another invocation against its successful staged patch. The host stops after the first invocation that takes the configured burst past its time budget (50 ms by default), when the serialized Raft batch would exceed its byte budget, or on an idle patch. There is no independent callback-count cap. Each invocation gets a fresh time, resource budget, rollback boundary, and application revision. Successful patches share a durable group commit; a later callback failure still allows the preceding successful patches to commit.
 
 `ctx.now()` is the small host primitive behind these helpers: a fixed epoch-millisecond timestamp for the entire evaluation, including all derived previews. Mutations commit it with their changes, and future mutations never move behind committed time. Queries use a fresh timestamp and temporarily refresh time-dependent derived values without writing. Reactive clock dependencies update on mutations and maintenance; source-only applications need no background handler.
 
 Time comes from the serving node, bounded below by committed time and the process's monotonic clock floor. Keep node clocks synchronized for accurate real-time durations: skew can expire a lease early or delay expiry, and query timestamps can move back between serving nodes when an earlier query's time was never committed. Fresh-read guarantees concern database state, not synchronized clocks. Deadlines are checked at invocation time, so slow evaluation or commitment may consume the remaining lease before the response arrives. Claims return an absolute deadline; successful acquisition is not a guarantee of a full duration remaining at receipt.
 
+## Values computed outside the database
+
+```ts
+import { collection, define, external, mutation, query, v } from "@flower-js/sdk";
+
+const documents = collection("documents", v.object({ text: v.string({ max: 100_000 }) }));
+const digest = external("digest", {
+  input: (ctx, id: string) => {
+    const document = ctx.get(documents, id);
+    return document && { recipe: "sha256-v1", text: document.text };
+  },
+  result: v.string({ pattern: /^[0-9a-f]{64}$/ }),
+  each: documents,
+});
+const get = query("document.get", { args: v.string() }, (ctx, id) => ({
+  document: ctx.get(documents, id),
+  digest: ctx.get(digest, id), // null, { status: "pending" } or { status: "ready", value }
+}));
+const put = mutation("document.put", { args: v.object({ id: v.string({ min: 1 }), text: v.string() }) }, (ctx, { id, text }) => {
+  ctx.set(documents, id, { text });
+  return null;
+});
+
+export default define({
+  uses: [digest],
+  http: { "document.get": get, "document.put": put, ...digest.http("digest") },
+});
+```
+
+`external(name, { input, result?, each? })` declares a derived value whose result comes from workers. `input(ctx, args)` returns everything the result depends on, or `null` when there is nothing to compute. `ctx.get(digest, id)` returns `null`, `{ status: "pending" }`, or `{ status: "ready", value }` once a result computed from the current input is stored; a changed input makes the old result pending at once. `publish(ctx, { args, key, value })` stores a result only while `key` still names the current input and returns `{ accepted }`; racing publications for one input keep the first value. `pending(ctx, args)` returns the work for one key. With `each: collection`, writes to that collection's rows mark their keys, and `next(ctx, { limit, shard })` lists pending work oldest first, optionally for one hash shard `[index, count]`. An input that reads other collections still updates `ctx.get` and `pending`, but worker pools notice the change only when the row itself is written. `digest.http("digest")` generates `digest.pending`, `digest.publish` and, with `each`, `digest.next`; its `access` option applies to all three.
+
+`reconcile` runs the worker side:
+
+```ts
+import { FlowerClient } from "@flower-js/sdk";
+import { reconcile } from "@flower-js/sdk/worker";
+import { createHash } from "node:crypto";
+
+const stop = new AbortController();
+await reconcile<string, { recipe: string; text: string }, string>(new FlowerClient("http://127.0.0.1:7101"), {
+  external: "digest",
+  signal: stop.signal,
+  concurrency: 4,
+  compute: async (input) => createHash("sha256").update(input.text).digest("hex"),
+});
+```
+
+With `args` it keeps one key current; otherwise it drains `next` in batches (`batch`, default 16) with `concurrency` parallel computations, optionally for one `shard`. It waits through subscriptions and publishes with retries. After a failed computation, or a publication the database rejects (for example by the `result` schema), it backs off and leaves the key pending for the next round. `compute` may run more than once for the same input. The [worker guide](https://flower-js-org.github.io/runtime/guide/workers.html) covers pools, sharding and high availability.
+
+## Test applications in process
+
+```ts
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { FlowerError } from "@flower-js/sdk";
+import { testDatabase } from "@flower-js/sdk/testing";
+import app from "./examples/scheduling.ts";
+
+test("an edit restarts the publication delay", async () => {
+  const db = await testDatabase(app);
+  db.mutate("documents.update", { id: "a", text: "draft", publishAfterMs: 1_000 });
+  db.advance(600);
+  db.mutate("documents.update", { id: "a", text: "final", publishAfterMs: 1_000 });
+  db.advance(600);
+  assert.equal(db.query("documents.get", "a")?.status, "draft");
+  db.advance(400);
+  assert.equal(db.query("documents.get", "a")?.status, "published");
+  assert.throws(() => db.mutate("documents.retryPublication", { id: "a" }),
+    (error) => error instanceof FlowerError && error.failure?.code === "TIMER_NOT_FAILED");
+});
+```
+
+`testDatabase(app, { now?, credentials?, partitions? })` runs an application on Flower's reference engine inside Node. `query`, `mutate` and `call` are synchronous, return values, and throw `FlowerError` shaped like the HTTP errors, including authorization hook denials and request-ID receipts. Time moves only when the test says so: `db.now` starts at 1,000,000, `advance(ms)` moves it and then runs due maintenance like the leader, and `maintain()` runs due maintenance alone. `db.data` and `db.revision` expose raw state. `db.client` is a typed `FlowerClient` over an in-process `fetch`, with `watch` and `subscribe`. `db.partition(name)` addresses a partition listed in `partitions`; transactions across them commit or abort together. Passing a module path instead of the module bundles it and runs it in a separate `node:vm` context. Index reads on an index the application does not declare fail with `UNDECLARED_INDEX`, since the server would answer them by scanning the collection.
+
+This is not the server: there is no Raft, no QuickJS, Wasm or server budget, and no native crypto, so `nacl`, `jwt`, managed keys and `jwtBearer` fail. Module globals persist between calls, unlike the server's pristine per-callback images. Retry retention and sessions are not simulated, and `ctx.history()` is null. Use the end-to-end tests below for server behavior.
+
 ## Reactive semantics
 
 A materialized root maintains its transitive derived dependencies. Instance identity is `(definition name, canonical JSON argument)`; omitted arguments mean `null`. Removing a root collects derived instances that are no longer reachable. Querying an unmaterialized derived instance evaluates it temporarily without persisting it.
 
+`derive(name, fn, { materialize })` declares which instances stay materialized. `"always"` materializes the argless instance through the `materialize` maintenance task, so it appears at the first maintenance run after deployment. `{ each: collection }` keeps one instance per row, with the row key as its argument: a trigger materializes the instance in the mutation that creates the row and unmaterializes it in the one that deletes it, and the same task backfills rows that already existed, 64 per run. Its progress markers live in the reserved collection `$flower.materialized`. `ctx.materialize` and `ctx.unmaterialize` remain available for other policies.
+
 Dependencies follow actual reads, including missing records. Scans and equality queries on undeclared indexes depend on their entire collection. Queries on declared durable indexes depend on the matching equality bucket and rows, including inserts into a previously empty bucket. Successful evaluations replace old dependencies. Failed evaluations retain old and newly observed dependencies to allow recovery.
 
-Ordinary derived exceptions become stored error outcomes and propagate to dependents. A method may catch such an error intentionally. Cycles and shared transaction-budget failures abort the proposal even if application code tries to catch them. Failed computed values are not served as their previous successful result.
+Ordinary derived exceptions become stored error outcomes and propagate to dependents. Stored outcomes keep the failure's code and message, not its details. A method may catch such an error intentionally. Cycles and shared transaction-budget failures abort the proposal even if application code tries to catch them. Failed computed values are not served as their previous successful result.
 
 Unchanged source values do not invalidate. For a single changed dependency, unchanged derived outcomes stop downstream propagation; multiple dirty branches conservatively retain the full dependency order. Explicit aggregates update retained accumulators from changed rows; see [indexes and reducers](INDEXES.md) for their callback contract and rebuild behavior.
 
 Functions return finite JSON values. There is no network, filesystem, process, timer or ambient date access. Mutation-only crypto entropy comes from the native OS CSPRNG; it is separate from deterministic business PRNG state. Queries and derived values cannot request fresh crypto randomness. Time is supplied through `ctx.now()`; other external facts enter through mutation methods. Promises, nonfinite numbers, sparse arrays, cyclic objects, and other unsupported values are rejected instead of silently serialized.
 
-Deployment uses a SHA-256-addressed JavaScript bundle. Initialization, the HTTP allowlist, and optional maintenance registration are checked before activation; changed bundles recompute live instances. Code, registrations, input changes, dependencies, and derived outcomes publish atomically. These are included in durable state and snapshots. A failed deployment leaves the previous code and registrations active. Deployment does not run the old maintenance handler, so a broken handler can be replaced.
+Deployment uses a SHA-256-addressed JavaScript bundle. Module initialization, the HTTP allowlist, and the maintenance and authorization registrations are checked before activation; changed bundles recompute live instances. Code, registrations, input changes, dependencies, and derived outcomes publish atomically. These are included in durable state and snapshots. A failed deployment leaves the previous code and registrations active. Deployment does not run the old maintenance handler, so a broken handler can be replaced.
 
-Applications register definitions, indexed collections, and public aliases through `define({ definitions, collections, http })`, with optional maintenance. No methods are exposed without an explicit HTTP allowlist. Flower is unreleased; APIs and stored/wire formats may change without backward compatibility or a migration path.
+Applications register components, definitions, indexed collections, tasks, triggers, keys, authentication and public aliases through `define({ uses, collections, definitions, tasks, triggers, keys, http, auth })`. No methods are exposed without an explicit HTTP allowlist. Flower is unreleased; APIs and stored/wire formats may change without backward compatibility or a migration path.
 
 ## Replication
 
@@ -429,9 +651,9 @@ Current builds use redb 4.3. Legacy redb v2 data files are unsupported.
 
 ## Control plane
 
-`POST /admin/deploy` accepts a bundle and request ID. `/raft/initialize` and `/raft/metrics` require `Authorization: Bearer <operator-token>`; internal peer RPCs use the separately configurable peer credential. Deployment and cluster administration are privileged operations separate from application methods. `/health` checks process availability without reading database data or establishing quorum.
+`POST /admin/deploy` accepts a bundle and request ID. `/raft/initialize` and `/raft/metrics` require `Authorization: Bearer <operator-token>`; internal peer RPCs use the separately configurable peer credential. Deployment and cluster administration are privileged operations separate from application methods; in the SDK they belong to `FlowerAdmin`, not `FlowerClient`. `/health` checks process availability without reading database data or establishing quorum.
 
-Native TLS protects HTTP/1.1 and HTTP/2 when configured; cleartext h2c remains the default for local experiments. Set a distinct `FLOWER_PEER_TOKEN` to separate internal traffic from `FLOWER_ADMIN_TOKEN` operator endpoints (omission falls back to the operator token). Deployed `define({authorize})` code establishes end-user principals; Flower does not supply an identity provider. Trusted peers can replicate state and forward privileged work, so route separation is not a sandbox for compromised peers. See [TLS.md](TLS.md) for the exact trust and rotation contract. The embedded runtime has not undergone a security audit.
+Native TLS protects HTTP/1.1 and HTTP/2 when configured; cleartext h2c remains the default for local experiments. Set a distinct `FLOWER_PEER_TOKEN` to separate internal traffic from `FLOWER_ADMIN_TOKEN` operator endpoints (omission falls back to the operator token). Deployed `define({ auth })` code establishes end-user principals; Flower does not supply an identity provider. Trusted peers can replicate state and forward privileged work, so route separation is not a sandbox for compromised peers. See [TLS.md](TLS.md) for the exact trust and rotation contract. The embedded runtime has not undergone a security audit.
 
 ## Tests and boundaries
 
@@ -472,16 +694,16 @@ Each node defaults to one query worker per available CPU, independently of its o
 
 The server embeds a [vendored QuickJS-NG guest](vendor/quickjs-ng) built from pinned upstream sources. Its only Wasm imports are Flower's database and crypto bridges: it has no WASI runtime, filesystem, networking or ambient clock. Mutation-only crypto entropy is supplied through the native capability bridge. A small C bridge binds arguments, loads optional bytecode, and invokes the callback in one Wasm entry. Normal Rust builds embed the checked-in guest and need no guest cross-compiler or WASI SDK.
 
-The server shares a Wasmtime engine, compiled modules, linked imports, pristine memory images, and pooled instance allocations. Every callback receives the same isolated logical state, either in a new Store or in a completely restored resident instance. A 4 KiB input allocation reserved in each image avoids an extra guest allocator call for small invocations; larger inputs allocate normally. Input bytes reset between callbacks and count toward the usual memory budget. Default bundles restore a base QuickJS sandbox and load cached QuickJS bytecode, preserving per-invocation module initialization. For modules whose initialization is independent of invocation bindings, opt into a fully initialized application snapshot:
+The server shares a Wasmtime engine, compiled modules, linked imports, pristine memory images, and pooled instance allocations. Every callback receives the same isolated logical state, either in a new Store or in a completely restored resident instance. A 4 KiB input allocation reserved in each image avoids an extra guest allocator call for small invocations; larger inputs allocate normally. Input bytes reset between callbacks and count toward the usual memory budget. Bundles default to static initialization: module code, including `define()` and component construction, runs once per prepared bundle image on each node rather than per callback, without invocation bindings, database access or entropy. Every callback then starts from that initialized snapshot, which Wasmtime maps copy-on-write from a file where the host supports it. Initialized heaps above 8 MiB instead restore the shared base QuickJS sandbox and load cached bytecode, rerunning module code in each callback. Per-invocation initialization is an explicit opt-out:
 
 ```sh
-node sdk/cli.ts build examples/orders.ts orders.flower.json --initialization static
+node sdk/cli.ts build examples/orders.ts orders.flower.json --initialization per-invocation
 node sdk/cli.ts deploy orders.flower.json
 # Or build and deploy in one step:
-node sdk/cli.ts deploy examples/orders.ts --initialization static
+node sdk/cli.ts deploy examples/orders.ts --initialization per-invocation
 ```
 
-The equivalent SDK option is `buildBundle(path, { initialization: "static" })`. Static initialization runs before invocation bindings exist; methods receive all request information through their context and arguments. The mode is part of the hashed bundle. Closures, globals, prototypes, and guest memory reset to that pristine snapshot for every callback. Wasmtime uses file-backed copy-on-write images where the host supports them. Before capturing a base or initialized application image, the host collects unreachable QuickJS cycles and resets the collection threshold to live allocated bytes plus 50%, its normal post-collection policy. Automatic collection and execution/memory limits remain enabled. Frozen method and derived context objects are constructed during trusted setup, before application initialization; overriding `Object.freeze` in application code does not intercept that construction. Cached application images are bounded; heap mutations never carry into another callback. The original JavaScript coordinator remains a test-only differential oracle, executed through the same vendored Wasm engine. No native JavaScript engine is linked.
+The equivalent SDK option is `buildBundle(path, { initialization: "per-invocation" })`; it restores the base sandbox and reruns module initialization for every callback. In both modes methods receive all request information through their context and arguments. The mode is part of the hashed bundle. Closures, globals, prototypes, and guest memory reset to the pristine image for every callback. Before capturing a base or initialized application image, the host collects unreachable QuickJS cycles and resets the collection threshold to live allocated bytes plus 50%, its normal post-collection policy. Automatic collection and execution/memory limits remain enabled. Frozen method and derived context objects are constructed during trusted setup, before application initialization; overriding `Object.freeze` in application code does not intercept that construction. Cached application images are bounded; heap mutations never carry into another callback. The original JavaScript coordinator remains a test-only differential oracle, executed through the same vendored Wasm engine. No native JavaScript engine is linked.
 
 A synchronous serial mutation batch may retain instances on its blocking worker thread. Before reuse, it restores linear memory and every mutable numeric Wasm global, replaces host callbacks and authorization/key caches, and charges the next invocation’s memory budget anew. Linux and macOS track the exact set of pages ever written in that instance: untouched pages stay read-only, and every previously written page is copied from the pristine image after each callback. Other platforms, or `FLOWER_WASM_DIRTY_PAGES=0`, use full-memory copies. Traps, growth and failed evaluations discard the instance; batch completion releases idle instances. `FLOWER_WASM_RECYCLE=0` disables resident reuse. `FLOWER_WASM_RECYCLE_BYTES` bounds idle linear memory per process (96 MiB by default); zero or an image larger than the allowance bypasses retention without rejecting the callback. This trades retained memory and pool slots for fewer allocations and page faults; see the [resource limits](bench/LIMITS.md).
 
@@ -514,19 +736,24 @@ A named partition is a complete logical database: application bundle, source and
 Configure participating servers with `FLOWER_GROUP`, `FLOWER_CATALOG_GROUP`, and `FLOWER_GROUPS` (bootstrap host:port peers for the local group and catalog). Provision and initialize physical groups separately, then register them through any configured gateway:
 
 ```ts
-import { FlowerClient } from "@flower-js/sdk/client";
+import { FlowerAdmin, FlowerClient } from "@flower-js/sdk/client";
+import { buildBundle } from "@flower-js/sdk/bundle";
+import type app from "./app.ts";
 
-const cluster = new FlowerClient("http://catalog-1:7101", {
+const cluster = new FlowerAdmin("http://catalog-1:7101", {
   adminToken: process.env.FLOWER_ADMIN_TOKEN,
 });
 await cluster.registerGroup({ id: "west", addresses: ["west-1:7101", "west-2:7101", "west-3:7101"] });
 await cluster.createPartition("tenant-a", "west", { requestId: "create-a" });
 await cluster.waitForPartition("tenant-a");
-const tenant = cluster.partition("tenant-a"); // deploy and invoke its code-owned methods
+await cluster.partition("tenant-a").deploy(await buildBundle("app.ts"), { requestId: "deploy-a" });
+const tenant = new FlowerClient<typeof app>("http://catalog-1:7101").partition("tenant-a");
 // After registering another initialized group named east:
 await cluster.resize(["west", "east"], { requestId: "grow-to-two" });
 console.log(await cluster.layout());
 ```
+
+`FlowerAdmin.partition(name)` scopes operator calls, and `FlowerClient.partition(name)` scopes method calls, to the stable `/partitions/{name}` URL. With an authorization hook, a partition admits only principals whose tenant equals its name.
 
 `resize` durably balances partition counts, moving one partition at a time. It neither starts servers nor balances bytes or measured CPU. Live pre-copy, source freeze, final difference transfer, catalog cutover, destination activation and source retirement are recoverable and idempotent. The source keeps serving while its durable base is copied. After a brief freeze it sends changed records and receipts, including deletions; a large difference falls back to a full frozen image. Migration rolls forward after it starts; unavailable required groups can prolong the frozen phase. An interrupted client does not cancel the work. Logical-partition transaction methods are supported; freeze waits for unresolved participants and coordinators while completion remains available.
 

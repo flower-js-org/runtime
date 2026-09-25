@@ -212,7 +212,12 @@ mod tests {
         let timeout = evaluator::config::settings().unwrap().evaluation_timeout;
         let target = page_target(timeout);
         if expected == "invalid" {
-            assert!(target.unwrap_err().2.contains("FLOWER_DEPLOYMENT_PAGE_MS"));
+            assert!(
+                target
+                    .unwrap_err()
+                    .message
+                    .contains("FLOWER_DEPLOYMENT_PAGE_MS")
+            );
         } else {
             assert_eq!(
                 target.unwrap(),

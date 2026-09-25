@@ -25,9 +25,12 @@ test("transaction plans expose only code-owned aliases and receive arguments wit
 
 test("transactions cannot declare replica-local policy or become maintenance handlers", () => {
   const plan = transaction("plan", (_args: Json) => ({ calls: [] }));
-  assert.throws(() => define({ definitions: [{ ...plan, consistency: "replica-local" } as never] }), /Consistency/);
-  assert.throws(() => define({ definitions: [{ ...plan, aggregate: { collection: "a", fields: ["id"] } } as never] }), /Aggregate/);
-  assert.throws(() => define({ maintenance: plan as never }), /mutation/);
+  const forged = { ...plan, consistency: "replica-local", aggregate: { collection: "a", fields: ["id"] } } as never;
+  const app = define({ http: { plan: forged } });
+  assert.deepEqual(app.http.plan, { name: "plan", kind: "transaction" });
+  assert.deepEqual(Object.keys(app.definitions.plan).sort(), ["compute", "kind", "name"]);
+  assert.throws(() => define({ tasks: [plan as never] }), /task definitions/);
+  assert.throws(() => define({ maintenance: plan } as never), /does not accept "maintenance"/);
   assert.throws(() => transaction("", () => ({ calls: [] })), /nonempty/);
   assert.throws(() => transaction("bad", null as never), /plan function/);
 });

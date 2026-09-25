@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { LocalCluster } from "../bench/cluster.mjs";
 import { buildBundle } from "../sdk/bundle.ts";
-import { FlowerClient } from "../sdk/client.ts";
+import { FlowerAdmin, FlowerClient } from "../sdk/client.ts";
 import { createHttp2Transport } from "../sdk/http2.ts";
 
 process.env.FLOWER_SNAPSHOT_AFTER_LOGS = "8";
@@ -25,10 +25,9 @@ async function binaryHash() {
 const initialBinaryHash = await binaryHash();
 const cluster = new LocalCluster({ nodes: 3, binary });
 const transport = createHttp2Transport({ requestTimeoutMs: 20_000 });
-const client = (credentials = { subject: "alice", allowNew: true }) => new FlowerClient(
-  cluster.members.find(node => node.id !== cluster.leader.id).url,
-  { adminToken: cluster.adminToken, credentials, fetch: transport.fetch },
-);
+const follower = () => cluster.members.find(node => node.id !== cluster.leader.id).url;
+const client = (credentials = { subject: "alice", allowNew: true }) => new FlowerClient(follower(), { credentials, fetch: transport.fetch });
+const admin = () => new FlowerAdmin(follower(), { adminToken: cluster.adminToken, fetch: transport.fetch });
 let sequence = 0;
 let lastChange = null;
 const ledger = new Map();
@@ -39,8 +38,8 @@ const multiplier=derive("multiplier",()=>${version});
 const total=derive("total",ctx=>ctx.scan(rows).length*ctx.get(multiplier));
 const weighted=aggregate("weighted",{source:rows,index:"id",initial:()=>0,add:(sum,row)=>sum+row.payload.length*${version},remove:(sum,row)=>sum-row.payload.length*${version}});
 const detail=derive("detail",(ctx,id)=>{const row=ctx.get(rows,id);return row ? {id,status:row.status,score:ctx.get(weighted,id),factor:ctx.get(multiplier)}:null;});
-export default define({collections:[rows],definitions:[total,detail,multiplier,weighted],authorize:query("authorize",(_ctx,a)=>
-  a.credentials?.subject==="alice" && (${version}<2 || a.credentials?.allowNew) ? {subject:"alice"}:null),http:{
+export default define({collections:[rows],definitions:[total,detail,multiplier,weighted],auth:{authenticate:(_ctx,c:any)=>
+  c?.subject==="alice" && (${version}<2 || c?.allowNew) ? {subject:"alice"}:null},http:{
   change:mutation("change",(ctx,a)=>{if(a.value){ctx.set(rows,a.key,a.value);ctx.materialize(detail,a.key);}else{ctx.delete(rows,a.key);ctx.unmaterialize(detail,a.key);}ctx.materialize(total);return ctx.get(total);}),
   read:query("read",(ctx,status)=>{const selected=${indexVersion >= 2 ? 'ctx.query(rows.by("status").eq(status))' : 'ctx.scan(rows).map(row=>row.value).filter(row=>row.status===status)'}.sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:0);return {version:${version},total:ctx.get(total),rows:selected,details:selected.map(row=>ctx.get(detail,row.id))};}),
 }});`;
@@ -64,7 +63,7 @@ async function verify(version, who = client()) {
 async function progress(id, operation, stop, maxBytes = 4096) {
   let state;
   for (let n = 0; n < 1000; n++) {
-    state = (await client().controlStagedDeployment({ operation, requestId: id, maxBytes })).value;
+    state = (await admin().controlStagedDeployment({ operation, requestId: id, maxBytes })).value;
     assert.notEqual(state.phase, "failed", state.error ?? "staged preparation failed");
     if (state.phase === stop) return state;
   }
@@ -91,7 +90,7 @@ try {
   await cluster.start();
   const fixture = join(cluster.directory, "staged.ts");
   const bundle = async (version, indexVersion = version) => { await writeFile(fixture, source(version, indexVersion)); return buildBundle(fixture); };
-  await client().deploy(await bundle(1), { requestId: "initial", preparation: "blocking" });
+  await admin().deploy(await bundle(1), { requestId: "initial", preparation: "blocking" });
   for (let i = 0; i < 64; i++) {
     const id = String(i).padStart(3, "0");
     await change(id, { id, status: i % 2 ? "ready" : "waiting", payload: "x".repeat(96) });
@@ -99,9 +98,9 @@ try {
   const old = client({ subject: "alice" });
   await verify(1, old);
   const next = await bundle(2);
-  const staged = (await client().stageDeployment(next, { requestId: "index-v2" })).value;
+  const staged = (await admin().stageDeployment(next, { requestId: "index-v2" })).value;
   assert.equal(staged.phase, "backfill");
-  const firstResult = await client().controlStagedDeployment({ operation: "advance", requestId: "index-v2", maxBytes: 4096 });
+  const firstResult = await admin().controlStagedDeployment({ operation: "advance", requestId: "index-v2", maxBytes: 4096 });
   const first = firstResult.value;
   assert.equal(first.phase, "backfill", "bounded page must leave durable work to resume");
   assert.ok(first.scannedRows > 0 && first.scannedRows < 64);
@@ -110,7 +109,7 @@ try {
   }, { requestId: "index-v2" }), "a live staged build reserves its deployment intent ID");
   await verify(1, old);
   await restartAll();
-  const restoredResult = await client().stagedDeploymentStatus();
+  const restoredResult = await admin().stagedDeploymentStatus();
   const restored = restoredResult.value;
   try {
     assert.deepEqual(restored, first, "index progress must survive a full restart");
@@ -120,13 +119,13 @@ try {
     const recovery = await Promise.allSettled(cluster.members.map(async node => ({
       node: node.id,
       metrics: await cluster.metrics(node),
-      status: await new FlowerClient(node.url, { adminToken: cluster.adminToken, fetch: transport.fetch }).stagedDeploymentStatus(),
+      status: await new FlowerAdmin(node.url, { adminToken: cluster.adminToken, fetch: transport.fetch }).stagedDeploymentStatus(),
     })));
     await writeFile(join(cluster.directory, "recovery-failure.json"), JSON.stringify({ firstResult, restoredResult, recovery }, null, 2));
     console.error({ firstResult, restoredResult, recovery });
     throw error;
   }
-  assert.deepEqual((await client().stageDeployment(next, { requestId: "index-v2" })).value, restored);
+  assert.deepEqual((await admin().stageDeployment(next, { requestId: "index-v2" })).value, restored);
 
   // Writes crossing both sides of the backfill cursor race bounded advances.
   await Promise.all([
@@ -141,16 +140,16 @@ try {
   ]);
   let graphPage;
   for (let n = 0; n < 4; n++) {
-    graphPage = (await client().controlStagedDeployment({ operation: "advance", requestId: "index-v2", maxBytes: 64 * 1024 })).value;
+    graphPage = (await admin().controlStagedDeployment({ operation: "advance", requestId: "index-v2", maxBytes: 64 * 1024 })).value;
   }
   assert.equal(graphPage.phase, "rebuilding", "many materialized roots must leave resumable graph work");
   assert.ok(graphPage.rebuiltRoots >= 4 && graphPage.rebuiltRoots <= 15,
     "adaptive graph pages grow by at most two and preserve bounded progress");
   assert.ok(graphPage.graphCursor && graphPage.generation);
-  await assert.rejects(client().controlStagedDeployment({ operation: "activate", requestId: "index-v2" }), { code: "DEPLOYMENT_CONFLICT" });
+  await assert.rejects(admin().controlStagedDeployment({ operation: "activate", requestId: "index-v2" }), { code: "DEPLOYMENT_CONFLICT" });
   await verify(1, client({ subject: "alice" }));
   await restartAll();
-  const resumedGraph = (await client().stagedDeploymentStatus()).value;
+  const resumedGraph = (await admin().stagedDeploymentStatus()).value;
   assert.equal(resumedGraph.graphCursor, graphPage.graphCursor);
   assert.equal(resumedGraph.rebuiltRoots, graphPage.rebuiltRoots);
   assert.equal(resumedGraph.generation, graphPage.generation);
@@ -167,30 +166,32 @@ try {
     })(),
   ]);
   await verify(1, client({ subject: "alice" }));
-  const activated = (await client().controlStagedDeployment({ operation: "activate", requestId: "index-v2" })).value;
+  const activated = (await admin().controlStagedDeployment({ operation: "activate", requestId: "index-v2" })).value;
   assert.equal(activated.phase, "active");
-  await assert.rejects(client({ subject: "alice" }).query("read", "ready"), { code: "FORBIDDEN" });
+  // Code, index and authorization activate atomically: the new hook rejects the old credentials.
+  await assert.rejects(client({ subject: "alice" }).query("read", "ready"),
+    error => error.status === 403 && error.code === "FORBIDDEN" && error.failure?.code === "UNAUTHENTICATED");
   await verify(2);
-  assert.equal((await client().controlStagedDeployment({ operation: "activate", requestId: "index-v2" })).value.phase, "active");
+  assert.equal((await admin().controlStagedDeployment({ operation: "activate", requestId: "index-v2" })).value.phase, "active");
   await progress("index-v2", "collect", "collected");
 
   const third = await bundle(3);
-  await client().stageDeployment(third, { requestId: "canceled-v3" });
+  await admin().stageDeployment(third, { requestId: "canceled-v3" });
   await progress("canceled-v3", "advance", "rebuilding");
-  const abandonedGraph = (await client().controlStagedDeployment({ operation: "advance", requestId: "canceled-v3", maxBytes: 64 * 1024 })).value;
+  const abandonedGraph = (await admin().controlStagedDeployment({ operation: "advance", requestId: "canceled-v3", maxBytes: 64 * 1024 })).value;
   assert.equal(abandonedGraph.rebuiltRoots, 1);
-  assert.equal((await client().controlStagedDeployment({ operation: "cancel", requestId: "canceled-v3" })).value.phase, "canceled");
+  assert.equal((await admin().controlStagedDeployment({ operation: "cancel", requestId: "canceled-v3" })).value.phase, "canceled");
   await progress("canceled-v3", "collect", "collected");
-  await assert.rejects(client().controlStagedDeployment({ operation: "activate", requestId: "canceled-v3" }));
-  await client().deploy(third, { requestId: "canceled-v3", preparation: "blocking" });
+  await assert.rejects(admin().controlStagedDeployment({ operation: "activate", requestId: "canceled-v3" }));
+  await admin().deploy(third, { requestId: "canceled-v3", preparation: "blocking" });
   await verify(2); // The canceled intent replays its terminal receipt, never deploys.
 
   // A code-only successor rebuilds from the selected graph generation without
   // requiring any index backfill, then survives snapshots and a full restart.
-  const successor = (await client().stageDeployment(await bundle(4, 2), { requestId: "graph-v4" })).value;
+  const successor = (await admin().stageDeployment(await bundle(4, 2), { requestId: "graph-v4" })).value;
   assert.equal(successor.phase, "rebuilding");
   await progress("graph-v4", "advance", "ready", 64 * 1024);
-  await client().controlStagedDeployment({ operation: "activate", requestId: "graph-v4" });
+  await admin().controlStagedDeployment({ operation: "activate", requestId: "graph-v4" });
   await verify(4);
   await progress("graph-v4", "collect", "collected");
   const activatedIndex = (await cluster.metrics(cluster.leader)).last_applied.index;
@@ -211,9 +212,10 @@ try {
   cluster.keepData = true;
   if (cluster.directory) {
     const recovery = await Promise.allSettled(cluster.members.map(async node => {
-      const who = new FlowerClient(node.url, { adminToken: cluster.adminToken, credentials: { subject: "alice", allowNew: true }, fetch: transport.fetch });
+      const who = new FlowerClient(node.url, { credentials: { subject: "alice", allowNew: true }, fetch: transport.fetch });
+      const operator = new FlowerAdmin(node.url, { adminToken: cluster.adminToken, fetch: transport.fetch });
       return { node: node.id, metrics: await cluster.metrics(node),
-        status: await who.stagedDeploymentStatus({ signal: AbortSignal.timeout(3000) }),
+        status: await operator.stagedDeploymentStatus({ signal: AbortSignal.timeout(3000) }),
         waiting: await who.query("read", "waiting", { signal: AbortSignal.timeout(3000) }) };
     }));
     await writeFile(join(cluster.directory, "failure-context.json"), JSON.stringify({

@@ -14,7 +14,7 @@ test("the SDK reference covers every public export and class method", () => {
   const methods = new Set([...html.matchAll(/data-api-method="([^"]+)"/g)].map((match) => match[1]));
   // The public entrypoints use explicit named declarations and re-exports.
   // Audit that source form directly; TypeScript 7 exposes no legacy compiler API.
-  for (const file of ["index", "client", "temporal", "scheduler", "http2", "bundle", "crypto"]) {
+  for (const file of ["index", "client", "temporal", "scheduler", "worker", "testing", "http2", "bundle", "crypto"]) {
     const source = readFileSync(new URL(`./${file}.ts`, import.meta.url), "utf8");
     assert.doesNotMatch(source, /^export\s+\*/m, "Expand star exports before auditing the SDK reference");
     const names = [...source.matchAll(/^export\s+(?:async\s+)?(?:function|class|interface|type|const|enum)\s+(\w+)/gm)].map((match) => match[1]);
@@ -39,7 +39,7 @@ test("website TypeScript examples import only published SDK paths", () => {
     const source = readFileSync(new URL(file, docs), "utf8")
       .replace(/<\/?span\b[^>]*>/g, "").replaceAll("&quot;", '"');
     for (const match of source.matchAll(/\bfrom\s+["']([^"']+)["']/g)) {
-      assert.match(match[1], /^(?:node:[a-z/_]+|@flower-js\/sdk(?:\/(?:client|temporal|scheduler|http2|bundle|crypto))?)$/, `${file} must show supported package imports`);
+      assert.match(match[1], /^(?:node:[a-z/_]+|@flower-js\/sdk(?:\/(?:client|temporal|scheduler|worker|testing|http2|bundle|crypto))?|\.\/[\w-]+\.ts)$/, `${file} must show supported package imports`);
     }
   }
 });

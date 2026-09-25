@@ -98,12 +98,12 @@ async fn retry_authorizes_current_credentials_and_preserves_original_result() {
         writer::submit(&app, retry.clone(), false)
             .await
             .unwrap_err()
-            .1,
+            .code,
         "FORBIDDEN"
     );
     retry["credentials"] = credentials("bob", "new");
     assert_eq!(
-        writer::submit(&app, retry, false).await.unwrap_err().1,
+        writer::submit(&app, retry, false).await.unwrap_err().code,
         "REQUEST_ID_REUSED"
     );
     let mut revoke = input.clone();
@@ -111,7 +111,7 @@ async fn retry_authorizes_current_credentials_and_preserves_original_result() {
     revoke["args"] = json!({"revoke":true});
     writer::submit(&app, revoke, false).await.unwrap();
     assert_eq!(
-        writer::submit(&app, input, false).await.unwrap_err().1,
+        writer::submit(&app, input, false).await.unwrap_err().code,
         "FORBIDDEN"
     );
     let state = app.consensus.read().await.unwrap();
@@ -137,7 +137,10 @@ async fn cached_queries_still_authorize_and_scope_principals() {
     input["credentials"]["expires"] = json!(0);
     assert!(matches!(
         read_query(&app, input).await,
-        Err(ApiError(_, "FORBIDDEN", _))
+        Err(ApiError {
+            code: "FORBIDDEN",
+            ..
+        })
     ));
     app.consensus.shutdown().await.unwrap();
 }

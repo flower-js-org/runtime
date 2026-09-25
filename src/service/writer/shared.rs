@@ -237,7 +237,10 @@ mod tests {
         command.request_id = policy::scope_request_id(&retention, "request");
         let expected_error = stage(&mut original.clone(), &command).unwrap_err();
         let error = SharedCommit::stage(&mut state, command).unwrap_err();
-        assert_eq!((error.0, error.1), (expected_error.0, expected_error.1));
+        assert_eq!(
+            (error.status, error.code),
+            (expected_error.status, expected_error.code)
+        );
         assert_eq!(state, original);
         assert!(state.data.ptr_eq(&original.data));
         assert!(state.requests.ptr_eq(&original.requests));

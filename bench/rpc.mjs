@@ -2,11 +2,18 @@ import { setTimeout as delay } from "node:timers/promises";
 import { createHttp2Transport } from "../sdk/http2.ts";
 
 export class RpcError extends Error {
-  constructor(message, status = 0, code = "NETWORK") {
+  /** failure is the method's own { code, message, details? } when Flower reports one. */
+  constructor(message, status = 0, code = "NETWORK", failure) {
     super(message);
     this.status = status;
     this.code = code;
+    if (failure !== undefined) this.failure = failure;
   }
+}
+
+function failureOf(value) {
+  if (value === null || typeof value !== "object" || typeof value.code !== "string" || typeof value.message !== "string") return undefined;
+  return { code: value.code, message: value.message, ...(value.details === undefined ? {} : { details: value.details }) };
 }
 
 // Bound the caller's wait even when another caller owns a shared discovery.
@@ -127,7 +134,7 @@ export class BenchmarkClient {
           const text = await response.text();
           let data;
           try { data = JSON.parse(text); } catch { data = null; }
-          if (!response.ok) throw new RpcError(data?.error?.message ?? text, response.status, data?.error?.code);
+          if (!response.ok) throw new RpcError(data?.error?.message ?? text, response.status, data?.error?.code, failureOf(data?.error?.failure));
           if (!data || !Number.isSafeInteger(data.revision) || !Object.hasOwn(data, "value")) {
             throw new RpcError("Malformed successful Flower response", response.status, "INVALID_RESPONSE");
           }

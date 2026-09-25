@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 import { LocalCluster } from "../../bench/cluster.mjs";
-import { FlowerClient } from "../../sdk/client.ts";
+import { FlowerAdmin, FlowerClient } from "../../sdk/client.ts";
 import { startPizzaDemo } from "./demo.mjs";
 
 const run = promisify(execFile);
@@ -16,11 +16,11 @@ const demoModule = new URL("./demo.mjs", import.meta.url).href;
 test("abort during listener startup closes the eventual listener and rejects startup", async (t) => {
   const controller = new AbortController();
   const original = { start: LocalCluster.prototype.start, close: LocalCluster.prototype.close,
-    deploy: FlowerClient.prototype.deploy, mutate: FlowerClient.prototype.mutate, listen: Server.prototype.listen };
+    deploy: FlowerAdmin.prototype.deploy, mutate: FlowerClient.prototype.mutate, listen: Server.prototype.listen };
   let listener, closeCalls = 0;
   LocalCluster.prototype.start = async function () { this.leader = { url: "http://127.0.0.1:1" }; return this; };
   LocalCluster.prototype.close = async () => { closeCalls++; };
-  FlowerClient.prototype.deploy = async () => ({ revision: 1, value: null, duplicate: false });
+  FlowerAdmin.prototype.deploy = async () => ({ revision: 1, value: null, duplicate: false });
   FlowerClient.prototype.mutate = async () => ({ revision: 1, value: null, duplicate: false });
   Server.prototype.listen = function (...args) {
     listener = this;
@@ -30,7 +30,7 @@ test("abort during listener startup closes the eventual listener and rejects sta
   };
   t.after(async () => {
     LocalCluster.prototype.start = original.start; LocalCluster.prototype.close = original.close;
-    FlowerClient.prototype.deploy = original.deploy; FlowerClient.prototype.mutate = original.mutate;
+    FlowerAdmin.prototype.deploy = original.deploy; FlowerClient.prototype.mutate = original.mutate;
     Server.prototype.listen = original.listen;
     if (listener?.listening) await new Promise((resolve) => listener.close(resolve));
   });
@@ -42,14 +42,14 @@ test("abort during listener startup closes the eventual listener and rejects sta
 
 test("dashboard streams rotate across running replicas without leader discovery", async (t) => {
   const original = { start: LocalCluster.prototype.start, close: LocalCluster.prototype.close,
-    discover: LocalCluster.prototype.discoverLeader, deploy: FlowerClient.prototype.deploy,
+    discover: LocalCluster.prototype.discoverLeader, deploy: FlowerAdmin.prototype.deploy,
     mutate: FlowerClient.prototype.mutate, fetch: globalThis.fetch };
   const members = [1, 2, 3].map((id) => ({ id, url: `http://127.0.0.1:${12340 + id}`, process: { ended: false, intentional: false } }));
   const watched = [];
   LocalCluster.prototype.start = async function () { this.members = members; this.leader = members[0]; return this; };
   LocalCluster.prototype.close = async () => {};
   LocalCluster.prototype.discoverLeader = async () => { throw new Error("Dashboard reads must not discover a leader"); };
-  FlowerClient.prototype.deploy = async () => ({ revision: 1, value: null, duplicate: false });
+  FlowerAdmin.prototype.deploy = async () => ({ revision: 1, value: null, duplicate: false });
   FlowerClient.prototype.mutate = async () => ({ revision: 1, value: null, duplicate: false });
   globalThis.fetch = async (url, options) => {
     if (members.some((member) => String(url).startsWith(member.url + "/"))) {
@@ -63,7 +63,7 @@ test("dashboard streams rotate across running replicas without leader discovery"
     await demo?.close();
     LocalCluster.prototype.start = original.start; LocalCluster.prototype.close = original.close;
     LocalCluster.prototype.discoverLeader = original.discover;
-    FlowerClient.prototype.deploy = original.deploy; FlowerClient.prototype.mutate = original.mutate;
+    FlowerAdmin.prototype.deploy = original.deploy; FlowerClient.prototype.mutate = original.mutate;
     globalThis.fetch = original.fetch;
   });
   demo = await startPizzaDemo({ auto: false });
@@ -89,10 +89,10 @@ test("dashboard streams rotate across running replicas without leader discovery"
 const stubbedCli = `
   import { Server } from "node:http";
   import { LocalCluster } from ${JSON.stringify(clusterModule)};
-  import { FlowerClient } from ${JSON.stringify(clientModule)};
+  import { FlowerAdmin, FlowerClient } from ${JSON.stringify(clientModule)};
   LocalCluster.prototype.start = async function () { this.leader = { url: "http://127.0.0.1:1" }; return this; };
   LocalCluster.prototype.close = async function () {};
-  FlowerClient.prototype.deploy = async () => ({ revision: 1, value: null, duplicate: false });
+  FlowerAdmin.prototype.deploy = async () => ({ revision: 1, value: null, duplicate: false });
   FlowerClient.prototype.mutate = async () => ({ revision: 1, value: null, duplicate: false });
   process.argv = [process.execPath, ${JSON.stringify(fileURLToPath(demoModule))}, "--duration", "3600", "--paused"];
 `;

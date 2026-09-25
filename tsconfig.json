@@ -8,7 +8,21 @@
     "allowImportingTsExtensions": true,
     "erasableSyntaxOnly": true,
     "skipLibCheck": true,
-    "types": ["node"]
+    "types": [
+      "node"
+    ],
+    "paths": {
+      "@flower-js/sdk": [
+        "./sdk/index.ts"
+      ],
+      "@flower-js/sdk/*": [
+        "./sdk/*.ts"
+      ]
+    }
   },
-  "include": ["sdk/**/*.ts", "examples/**/*.ts"]
+  "include": [
+    "sdk/**/*.ts",
+    "examples/**/*.ts",
+    "docs/*.ts"
+  ]
 }

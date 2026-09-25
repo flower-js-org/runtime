@@ -1,10 +1,10 @@
 import { readFile } from "node:fs/promises";
-import type { FlowerClient, SealedKeyImport } from "./client.ts";
+import type { FlowerAdmin, SealedKeyImport } from "./client.ts";
 import { key } from "./keys.ts";
 import type { ManagedKeyAlgorithm, KeyUsage } from "./keys.ts";
 
 /** Imports accept sealed JSON only. Plaintext stdin belongs to native key seal. */
-export async function runKeyCommand(client: FlowerClient, args: string[], flags: Map<string, string>): Promise<unknown> {
+export async function runKeyCommand(client: FlowerAdmin, args: string[], flags: Map<string, string>): Promise<unknown> {
   const [operation, ...operands] = args;
   const allowed: Record<string, string[]> = {
     list: [], cache: [], generate: ["algorithm", "bits"], import: ["algorithm"],

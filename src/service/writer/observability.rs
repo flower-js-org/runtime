@@ -71,7 +71,7 @@ pub(super) fn kind(deployment: bool) -> &'static str {
 pub(super) fn outcome<T>(result: &Result<T, ApiError>) -> &'static str {
     match result {
         Ok(_) => "ok",
-        Err(error) if error.0.is_client_error() => "client_error",
+        Err(error) if error.status.is_client_error() => "client_error",
         Err(_) => "server_error",
     }
 }

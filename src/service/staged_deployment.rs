@@ -97,7 +97,7 @@ enum Operation {
     },
 }
 fn error(message: impl Into<String>) -> ApiError {
-    ApiError(StatusCode::CONFLICT, "DEPLOYMENT_CONFLICT", message.into())
+    ApiError::new(StatusCode::CONFLICT, "DEPLOYMENT_CONFLICT", message.into())
 }
 fn decode<T: serde::de::DeserializeOwned>(value: &Value) -> Result<T, ApiError> {
     serde_json::from_value(value.clone()).map_err(|error| invalid(error.into()))
@@ -196,7 +196,7 @@ pub(super) fn ensure_request_id_available(state: &Snapshot, id: &str) -> Result<
                 Phase::Backfill | Phase::Rebuilding | Phase::Ready | Phase::Failed
             )
     }) {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::CONFLICT,
             "REQUEST_ID_REUSED",
             "requestId is reserved by a live staged deployment".into(),
@@ -262,7 +262,7 @@ fn fits(app: &App, command: &Commit) -> bool {
 async fn persist(app: &App, state: &Snapshot, command: Commit) -> Result<Value, ApiError> {
     transactions::ensure_write_capacity(state)?;
     if !fits(app, &command) {
-        return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE,"TRANSACTION_TOO_LARGE","staged deployment page exceeds FLOWER_TRANSACTION_MAX_BYTES; lower maxBytes or increase the configured transaction budget".into()));
+        return Err(ApiError::new(StatusCode::PAYLOAD_TOO_LARGE,"TRANSACTION_TOO_LARGE","staged deployment page exceeds FLOWER_TRANSACTION_MAX_BYTES; lower maxBytes or increase the configured transaction budget".into()));
     }
     let bytes = command
         .puts
@@ -597,7 +597,7 @@ async fn cancel(app: &App, id: String) -> Result<Value, ApiError> {
         Err(reason) => {
             let reason = retention::error(reason);
             if !matches!(
-                reason.1,
+                reason.code,
                 "HISTORY_MISMATCH"
                     | "RETRY_WINDOW_EXPIRED"
                     | "ALREADY_ACKNOWLEDGED"

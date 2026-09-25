@@ -142,14 +142,14 @@ fn lock_gate_fails_closed_even_for_corrupt_metadata() {
     assert!(ensure_unlocked(&state).is_ok());
     state.data.insert(PARTICIPANT.into(), Value::Null);
     assert_eq!(
-        ensure_unlocked(&state).unwrap_err().1,
+        ensure_unlocked(&state).unwrap_err().code,
         "TRANSACTION_PREPARED"
     );
     state.data.insert(coordinator_key("claimed"), Value::Null);
     assert_eq!(
         ensure_request_id_available(&state, "claimed")
             .unwrap_err()
-            .1,
+            .code,
         "REQUEST_ID_REUSED"
     );
 }
@@ -206,6 +206,7 @@ async fn preparation_is_invisible_and_abort_fences_late_prepare() {
         Phase::Abort,
         None,
         Some("test abort".into()),
+        None,
     )
     .await
     .unwrap();
@@ -213,7 +214,7 @@ async fn preparation_is_invisible_and_abort_fences_late_prepare() {
         finish_coordinator(&app, &reference, &decision)
             .await
             .unwrap_err()
-            .1,
+            .code,
         "TRANSACTION_ABORTED"
     );
     assert!(ensure_unlocked(&app.consensus.read_for_writer().await.unwrap()).is_ok());
@@ -250,7 +251,7 @@ async fn execute_orders_results_commits_once_and_fences_content_reuse() {
     let mut conflicting = input;
     conflicting["args"]["value"] = json!("different");
     assert_eq!(
-        execute(app.clone(), conflicting).await.unwrap_err().1,
+        execute(app.clone(), conflicting).await.unwrap_err().code,
         "REQUEST_ID_REUSED"
     );
     app.consensus.shutdown().await.unwrap();
@@ -268,7 +269,7 @@ async fn failed_participant_rolls_back_all_earlier_calls() {
     )
     .await
     .unwrap_err();
-    assert_eq!(response.1, "TRANSACTION_ABORTED");
+    assert_eq!(response.code, "TRANSACTION_ABORTED");
     assert_eq!(read(&app).await, 0);
     assert!(ensure_unlocked(&app.consensus.read_for_writer().await.unwrap()).is_ok());
     app.consensus.shutdown().await.unwrap();
@@ -297,15 +298,23 @@ async fn recovery_aborts_preparing_but_never_reverses_commit() {
     )
     .await;
     prepare(&app, &committed).await.unwrap();
-    decide(&app, &committed, Phase::Commit, Some("[7]".into()), None)
-        .await
-        .unwrap();
+    decide(
+        &app,
+        &committed,
+        Phase::Commit,
+        Some("[7]".into()),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     let raced = decide(
         &app,
         &committed,
         Phase::Abort,
         None,
         Some("too late".into()),
+        None,
     )
     .await
     .unwrap();
@@ -342,6 +351,7 @@ async fn abort_before_prepare_fences_delayed_prepare_without_an_extra_write() {
         Phase::Abort,
         None,
         Some("prepare RPC was uncertain".into()),
+        None,
     )
     .await
     .unwrap();
@@ -362,8 +372,8 @@ async fn abort_before_prepare_fences_delayed_prepare_without_an_extra_write() {
     )
     .await
     .unwrap_err();
-    assert_eq!(nested.1, "TRANSACTION_ABORTED");
-    assert!(nested.2.contains("nested transactions"));
+    assert_eq!(nested.code, "TRANSACTION_ABORTED");
+    assert!(nested.message.contains("nested transactions"));
     app.consensus.shutdown().await.unwrap();
 }
 
@@ -392,6 +402,7 @@ fn revision_reservations_allow_finishing_but_fence_unrelated_writes() {
         phase: Phase::Preparing,
         results: None,
         reason: None,
+        failure: None,
         complete: false,
     };
     let mut state = Snapshot {
@@ -404,7 +415,7 @@ fn revision_reservations_allow_finishing_but_fence_unrelated_writes() {
     writer::stage(&mut state, &begin).unwrap();
     assert_eq!(state.data[RESERVED_REVISIONS], 4);
     assert_eq!(
-        ensure_write_capacity(&state).unwrap_err().1,
+        ensure_write_capacity(&state).unwrap_err().code,
         "REVISION_EXHAUSTED"
     );
     let prepared = Prepared {
@@ -451,7 +462,9 @@ fn revision_reservations_allow_finishing_but_fence_unrelated_writes() {
     assert_eq!(state.data[RESERVED_REVISIONS], 0);
     let mut too_late = begin;
     assert_eq!(
-        ensure_commit_capacity(&state, &mut too_late).unwrap_err().1,
+        ensure_commit_capacity(&state, &mut too_late)
+            .unwrap_err()
+            .code,
         "REVISION_EXHAUSTED"
     );
 }
@@ -472,7 +485,7 @@ async fn rpc_authentication_checks_group_and_compatibility_contract() {
     };
     let mut headers = HeaderMap::new();
     assert_eq!(
-        authenticate_headers(&app, &headers).unwrap_err().0,
+        authenticate_headers(&app, &headers).unwrap_err().status,
         StatusCode::UNAUTHORIZED
     );
     headers.insert(
@@ -547,9 +560,16 @@ async fn remote_participant_stays_locked_without_coordinator_then_recovers_durab
             .unwrap();
         assert_eq!(read(&a).await, 0);
         if commit {
-            decide(&b, &reference, Phase::Commit, Some("[4]".into()), None)
-                .await
-                .unwrap();
+            decide(
+                &b,
+                &reference,
+                Phase::Commit,
+                Some("[4]".into()),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
         }
         // The participant must neither read hidden state nor invent an abort
         // when the durable coordinator status cannot be reached.
@@ -611,11 +631,11 @@ async fn remote_participant_stays_locked_without_coordinator_then_recovers_durab
         .unwrap();
     for reference in references {
         assert_eq!(
-            prepare(&a, &reference).await.unwrap_err().1,
+            prepare(&a, &reference).await.unwrap_err().code,
             "TRANSACTION_CLOSED"
         );
         assert_eq!(
-            finish(&a, &reference).await.unwrap_err().1,
+            finish(&a, &reference).await.unwrap_err().code,
             "TRANSACTION_CLOSED"
         );
     }
@@ -672,7 +692,7 @@ fn begin_budget_must_also_fit_a_durable_abort() {
     record.reason = Some(ABORT_REASON.into());
     let abort = metadata_command(&reference, &record);
     assert_eq!(
-        check_command_limit(&abort, begin_bytes).unwrap_err().1,
+        check_command_limit(&abort, begin_bytes).unwrap_err().code,
         "TRANSACTION_TOO_LARGE",
         "admission must reserve the terminal envelope even when begin fits exactly"
     );
@@ -713,8 +733,8 @@ async fn aggregate_evaluation_deadline_discards_every_staged_call() {
     let error = prepare_with_budget(&app, &reference, Duration::from_millis(10))
         .await
         .unwrap_err();
-    assert_eq!(error.1, "EVALUATION_FAILED");
-    assert!(error.2.contains("EVALUATION_BUDGET"));
+    assert_eq!(error.code, "EVALUATION_FAILED");
+    assert!(error.message.contains("EVALUATION_BUDGET"));
     assert_eq!(read(&app).await, 0);
     assert!(ensure_unlocked(&app.consensus.read_for_writer().await.unwrap()).is_ok());
     recover(&app).await.unwrap();
@@ -733,7 +753,10 @@ async fn unauthenticated_malformed_body_is_rejected_before_json_parsing() {
         .body(axum::body::Body::from("not-json"))
         .unwrap();
     assert_eq!(
-        authenticated_request(&app, request).await.unwrap_err().0,
+        authenticated_request(&app, request)
+            .await
+            .unwrap_err()
+            .status,
         StatusCode::UNAUTHORIZED
     );
     app.consensus.shutdown().await.unwrap();
@@ -859,18 +882,18 @@ async fn closure_floors_reject_late_prepare_and_finish_after_decision_deletion()
     assert!(!state.data.contains_key(&coordinator_key("closed-write")));
     assert!(!state.data.contains_key(&done_key(&reference)));
     assert_eq!(
-        prepare(&app, &reference).await.unwrap_err().1,
+        prepare(&app, &reference).await.unwrap_err().code,
         "TRANSACTION_CLOSED"
     );
     assert_eq!(
-        finish(&app, &reference).await.unwrap_err().1,
+        finish(&app, &reference).await.unwrap_err().code,
         "TRANSACTION_CLOSED"
     );
     let recovered: Snapshot = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
     assert_eq!(
         closure::participant_open(&recovered, &reference)
             .unwrap_err()
-            .1,
+            .code,
         "TRANSACTION_CLOSED"
     );
     assert_eq!(read(&app).await, 7);
@@ -882,7 +905,7 @@ async fn closure_aborts_need_permanent_retry_admission_fence() {
     let (_directory, app) = application().await;
     let input = json!({"name":"tx","requestId":"closed-abort","args":{"calls":[{"group":"local","method":"fail"}]}});
     assert_eq!(
-        execute(app.clone(), input.clone()).await.unwrap_err().1,
+        execute(app.clone(), input.clone()).await.unwrap_err().code,
         "TRANSACTION_ABORTED"
     );
     let reference = stored_reference(&app, "closed-abort").await;
@@ -909,15 +932,15 @@ async fn closure_aborts_need_permanent_retry_admission_fence() {
         .await
         .unwrap();
     assert_eq!(
-        execute(app.clone(), input).await.unwrap_err().1,
+        execute(app.clone(), input).await.unwrap_err().code,
         "REQUEST_ID_SCOPE_REQUIRED"
     );
     assert_eq!(
-        prepare(&app, &reference).await.unwrap_err().1,
+        prepare(&app, &reference).await.unwrap_err().code,
         "TRANSACTION_CLOSED"
     );
     assert_eq!(
-        finish(&app, &reference).await.unwrap_err().1,
+        finish(&app, &reference).await.unwrap_err().code,
         "TRANSACTION_CLOSED"
     );
     app.consensus.shutdown().await.unwrap();
@@ -997,7 +1020,7 @@ async fn staged_and_transaction_coordinators_reserve_request_identity_in_both_di
         )
         .await
         .unwrap_err()
-        .1,
+        .code,
         "REQUEST_ID_REUSED"
     );
     super::super::staged_deployment::administer(
@@ -1017,7 +1040,7 @@ async fn staged_and_transaction_coordinators_reserve_request_identity_in_both_di
         super::super::staged_deployment::administer(&app, stage("coordinator-owned"))
             .await
             .unwrap_err()
-            .1,
+            .code,
         "REQUEST_ID_REUSED"
     );
     let current = decide(
@@ -1026,6 +1049,7 @@ async fn staged_and_transaction_coordinators_reserve_request_identity_in_both_di
         Phase::Abort,
         None,
         Some("test cancellation".into()),
+        None,
     )
     .await
     .unwrap();
@@ -1033,7 +1057,7 @@ async fn staged_and_transaction_coordinators_reserve_request_identity_in_both_di
         finish_coordinator(&app, &reference, &current)
             .await
             .unwrap_err()
-            .1,
+            .code,
         "TRANSACTION_ABORTED"
     );
     app.consensus.shutdown().await.unwrap();

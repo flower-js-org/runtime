@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { define, key, canonicalJson, publicKey, nacl, jwt } from "./index.ts";
 import { keyVersion } from "./crypto.ts";
-import { FlowerClient } from "./client.ts";
+import { FlowerAdmin } from "./client.ts";
 import { main } from "./cli.ts";
 
 test("key declarations are deterministic public metadata and require explicit manifest admission", () => {
@@ -11,7 +11,8 @@ test("key declarations are deterministic public metadata and require explicit ma
   assert.ok(Object.isFrozen(sessions)); assert.ok(Object.isFrozen(sessions.usages));
   assert.equal(define().keys, undefined);
   assert.deepEqual(define({ keys: [sessions] }).keys, [sessions]);
-  assert.throws(() => define({ keys: [sessions, sessions] }), /Duplicate key/);
+  assert.deepEqual(define({ keys: [sessions, key("sessions", { algorithm: "Ed25519", usages: ["sign", "verify"] })] }).keys, [sessions]);
+  assert.throws(() => define({ keys: [sessions, key("sessions", { algorithm: "Ed25519", usages: ["sign"] })] }), /Conflicting key/);
   assert.throws(() => key("", { algorithm: "Ed25519", usages: ["sign"] }), /nonempty/);
   assert.throws(() => key("a", { algorithm: "unknown", usages: ["sign"] } as any), /supported algorithm/);
   assert.throws(() => key("a", { algorithm: "Ed25519", usages: [] }), /nonempty usages/);
@@ -79,7 +80,7 @@ test("managed crypto sends descriptors and borrowed binary views without exporti
 test("operator key methods preserve identity, scope and sealed import boundaries", async () => {
   const requests: { url: string; headers: Record<string, string>; body: any }[] = [];
   const catalog = { domain: "domain", revision: 1, keys: {}, bindings: {} };
-  const client = new FlowerClient("http://seed:7101", { adminToken: "admin", fetch: async (url, init) => {
+  const client = new FlowerAdmin("http://seed:7101", { adminToken: "admin", fetch: async (url, init) => {
     requests.push({ url, headers: init.headers, body: JSON.parse(init.body) });
     return new Response(JSON.stringify({ revision: 2, value: catalog, duplicate: false }));
   } }).partition("tenant/🌻");
@@ -107,8 +108,8 @@ test("operator key methods preserve identity, scope and sealed import boundaries
 test("key CLI maps explicit commands and rejects misplaced flags", async (t) => {
   const calls: unknown[][] = [];
   t.mock.method(process.stdout, "write", (() => true) as any);
-  t.mock.method(FlowerClient.prototype, "keyGenerate", async function (this: FlowerClient, ...args: unknown[]) { calls.push([this.url, ...args]); return {} as any; });
-  t.mock.method(FlowerClient.prototype, "keyBind", async (...args: unknown[]) => { calls.push(args); return {} as any; });
+  t.mock.method(FlowerAdmin.prototype, "keyGenerate", async function (this: FlowerAdmin, ...args: unknown[]) { calls.push([this.url, ...args]); return {} as any; });
+  t.mock.method(FlowerAdmin.prototype, "keyBind", async (...args: unknown[]) => { calls.push(args); return {} as any; });
   await main(["key", "generate", "sessions", "--algorithm", "Ed25519", "--partition", "north", "--request-id", "one"]);
   assert.deepEqual(calls[0], ["http://127.0.0.1:7101/partitions/north", "sessions", "Ed25519", { requestId: "one" }]);
   await main(["key", "bind", "alias", "sessions", "--usages", "verify,sign", "--request-id", "two"]);

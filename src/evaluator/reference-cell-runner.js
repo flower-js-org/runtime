@@ -71,9 +71,16 @@
         return JSON.stringify({ok: true, value});
     } catch (e) {
         const message = String(e && e.message || e);
-        return JSON.stringify({ok: false, error: {
-            code: /out of memory|interrupted/i.test(message) ? 'EVALUATION_BUDGET' : String(e && e.code || 'COMPUTE_ERROR'),
+        const error = {
+            code: e && typeof e.code === 'string' ? e.code : /out of memory|interrupted/i.test(message) ? 'EVALUATION_BUDGET' : 'COMPUTE_ERROR',
             message
-        }});
+        };
+        try {
+            if (__kind !== 'derived' && e && typeof e === 'object' && e.details !== undefined) {
+                checkJson(e.details);
+                error.details = e.details;
+            }
+        } catch (_) {}
+        return JSON.stringify({ok: false, error});
     }
 })()

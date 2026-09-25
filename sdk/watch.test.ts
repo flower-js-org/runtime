@@ -161,8 +161,12 @@ test("JSON patches handle arrays, escaped pointers, root replacement and prototy
 
 test("polling remains explicit and intervalMs cannot silently enable polling in SSE", async () => {
   const stream = fixture(snapshot(1));
-  await assert.rejects(stream.client.watch("value", null, { intervalMs: 10 }).next(), /watchPoll/);
-  assert.equal(stream.url(), undefined);
+  // @ts-expect-error intervalMs belongs to watchPoll
+  await assert.rejects(stream.client.watch("value", null, { intervalMs: 10 }).next(), /intervalMs applies only to watchPoll/);
+  const sse = stream.client.watch("value", null);
+  assert.deepEqual((await sse.next()).value, { revision: 1, value: 1 });
+  assert.equal(stream.url(), "http://localhost:7101/v1/watch");
+  await sse.return(undefined);
   const controller = new AbortController();
   const client = new FlowerClient("http://localhost", { fetch: async () => new Response('{"revision":1,"value":2}', { headers: { "content-type": "application/json" } }) });
   const poll = client.watchPoll("value", null, { intervalMs: 10000, signal: controller.signal });

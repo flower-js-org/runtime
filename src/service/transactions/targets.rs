@@ -147,7 +147,13 @@ pub(super) async fn contact_partition_value(
             &input,
         )
         .await
-        .map_err(unavailable)
+        .map_err(|error| {
+            if engine_failure(&error).is_some() {
+                evaluation_error(error)
+            } else {
+                unavailable(error)
+            }
+        })
 }
 
 pub(super) async fn current(app: &App, target: &Target) -> Result<Target, ApiError> {

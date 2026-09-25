@@ -10,7 +10,7 @@ import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildBundle } from "../sdk/bundle.ts";
-import { FlowerClient } from "../sdk/client.ts";
+import { FlowerAdmin, FlowerClient } from "../sdk/client.ts";
 import { createHttp2Transport } from "../sdk/http2.ts";
 import { LocalCluster } from "./cluster.mjs";
 
@@ -126,7 +126,7 @@ async function audit(client, ledger, version, batchSize, requestOptions) {
 }
 
 function errorInfo(error) {
-  return { name: error.name, code: error.code ?? null, status: error.status ?? null, message: error.message };
+  return { name: error.name, code: error.code ?? null, status: error.status ?? null, message: error.message, failure: error.failure ?? null };
 }
 
 async function runCase(options, binary, bundles, size, mode, repetition) {
@@ -145,12 +145,13 @@ async function runCase(options, binary, bundles, size, mode, repetition) {
   const caseStart = performance.now();
   try {
     await cluster.start();
-    const client = new FlowerClient(cluster.url, { adminToken: cluster.adminToken, fetch: transport.fetch });
+    const client = new FlowerClient(cluster.url, { fetch: transport.fetch });
+    const admin = new FlowerAdmin(cluster.url, { adminToken: cluster.adminToken, fetch: transport.fetch });
     const setupStart = performance.now();
     if (options.warmTargetBundle) {
-      await client.deploy(bundles[1], { ...requestOptions(), requestId: "warm-target", preparation: "blocking" });
+      await admin.deploy(bundles[1], { ...requestOptions(), requestId: "warm-target", preparation: "blocking" });
     }
-    await client.deploy(bundles[0], { ...requestOptions(), requestId: "initial", preparation: "blocking" });
+    await admin.deploy(bundles[0], { ...requestOptions(), requestId: "initial", preparation: "blocking" });
     const entries = [...ledger];
     for (let start = 0; start < size; start += options.seedBatch) {
       await client.mutate("seed", entries.slice(start, start + options.seedBatch).map(([id, value]) => ({ key: id, value })), {
@@ -210,25 +211,25 @@ async function runCase(options, binary, bundles, size, mode, repetition) {
     measured = true;
     deploymentStart = performance.now();
     if (mode === "direct") {
-      await client.deploy(bundles[1], { ...requestOptions(), requestId: "upgrade", preparation: "blocking" });
+      await admin.deploy(bundles[1], { ...requestOptions(), requestId: "upgrade", preparation: "blocking" });
       result.timings.directDeployMs = performance.now() - deploymentStart;
       result.timings.activationMs = null;
     } else {
       const stageStart = performance.now();
-      let state = (await client.stageDeployment(bundles[1], { ...requestOptions(), requestId: "upgrade" })).value;
+      let state = (await admin.stageDeployment(bundles[1], { ...requestOptions(), requestId: "upgrade" })).value;
       result.timings.stageMs = performance.now() - stageStart;
       const preparationStart = performance.now();
       while (state.phase !== "ready") {
         caseSignal.throwIfAborted();
         if (!["backfill", "rebuilding"].includes(state.phase)) throw new Error(`Staged deployment entered ${state.phase}: ${state.error ?? ""}`);
         result.pages[state.phase]++;
-        state = (await client.controlStagedDeployment({ operation: "advance", requestId: "upgrade", maxBytes: options.maxBytes }, requestOptions())).value;
+        state = (await admin.controlStagedDeployment({ operation: "advance", requestId: "upgrade", maxBytes: options.maxBytes }, requestOptions())).value;
         result.pages.advance++;
       }
       result.timings.prepareMs = performance.now() - preparationStart;
       result.ready = state;
       const activationStart = performance.now();
-      await client.controlStagedDeployment({ operation: "activate", requestId: "upgrade" }, requestOptions());
+      await admin.controlStagedDeployment({ operation: "activate", requestId: "upgrade" }, requestOptions());
       result.timings.activationMs = performance.now() - activationStart;
     }
     result.timings.deploymentMs = performance.now() - deploymentStart;
@@ -244,7 +245,7 @@ async function runCase(options, binary, bundles, size, mode, repetition) {
       const cleanupStart = performance.now();
       let state;
       do {
-        state = (await client.controlStagedDeployment({ operation: "collect", requestId: "upgrade", maxBytes: options.maxBytes }, requestOptions())).value;
+        state = (await admin.controlStagedDeployment({ operation: "collect", requestId: "upgrade", maxBytes: options.maxBytes }, requestOptions())).value;
         result.pages.collect++;
       } while (state.phase !== "collected");
       result.timings.cleanupMs = performance.now() - cleanupStart;

@@ -1,7 +1,8 @@
 import { FlowerClient } from "../../sdk/index.ts";
+import type pizza from "../goblin-pizza.ts";
 import type { PizzaDashboard, PizzaOrder } from "../goblin-pizza.ts";
 
-const client = new FlowerClient(window.location.origin);
+const client = new FlowerClient<typeof pizza>(window.location.origin);
 const lifetime = new AbortController();
 const number = new Intl.NumberFormat();
 const colors = ["#eab983", "#bdcca1", "#dec68d", "#d5b9a3"];
@@ -155,7 +156,7 @@ async function connect(): Promise<void> {
       // This is the only application read. One query supplies the entire page;
       // the SDK reconstructs its value from snapshot/patch SSE events. Its
       // replica-local policy permits older state, also across reconnections.
-      for await (const update of client.watch<{ tenant: string }, PizzaDashboard>("pizza.dashboard", { tenant },
+      for await (const update of client.watch("pizza.dashboard", { tenant },
         { signal: AbortSignal.any([lifetime.signal, watchController.signal]) })) {
         if (tenant !== selectedTenant) continue;
         value = update.value;

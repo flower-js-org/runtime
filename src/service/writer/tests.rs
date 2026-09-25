@@ -157,7 +157,7 @@ fn borrowed_commit_verification_skips_errors_replays_and_rejects_divergent_acks(
     let second = json!([true, 7]);
     let prepared = [
         response(9, first.clone(), false),
-        Err(ApiError(
+        Err(ApiError::new(
             StatusCode::CONFLICT,
             "REVISION_CONFLICT",
             "expected failure".into(),
@@ -350,7 +350,7 @@ fn staging_failure_is_atomic_for_retained_and_initially_unretained_state() {
         // Initializing retention within the overlay must be charged too.
         command.puts.insert(protocol::KEY.into(), json!(policy));
         assert_eq!(
-            stage(&mut state, &command).unwrap_err().1,
+            stage(&mut state, &command).unwrap_err().code,
             "RECEIPT_BUDGET_EXCEEDED"
         );
         assert_eq!(state, before);
@@ -360,7 +360,7 @@ fn staging_failure_is_atomic_for_retained_and_initially_unretained_state() {
             .puts
             .insert(protocol::KEY.into(), json!({"invalid": true}));
         assert_eq!(
-            stage(&mut state, &command).unwrap_err().1,
+            stage(&mut state, &command).unwrap_err().code,
             "RETENTION_CONFLICT"
         );
         assert_eq!(state, before);
@@ -406,14 +406,14 @@ fn staging_accounting_observes_overlay_sessions_and_reservations() {
     session.acknowledged_through = 2;
     command.puts.insert(session_key.clone(), json!(session));
     assert_eq!(
-        stage(&mut state, &command).unwrap_err().1,
+        stage(&mut state, &command).unwrap_err().code,
         "ALREADY_ACKNOWLEDGED"
     );
     assert_eq!(state, before);
     command.puts.remove(&session_key);
     command.deletes.push(session_key);
     assert_eq!(
-        stage(&mut state, &command).unwrap_err().1,
+        stage(&mut state, &command).unwrap_err().code,
         "RETRY_SESSION_UNKNOWN"
     );
     assert_eq!(state, before);
@@ -423,7 +423,7 @@ fn staging_accounting_observes_overlay_sessions_and_reservations() {
         .puts
         .insert(protocol::RESERVED_BYTES.into(), json!(u64::MAX));
     assert_eq!(
-        stage(&mut state, &command).unwrap_err().1,
+        stage(&mut state, &command).unwrap_err().code,
         "RECEIPT_BUDGET_EXCEEDED"
     );
     assert_eq!(state, before);
@@ -483,7 +483,7 @@ async fn online_deployment_prepares_off_lane_conflicts_atomically_and_blocking_r
         .await
         .err()
         .unwrap();
-    assert_eq!(conflict.1, "DEPLOYMENT_CONFLICT");
+    assert_eq!(conflict.code, "DEPLOYMENT_CONFLICT");
     assert_eq!(fixture.app.consensus.read().await.unwrap(), changed);
     assert!(
         !changed
@@ -512,7 +512,7 @@ async fn online_deployment_prepares_off_lane_conflicts_atomically_and_blocking_r
         http_method(&after, "counter.add", Some(MethodKind::Mutation))
             .err()
             .unwrap()
-            .1,
+            .code,
         "METHOD_NOT_FOUND"
     );
     let denied = submit(
@@ -523,7 +523,7 @@ async fn online_deployment_prepares_off_lane_conflicts_atomically_and_blocking_r
     .await
     .err()
     .unwrap();
-    assert_eq!(denied.1, "FORBIDDEN");
+    assert_eq!(denied.code, "FORBIDDEN");
     invocation["preparation"] = json!("online");
     let duplicate = submit(&fixture.app, invocation, true).await.unwrap();
     assert_eq!(duplicate["duplicate"], true);
@@ -559,7 +559,7 @@ async fn online_deployment_cutover_publishes_once_from_unchanged_base() {
         http_method(&state, "counter.add", Some(MethodKind::Mutation))
             .err()
             .unwrap()
-            .1,
+            .code,
         "METHOD_NOT_FOUND"
     );
     fixture.close().await;
@@ -645,9 +645,9 @@ async fn ordered_queue_stages_sources_derived_values_receipts_and_cas_without_er
         results[1].as_ref().unwrap()["value"],
         results[0].as_ref().unwrap()["value"]
     );
-    assert_eq!(results[2].as_ref().unwrap_err().1, "REQUEST_ID_REUSED");
-    assert_eq!(results[3].as_ref().unwrap_err().1, "EVALUATION_FAILED");
-    assert_eq!(results[4].as_ref().unwrap_err().1, "REVISION_CONFLICT");
+    assert_eq!(results[2].as_ref().unwrap_err().code, "REQUEST_ID_REUSED");
+    assert_eq!(results[3].as_ref().unwrap_err().code, "EVALUATION_FAILED");
+    assert_eq!(results[4].as_ref().unwrap_err().code, "REVISION_CONFLICT");
     assert_eq!(
         results[5].as_ref().unwrap(),
         &json!({
@@ -696,7 +696,7 @@ async fn queued_deployments_change_alias_visibility_in_order_even_for_receipt_re
     let results = responses(pending).await;
     assert_eq!(results[0].as_ref().unwrap()["revision"], 2);
     assert_eq!(results[1].as_ref().unwrap()["revision"], 3);
-    assert_eq!(results[2].as_ref().unwrap_err().1, "METHOD_NOT_FOUND");
+    assert_eq!(results[2].as_ref().unwrap_err().code, "METHOD_NOT_FOUND");
     assert_eq!(results[3].as_ref().unwrap()["revision"], 4);
     assert_eq!(results[4].as_ref().unwrap()["revision"], 2);
     assert_eq!(results[4].as_ref().unwrap()["duplicate"], true);
@@ -724,17 +724,17 @@ async fn full_or_closed_queue_returns_unavailable_without_retaining_waiting_requ
     .await
     .unwrap()
     .unwrap_err();
-    assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(error.1, "UNAVAILABLE");
-    assert!(error.2.contains("queue full"));
+    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(error.code, "UNAVAILABLE");
+    assert!(error.message.contains("queue full"));
     assert_eq!(fixture.app.writer_queue.capacity(), 0);
     assert_eq!(fixture.app.consensus.local_snapshot().await.revision, 1);
     fixture.receiver.take();
     let error = submit(&fixture.app, increment("d", 1, None), false)
         .await
         .unwrap_err();
-    assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(error.2.contains("queue closed"));
+    assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(error.message.contains("queue closed"));
     for receiver in held {
         assert!(receiver.await.is_err());
     }
@@ -951,7 +951,7 @@ async fn uncertain_predecessor(decision: Decision, applied: bool) {
         "successor must never be submitted"
     );
     for reply in replies.iter_mut().take(first_count + second_count) {
-        assert_eq!(reply.await.unwrap().unwrap_err().1, "UNAVAILABLE");
+        assert_eq!(reply.await.unwrap().unwrap_err().code, "UNAVAILABLE");
     }
     let durable = fixture.app.consensus.read_for_writer().await.unwrap();
     assert_eq!(
@@ -1064,9 +1064,9 @@ async fn empty_groups_recheck_durable_revision_before_replaying_or_exposing_vali
             .unwrap()
             .unwrap();
         let error = responses(replies).await.remove(0).unwrap_err();
-        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(error.1, "UNAVAILABLE");
-        assert!(error.2.contains("snapshot changed"));
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "UNAVAILABLE");
+        assert!(error.message.contains("snapshot changed"));
         assert_eq!(
             fixture.app.consensus.read_for_writer().await.unwrap(),
             after_revoke
@@ -1084,7 +1084,7 @@ async fn empty_groups_recheck_durable_revision_before_replaying_or_exposing_vali
             .await
             .err()
             .unwrap();
-        assert_eq!(error.1, "METHOD_NOT_FOUND");
+        assert_eq!(error.code, "METHOD_NOT_FOUND");
         drop(receiver);
         fixture.close().await;
     }
@@ -1133,7 +1133,7 @@ async fn failed_predecessor_hides_successor_replays_and_all_speculative_validati
             assert!(replay.command.is_none());
         } else {
             assert_eq!(
-                outcome.err().unwrap().1,
+                outcome.err().unwrap().code,
                 [
                     "REQUEST_ID_REUSED",
                     "REVISION_CONFLICT",
@@ -1196,9 +1196,13 @@ async fn failed_predecessor_hides_successor_replays_and_all_speculative_validati
         .unwrap();
     for result in responses(replies).await {
         let error = result.unwrap_err();
-        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(error.1, "UNAVAILABLE");
-        assert!(error.2.contains("injected unknown commit before apply"));
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "UNAVAILABLE");
+        assert!(
+            error
+                .message
+                .contains("injected unknown commit before apply")
+        );
     }
     assert!(
         events_rx.try_recv().is_err(),
@@ -1844,7 +1848,10 @@ async fn serial_worker_matches_dispatch_for_fifo_cas_receipts_errors_and_isolati
                 );
             }
             (Err(actual), Err(expected)) => {
-                assert_eq!((actual.0, actual.1), (expected.0, expected.1))
+                assert_eq!(
+                    (actual.status, actual.code),
+                    (expected.status, expected.code)
+                )
             }
             _ => panic!("worker and individual dispatch disagree"),
         }
@@ -1860,7 +1867,7 @@ async fn serial_worker_matches_dispatch_for_fifo_cas_receipts_errors_and_isolati
         true
     );
     assert_eq!(
-        group.results[2].as_ref().err().unwrap().1,
+        group.results[2].as_ref().err().unwrap().code,
         "REVISION_CONFLICT"
     );
     // The shared queue must submit the same compact overlay and preserve every
@@ -2545,7 +2552,7 @@ async fn salvaged_wave_rechecks_authorization_cas_and_exact_replays() {
             "cas" => {
                 assert_eq!(group.speculative_reused, 3);
                 assert_eq!(
-                    group.results[1].as_ref().err().unwrap().1,
+                    group.results[1].as_ref().err().unwrap().code,
                     "REVISION_CONFLICT"
                 );
                 assert_eq!(group.commands.len(), 3);

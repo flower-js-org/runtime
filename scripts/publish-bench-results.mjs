@@ -8,6 +8,7 @@ import { summarizeGroups } from "../bench/multi-group.mjs";
 import { renderGroupsReport } from "../bench/multi-group-report.mjs";
 import { renderReport } from "../bench/report.mjs";
 import { siteFooter, siteHeader } from "./docs/layout.mjs";
+import { LATENCY_COLORS, latencyHistogram, latencyTable } from "../bench/histogram.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const markerStart = "<!-- latest-benchmark:start -->";
@@ -17,8 +18,6 @@ const escape = (value) => String(value).replace(/[&<>"']/g, (character) => ({
 }[character]));
 const finite = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
 const number = (value, digits = 0) => value.toLocaleString("en-US", { maximumFractionDigits: digits });
-const measuredP99 = (histogram) => Number.isSafeInteger(histogram?.samples) && histogram.samples > 0 && finite(histogram.p99) ? histogram.p99 : null;
-const latency = (value) => value === null ? "—" : `${number(value, 1)} <small>ms</small>`;
 const json = (value) => `${JSON.stringify(value)}\n`;
 
 export function childPath(source, path) {
@@ -60,8 +59,6 @@ export function summarizePublishedRun(report) {
   const recoveries = crashes.map((event) => event.quorumRecoveryMs).filter(finite);
   return {
     goodputRps: report.goodputRps,
-    readP99Ms: measuredP99(report.latencyMs.read),
-    writeP99Ms: measuredP99(report.latencyMs.mutation),
     groups: report.options.groups,
     replicas: report.options.nodes,
     durationSeconds: report.durationMs / 1000,
@@ -91,12 +88,21 @@ export function renderPublishedSummary(report, { root = "", workload = true } = 
     : `${run.crashes} injected leader failures; quorum recovery ${number(run.recoveryMinMs)}–${number(run.recoveryMaxMs)} ms.`;
   return `<section class="benchmark-latest" id="latest-benchmark" aria-labelledby="latest-benchmark-title">
 <div class="benchmark-heading"><div><p class="eyebrow">LATEST MEASURED RUN · <time datetime="${escape(run.measuredAt)}">${escape(run.measuredAt.slice(0, 10))}</time></p><h2 id="latest-benchmark-title">A busy day in the garden.</h2></div><img src="${root}assets/flower.svg" width="36" height="36" alt="" aria-hidden="true"></div>
-<dl class="benchmark-stats"><div><dt>Global customer calls&nbsp;/&nbsp;s</dt><dd>${number(run.goodputRps)}</dd></div><div><dt>Read p99</dt><dd>${latency(run.readP99Ms)}</dd></div><div><dt>Write p99</dt><dd>${latency(run.writeP99Ms)}</dd></div><div><dt>Independent Raft groups</dt><dd>${run.groups} <small>× ${run.replicas} replicas</small></dd></div></dl>
+<dl class="benchmark-stats"><div><dt>Global customer calls&nbsp;/&nbsp;s</dt><dd>${number(run.goodputRps)}</dd></div><div><dt>Independent Raft groups</dt><dd>${run.groups} <small>× ${run.replicas} replicas</small></dd></div></dl>
+${latencyFigure(report)}
 <p class="benchmark-policy"><strong>${local ? "Replica-local reads: lag is allowed." : "Fresh reads: quorum-confirmed per group."}</strong> ${number(run.readPercent, 1)}% reads / ${number(run.mutationPercent, 1)}% mutations · ${run.transport} · ${number(run.durationSeconds, 1)} measured seconds.</p>
 <p><strong>${run.passed ? "Run passed." : "Run failed."} ${run.auditedGroups}/${run.groups} group audits passed.</strong> ${escape(recovery)}</p>
 <p class="benchmark-context">${escape(run.cpu)}; all replicas and load generators share one machine. Completed customer calls use the union measurement window; retries, worker traffic, and explicit replays do not inflate throughput. ${local ? "Reads may be stale; mutations and audits retain fresh checks." : "Each group has its own fresh-read boundary."}</p>
 <p class="benchmark-links"><a href="${root}bench/latest.html">Charts &amp; every group →</a><a href="${root}bench/latest.json">Raw measurements ↓</a>${workload ? `<a href="${root}operate/benchmarks.html">Workload &amp; reproduction →</a>` : ""}</p>
 </section>`;
+}
+
+// Customer latency as distributions, each on its own log axis from its p0.1 to its p99.9.
+export function latencyFigure(report) {
+  const populations = [["Reads", report.latencyMs.read, LATENCY_COLORS.read], ["Writes", report.latencyMs.mutation, LATENCY_COLORS.mutation]];
+  const charts = populations.map(([name, histogram, color]) => `<div class="latency-chart"><p class="latency-title"><i style="background:${color}" aria-hidden="true"></i>${name}<span>${number(histogram?.samples ?? 0)} calls</span></p>${latencyHistogram(histogram, { color, label: `Customer ${name.toLowerCase()}` })}</div>`).join("");
+  const tables = populations.map(([name, histogram]) => latencyTable(histogram, `Customer ${name.toLowerCase()}, all groups`)).join("");
+  return `<figure class="latency-figure"><div class="latency-charts">${charts}</div><figcaption>Customer call latency, merged across groups. Each log time axis spans p0.1 to p99.9 of its calls; bar height is a bin's share of calls, and lines mark p50 and p99. <details><summary>Show as a table</summary>${tables}</details></figcaption></figure>`;
 }
 
 export function replaceSummary(source, summary) {

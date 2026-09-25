@@ -82,7 +82,7 @@ fn same_logical(left: &Target, right: &Target) -> bool {
     }
 }
 fn closed() -> ApiError {
-    ApiError(
+    ApiError::new(
         StatusCode::CONFLICT,
         "TRANSACTION_CLOSED",
         "transaction history prefix is permanently closed".into(),
@@ -570,7 +570,13 @@ async fn advance(app: &App, budget: usize) -> Result<Option<String>, ApiError> {
         used += amount;
         let ack = match Box::pin(contact_closure(app, &target, "closure-ack", &proof)).await {
             Ok(ack) => ack,
-            Err(error) => return Ok(Some(format!("participant {}: {}", target.label(), error.2))),
+            Err(error) => {
+                return Ok(Some(format!(
+                    "participant {}: {}",
+                    target.label(),
+                    error.message
+                )));
+            }
         };
         if ack["history"] != proof.history
             || ack["through"]
@@ -856,7 +862,7 @@ async fn authenticated(
     authenticate_headers(app, request.headers())?;
     let Json(request) = Json::<ClosureRequest>::from_request(request, app)
         .await
-        .map_err(|error| ApiError(error.status(), "INPUT_INVALID", error.body_text()))?;
+        .map_err(|error| ApiError::new(error.status(), "INPUT_INVALID", error.body_text()))?;
     if request.group != app.cross_group.name()? {
         return Err(conflict("closure RPC reached the wrong group"));
     }

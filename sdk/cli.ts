@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { basename, extname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { FlowerClient, FlowerError } from "./client.ts";
+import { FlowerAdmin, FlowerClient, FlowerError } from "./client.ts";
 import type { WatchOptions } from "./client.ts";
 import { loadBundle, writeBundle, type BuildOptions } from "./bundle.ts";
 import { writeWatchOutput } from "./cli-output.ts";
@@ -38,13 +38,14 @@ Options:
   --url URL                  Server URL (FLOWER_URL or http://127.0.0.1:7101).
   --admin-token TOKEN        Shared admin token (or FLOWER_ADMIN_TOKEN).
   --request-id ID            Idempotency key for call/mutate/deploy/key changes; preserve for retries.
+  --credentials JSON         Credentials for call/mutate/query/watch (or FLOWER_CREDENTIALS); @FILE reads a file.
   --partition NAME           Address a named database for methods, deploy or keys.
   --algorithm NAME           key generate/import: Ed25519/P256/RSA/HS256/A256GCM/XSalsa20Poly1305/X25519.
   --usages LIST              key bind: comma-separated sign,verify,encrypt,decrypt,derive,publicKey.
   --bits N                   key generate/rotate: RSA modulus size.
   --version N                key revoke/retire/destroy/rewrap: one version; omit for all.
   --expected-revision N      Require this application revision for call/mutate.
-  --initialization MODE      build/deploy .ts: per-invocation (default) or static.
+  --initialization MODE      build/deploy .ts: static (default) or per-invocation.
   --preparation MODE         deploy: online (default), or blocking for a busy database.
   --max-event-bytes N         watch only: local SSE event allowance (default 17825792).
   --max-value-bytes N         watch only: reconstructed value allowance (default 16777216).
@@ -60,7 +61,7 @@ Examples:
   flower key generate session-key --algorithm Ed25519 --request-id create-session-key
   flower key bind sessions session-key --usages sign,verify --request-id bind-sessions
 
-Modules export define({ definitions: [...], http: { alias: method } }).
+Modules export define({ uses: [...], http: { alias: method } }).
 Only aliases in the HTTP table are callable. Other definitions remain private.
 watch receives a snapshot and JSON patches; it may coalesce intermediate revisions.
 Reconnect to a reachable replica serving the query policy; each stream starts fresh.
@@ -75,7 +76,7 @@ function parseArguments(args: string[]) {
   const positional: string[] = [];
   const options = new Map<string, string>();
   let wantsHelp = false;
-  const names = new Set(["url", "members", "request-id", "admin-token", "expected-revision", "initialization", "preparation", "max-event-bytes", "max-value-bytes", "max-patch-operations", "partition", "algorithm", "usages", "bits", "version"]);
+  const names = new Set(["url", "members", "request-id", "credentials", "admin-token", "expected-revision", "initialization", "preparation", "max-event-bytes", "max-value-bytes", "max-patch-operations", "partition", "algorithm", "usages", "bits", "version"]);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--help" || arg === "-h") { wantsHelp = true; continue; }
@@ -149,10 +150,15 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     }
     watchOptions[option] = value;
   }
-  let client = new FlowerClient(parsed.options.get("url") ?? process.env.FLOWER_URL, {
-    adminToken: parsed.options.get("admin-token") ?? process.env.FLOWER_ADMIN_TOKEN,
-  });
-  if (parsed.options.has("partition")) client = client.partition(parsed.options.get("partition")!);
+  const url = parsed.options.get("url") ?? process.env.FLOWER_URL;
+  const rawCredentials = parsed.options.get("credentials") ?? process.env.FLOWER_CREDENTIALS;
+  if (parsed.options.has("credentials") && !["call", "mutate", "query", "watch"].includes(command)) throw new TypeError("--credentials applies to call, mutate, query and watch");
+  let client = new FlowerClient(url, rawCredentials === undefined ? {} : { credentials: await methodArguments(rawCredentials) });
+  let admin = new FlowerAdmin(url, { adminToken: parsed.options.get("admin-token") ?? process.env.FLOWER_ADMIN_TOKEN });
+  if (parsed.options.has("partition")) {
+    client = client.partition(parsed.options.get("partition")!);
+    admin = admin.partition(parsed.options.get("partition")!);
+  }
   const mutationOptions: { requestId?: string; expectedRevision?: number } = {};
   if (parsed.options.has("request-id")) mutationOptions.requestId = parsed.options.get("request-id");
   if (parsed.options.has("expected-revision")) {
@@ -162,7 +168,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   }
   switch (command) {
     case "key":
-      print(await runKeyCommand(client, operands, parsed.options));
+      print(await runKeyCommand(admin, operands, parsed.options));
       break;
     case "build": {
       requireArgs(operands, 1, 2);
@@ -175,14 +181,14 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       requireArgs(operands, 1);
       if (mutationOptions.expectedRevision !== undefined) throw new TypeError("--expected-revision applies only to call/mutate");
       const bundle = await loadBundle(operands[0], buildOptions);
-      print({ ...await client.deploy(bundle, {...mutationOptions, preparation}), hash: bundle.hash });
+      print({ ...await admin.deploy(bundle, { ...mutationOptions, preparation }), hash: bundle.hash });
       break;
     }
     case "init": {
       requireArgs(operands, 0);
       const members = parsed.options.get("members");
       if (!members) throw new TypeError("init requires --members ID=host:port,...");
-      await client.initialize(membersFrom(members));
+      await admin.initialize(membersFrom(members));
       print({ initialized: true });
       break;
     }
@@ -230,8 +236,13 @@ function isEntryPoint(): boolean {
 // npm's bin is a symlink on Unix; compare its real path to this module.
 if (isEntryPoint()) {
   main().catch((error: unknown) => {
-    const label = error instanceof FlowerError ? `${error.code}${error.status ? ` (${error.status})` : ""}: ` : "";
-    process.stderr.write(`flower: ${label}${error instanceof Error ? error.message : String(error)}\n`);
+    if (error instanceof FlowerError && error.failure) {
+      const details = error.failure.details === undefined ? "" : ` ${JSON.stringify(error.failure.details)}`;
+      process.stderr.write(`flower: ${error.failure.code}: ${error.failure.message}${details}\n`);
+    } else {
+      const label = error instanceof FlowerError ? `${error.code}${error.status ? ` (${error.status})` : ""}: ` : "";
+      process.stderr.write(`flower: ${label}${error instanceof Error ? error.message : String(error)}\n`);
+    }
     process.exitCode = 1;
   });
 }

@@ -76,7 +76,7 @@ struct Waiting {
 }
 
 fn overloaded(message: &str) -> ApiError {
-    ApiError(
+    ApiError::new(
         StatusCode::SERVICE_UNAVAILABLE,
         "ADMISSION_OVERLOADED",
         message.into(),

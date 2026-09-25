@@ -5,7 +5,7 @@ mod json_order;
 #[cfg(test)]
 mod oracle;
 mod profile;
-mod rust_engine;
+pub(crate) mod rust_engine;
 pub(crate) mod staging;
 pub(crate) use rust_engine::ReactiveIndex;
 pub use rust_engine::{DependencyCertificate, MutationCertificate};
@@ -566,10 +566,7 @@ impl rust_engine::Executor for CellExecutor {
     fn check_budget(&self) -> rust_engine::EngineResult<()> {
         self.limits
             .check()
-            .map_err(|error| rust_engine::EngineError {
-                code: "EVALUATION_BUDGET".into(),
-                message: error.to_string(),
-            })
+            .map_err(|error| rust_engine::EngineError::new("EVALUATION_BUDGET", error.to_string()))
     }
 
     fn execute(
@@ -610,23 +607,22 @@ impl rust_engine::Executor for CellExecutor {
                     .saturating_sub(read_nanos),
             );
         }
-        let mut envelope = result.map_err(|error| rust_engine::EngineError {
-            code: "EVALUATION_BUDGET".into(),
-            message: error.to_string(),
+        let mut envelope = result.map_err(|error| {
+            rust_engine::EngineError::new("EVALUATION_BUDGET", error.to_string())
         })?;
         if envelope["ok"] == true {
             Ok(envelope["value"].take())
         } else {
-            Err(rust_engine::EngineError {
-                code: envelope["error"]["code"]
+            let mut error = rust_engine::EngineError::new(
+                envelope["error"]["code"]
                     .as_str()
-                    .unwrap_or("COMPUTE_ERROR")
-                    .into(),
-                message: envelope["error"]["message"]
+                    .unwrap_or("COMPUTE_ERROR"),
+                envelope["error"]["message"]
                     .as_str()
-                    .unwrap_or("application callback failed")
-                    .into(),
-            })
+                    .unwrap_or("application callback failed"),
+            );
+            error.details = envelope["error"].get_mut("details").map(Value::take);
+            Err(error)
         }
     }
 }
@@ -837,10 +833,17 @@ const CELL_RUNNER: &str = r#"
             return JSON.stringify({ok: true, value});
         } catch (e) {
             const message = String(e && e.message || e);
-            return JSON.stringify({ok: false, error: {
-                code: /out of memory|interrupted/i.test(message) ? 'EVALUATION_BUDGET' : String(e && e.code || 'COMPUTE_ERROR'),
+            const error = {
+                code: e && typeof e.code === 'string' ? e.code : /out of memory|interrupted/i.test(message) ? 'EVALUATION_BUDGET' : 'COMPUTE_ERROR',
                 message
-            }});
+            };
+            try {
+                if (__kind !== 'derived' && e && typeof e === 'object' && e.details !== undefined) {
+                    checkJson(e.details);
+                    error.details = e.details;
+                }
+            } catch (_) {}
+            return JSON.stringify({ok: false, error});
         }
     };
 })(__flowerCheckJson, __flowerReadParsed)
@@ -1483,6 +1486,31 @@ mod tests {
         assert_eq!(data["clock"], 1_100);
         let backwards = invoke_at(data, json!({"name":"read"}), "query", 900).unwrap();
         assert_eq!(backwards.value, json!([1_100, 1_100]));
+    }
+
+    #[test]
+    fn method_failures_keep_explicit_codes_and_json_details() {
+        let javascript = fixture_bundle(
+            r#"var __flowerBundle = {default: {
+            checkout: {kind:'mutationMethod', compute: () => {
+                throw Object.assign(new Error('The user interrupted checkout'), {code: 'CHECKOUT_ABORTED', details: {step: 2}});
+            }},
+            broken: {kind:'mutationMethod', compute: () => { throw new Error('interrupted by nothing in particular'); }},
+            plain: {kind:'mutationMethod', compute: () => { throw Object.assign(new Error('no'), {details: () => 1}); }}
+        }};"#,
+        );
+        let deployment = json!({"requestId":"deploy","bundle":{"hash":hash(javascript.as_bytes()),"javascript":javascript}});
+        let data = evaluate_at(BTreeMap::new(), deployment, 1_000).unwrap().puts;
+        let failure = |name: &str| {
+            let error = invoke_at(data.clone(), json!({"name":name,"requestId":name}), "mutation", 1_100).unwrap_err();
+            error.downcast_ref::<rust_engine::EngineError>().expect("engine failure").failure()
+        };
+        assert_eq!(
+            failure("checkout"),
+            json!({"code":"CHECKOUT_ABORTED","message":"The user interrupted checkout","details":{"step":2}})
+        );
+        assert_eq!(failure("broken")["code"], "EVALUATION_BUDGET");
+        assert_eq!(failure("plain"), json!({"code":"COMPUTE_ERROR","message":"no"}));
     }
 
     #[test]

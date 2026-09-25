@@ -456,7 +456,7 @@ pub(super) async fn handle(runtime: &Runtime, request: ControlRequest) -> anyhow
                         0,
                     )
                     .await
-                    .map_err(|error| anyhow::anyhow!("{}: {}", error.1, error.2))?;
+                    .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
                 let pool = runtime.admission.clone();
                 let exported = runtime
                     .consensus
@@ -466,7 +466,9 @@ pub(super) async fn handle(runtime: &Runtime, request: ControlRequest) -> anyhow
                         image,
                         move |bytes| {
                             pool.retain(crate::service::admission::Class::Control, bytes)
-                                .map_err(|error| anyhow::anyhow!("{}: {}", error.1, error.2))
+                                .map_err(|error| {
+                                    anyhow::anyhow!("{}: {}", error.code, error.message)
+                                })
                         },
                         admitted,
                     )

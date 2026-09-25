@@ -5,16 +5,19 @@ import { tmpdir } from "node:os";
 import { join,resolve } from "node:path";
 import { LocalCluster } from "../bench/cluster.mjs";
 import { buildBundle } from "../sdk/bundle.ts";
-import { FlowerClient } from "../sdk/client.ts";
+import { FlowerAdmin, FlowerClient } from "../sdk/client.ts";
 
 const directory=await mkdtemp(join(tmpdir(),"flower-retention-e2e-"));
 const cluster=new LocalCluster({nodes:3,binary:resolve(process.env.E2E_FLOWER_BIN??"target/debug/flower")});
 try {
   const entry=join(directory,"app.ts");
   await writeFile(entry,`
-import {collection,define,mutation,query} from ${JSON.stringify(resolve("sdk/index.ts"))};
-const records=collection("records");
-export default define({authorize:query("authorize",(_ctx,r)=>r.credentials?.subject ? {subject:r.credentials.subject} : null),http:{
+import {collection,define,fail,mutation,query} from ${JSON.stringify(resolve("sdk/index.ts"))};
+const records=collection<number>("records");
+export default define({auth:{authenticate:(_ctx,credentials:any)=>{
+  if(credentials?.subject==="suspended")fail("ACCOUNT_SUSPENDED","This account is suspended",{subject:"suspended",until:42});
+  return credentials?.subject ? {subject:credentials.subject} : null;
+}},http:{
   add:mutation("add",ctx=>{const n=(ctx.get(records,"n")??0)+1;ctx.set(records,"n",n);return n;}),
   read:query("read",ctx=>ctx.get(records,"n")),
   history:query("history",ctx=>ctx.history()),
@@ -22,13 +25,20 @@ export default define({authorize:query("authorize",(_ctx,r)=>r.credentials?.subj
 `);
   await cluster.start();
   const follower=cluster.members.find(member=>member.id!==cluster.leader.id).url;
-  const admin=new FlowerClient(follower,{adminToken:cluster.adminToken});
+  const admin=new FlowerAdmin(follower,{adminToken:cluster.adminToken});
   await admin.deploy(await buildBundle(entry));
   const initial=await admin.retentionStatus();
   const database=randomBytes(16).toString("hex"),incarnation=randomBytes(16).toString("hex");
   await admin.controlRetention(initial.revision,{operation:"initialize",database,incarnation,max_receipt_bytes:1024*1024});
   const client=new FlowerClient(follower,{boundedRetries:true,credentials:{subject:"alice"}});
   assert.deepEqual((await client.query("history")).value,{database,incarnation});
+  // The authorization hook's own failures arrive as 403 FORBIDDEN with their structured failure.
+  const hookFailure=(failure)=>(error)=>error.status===403&&error.code==="FORBIDDEN"&&JSON.stringify(error.failure)===JSON.stringify(failure);
+  await assert.rejects(new FlowerClient(follower,{credentials:{subject:"suspended"}}).query("read"),
+    hookFailure({code:"ACCOUNT_SUSPENDED",message:"This account is suspended",details:{subject:"suspended",until:42}}));
+  await assert.rejects(new FlowerClient(follower,{credentials:{subject:"suspended"}}).mutate("add",null,{requestId:"suspended-add"}),
+    hookFailure({code:"ACCOUNT_SUSPENDED",message:"This account is suspended",details:{subject:"suspended",until:42}}));
+  await assert.rejects(new FlowerClient(follower).query("read"),hookFailure({code:"UNAUTHENTICATED",message:"Authentication required"}));
   const id=await client.newRequestId("business-one");
   const receipt=await client.mutate("add",null,{requestId:id});
   assert.equal(receipt.value,1);
@@ -86,7 +96,7 @@ export default define({authorize:query("authorize",(_ctx,r)=>r.credentials?.subj
   await admin.controlRetention(latest.revision,{operation:"reincarnate",incarnation,new_incarnation:restoredIncarnation,fence_attestation:"test cluster is exclusively owned; simulated fenced restore"});
   assert.deepEqual((await afterFailover.query("history")).value,{database,incarnation:restoredIncarnation});
   await assert.rejects(afterFailover.mutate("add",null,{requestId:id}),{code:"HISTORY_MISMATCH"});
-  console.log("retention E2E: scoped retries, retirement/GC, authenticated sessions, strict ACK/abandon/close, and leader-failure fences passed");
+  console.log("retention E2E: structured authorization failures, scoped retries, retirement/GC, authenticated sessions, strict ACK/abandon/close, and leader-failure fences passed");
 } finally {
   await cluster.close();
   await rm(directory,{recursive:true,force:true});

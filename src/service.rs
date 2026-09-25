@@ -159,20 +159,46 @@ fn make_app(
 }
 
 #[derive(Clone, Debug)]
-struct ApiError(StatusCode, &'static str, String);
+struct ApiError {
+    status: StatusCode,
+    code: &'static str,
+    message: String,
+    /// The method's own failure, delivered to callers separately from the transport code.
+    failure: Option<Arc<Value>>,
+}
+
+impl ApiError {
+    fn new(status: StatusCode, code: &'static str, message: String) -> Self {
+        Self {
+            status,
+            code,
+            message,
+            failure: None,
+        }
+    }
+
+    fn with_failure(mut self, failure: Value) -> Self {
+        self.failure = Some(Arc::new(failure));
+        self
+    }
+
+    fn body(&self) -> Value {
+        let mut error = json!({"code": self.code, "message": self.message});
+        if let Some(failure) = &self.failure {
+            error["failure"] = (**failure).clone();
+        }
+        json!({ "error": error })
+    }
+}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
-            self.0,
-            Json(json!({"error":{"code":self.1,"message":self.2}})),
-        )
-            .into_response()
+        (self.status, Json(self.body())).into_response()
     }
 }
 
 fn unavailable(error: anyhow::Error) -> ApiError {
-    ApiError(
+    ApiError::new(
         StatusCode::SERVICE_UNAVAILABLE,
         "UNAVAILABLE",
         error.to_string(),
@@ -180,15 +206,40 @@ fn unavailable(error: anyhow::Error) -> ApiError {
 }
 
 fn invalid(error: anyhow::Error) -> ApiError {
-    ApiError(StatusCode::BAD_REQUEST, "INPUT_INVALID", error.to_string())
+    ApiError::new(StatusCode::BAD_REQUEST, "INPUT_INVALID", error.to_string())
+}
+
+/// A method's structured failure, when an evaluation error came from application code or the engine.
+fn engine_failure(error: &anyhow::Error) -> Option<Value> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<crate::evaluator::rust_engine::EngineError>())
+        .map(|engine| engine.failure())
+}
+
+/// Rebuild a peer's structured failure from its HTTP error body.
+fn remote_failure(body: &[u8]) -> Option<anyhow::Error> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let failure = value.get("error")?.get("failure")?;
+    let mut error = crate::evaluator::rust_engine::EngineError::new(
+        failure.get("code")?.as_str()?,
+        failure.get("message")?.as_str()?,
+    );
+    error.details = failure.get("details").cloned();
+    Some(anyhow::Error::new(error))
 }
 
 fn evaluation_error(error: anyhow::Error) -> ApiError {
-    ApiError(
+    let failure = engine_failure(&error);
+    let api = ApiError::new(
         StatusCode::UNPROCESSABLE_ENTITY,
         "EVALUATION_FAILED",
         error.to_string(),
-    )
+    );
+    match failure {
+        Some(failure) => api.with_failure(failure),
+        None => api,
+    }
 }
 
 fn http_method(
@@ -201,21 +252,21 @@ fn http_method(
         .get("httpMethods")
         .and_then(|methods| methods.get(name))
         .ok_or_else(|| {
-            ApiError(
+            ApiError::new(
                 StatusCode::NOT_FOUND,
                 "METHOD_NOT_FOUND",
                 format!("HTTP method {name:?} is not exposed"),
             )
         })?;
     let method = HttpMethod::deserialize(entry).map_err(|e| {
-        ApiError(
+        ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INVALID_METHOD_REGISTRY",
             e.to_string(),
         )
     })?;
     if expected.is_some_and(|kind| kind != method.kind) {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "METHOD_KIND_MISMATCH",
             format!("HTTP method {name:?} is a {}", method.kind.as_str()),
@@ -242,7 +293,7 @@ async fn transaction_control(
         .and_then(|value| value.to_str().ok())
         != Some(format!("Bearer {}", app.admin_token).as_str())
     {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
             "operator bearer token required".into(),
@@ -262,7 +313,7 @@ async fn deployment_control(
         .and_then(|value| value.to_str().ok())
         != Some(format!("Bearer {}", app.admin_token).as_str())
     {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
             "operator bearer token required".into(),
@@ -281,7 +332,7 @@ async fn deploy(
         .get("authorization")
         .and_then(|value| value.to_str().ok());
     if supplied != Some(format!("Bearer {}", app.admin_token).as_str()) {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
             "operator bearer token required".into(),
@@ -607,7 +658,7 @@ async fn mutation_hint_response(
     result: Result<Response, ApiError>,
 ) -> Result<Option<Response>, ApiError> {
     let response = match result {
-        Err(error) if error.1 == "METHOD_KIND_MISMATCH" => return Ok(None),
+        Err(error) if error.code == "METHOD_KIND_MISMATCH" => return Ok(None),
         Err(error) => return Err(error),
         Ok(response) if response.status() != StatusCode::UNPROCESSABLE_ENTITY => {
             return Ok(Some(response));
@@ -800,7 +851,7 @@ async fn evaluate_query_authorized(
         })
         .await
         .map_err(|e| {
-            ApiError(
+            ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "WORKER_FAILED",
                 e.to_string(),
@@ -833,7 +884,7 @@ async fn maintain(app: &Arc<App>) -> anyhow::Result<()> {
     let _guard = app.writer.lock().await;
     let admission = admission::acquire(app, admission::Class::Control, &Value::Null)
         .await
-        .map_err(|error| anyhow::anyhow!(error.2))?;
+        .map_err(|error| anyhow::anyhow!(error.message))?;
     let started = Instant::now();
     let mut state = app.consensus.read_for(None).await?;
     let mut commands = Vec::new();
@@ -859,7 +910,8 @@ async fn maintain(app: &Arc<App>) -> anyhow::Result<()> {
                     break;
                 }
                 bytes += size;
-                writer::stage(&mut state, &command).map_err(|error| anyhow::anyhow!(error.2))?;
+                writer::stage(&mut state, &command)
+                    .map_err(|error| anyhow::anyhow!(error.message))?;
                 commands.push(command);
                 if !again || started.elapsed() >= tuning::settings()?.maintenance_burst {
                     break;
@@ -874,7 +926,7 @@ async fn maintain(app: &Arc<App>) -> anyhow::Result<()> {
     }
     writer::commit_group(app, commands)
         .await
-        .map_err(|error| anyhow::anyhow!("{}: {}", error.1, error.2))?;
+        .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
     if let Some(error) = failure {
         return Err(error);
     }
@@ -885,7 +937,7 @@ async fn maintain(app: &Arc<App>) -> anyhow::Result<()> {
 async fn maintain_one(app: &Arc<App>) -> anyhow::Result<bool> {
     let admission = admission::acquire(app, admission::Class::Control, &Value::Null)
         .await
-        .map_err(|error| anyhow::anyhow!(error.2))?;
+        .map_err(|error| anyhow::anyhow!(error.message))?;
     let state = app.consensus.read_for(None).await?;
     let Some((command, again)) = prepare_maintenance(app, &state, &admission).await? else {
         return Ok(false);
@@ -946,10 +998,10 @@ async fn prepare_maintenance(
             // the original snapshot. No writes, roots or clock from the failed
             // callback can escape, including when it timed out or panicked.
             let args = json!({
-                "error": {
+                "error": engine_failure(&error).unwrap_or_else(|| json!({
                     "code": "MAINTENANCE_FAILED",
                     "message": error.to_string(),
-                },
+                })),
                 "failedAt": failed_at,
             });
             evaluate_maintenance(state, &on_error.name, args, now, permit, admission.clone())
@@ -962,7 +1014,7 @@ async fn prepare_maintenance(
         return Ok(None);
     }
     transactions::ensure_write_capacity(state)
-        .map_err(|error| anyhow::anyhow!("{}: {}", error.1, error.2))?;
+        .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
     let again = evaluation
         .value
         .get("$flower")
@@ -1019,7 +1071,7 @@ async fn resource_metrics(
         .and_then(|value| value.to_str().ok())
         != Some(format!("Bearer {}", app.admin_token).as_str())
     {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
             "operator bearer token required".into(),

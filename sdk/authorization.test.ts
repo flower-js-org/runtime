@@ -1,15 +1,23 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { define, query, mutation, FlowerClient } from "./index.ts";
-import type { AuthorizationRequest, Principal } from "./index.ts";
+import { define, query, FlowerClient, FlowerError } from "./index.ts";
+import { testDatabase } from "./testing.ts";
 
-test("authorization is private and must be a fresh query", () => {
-  const authorize=query("policy", (_ctx, _request:AuthorizationRequest):Principal|null=>({subject:"alice"}));
-  const app=define({authorize,http:{read:query("read",ctx=>ctx.principal())}});
-  assert.deepEqual(app.authorize,{name:"policy"});
-  assert.equal(app.http.policy,undefined);
-  assert.throws(()=>define({authorize:mutation("bad",()=>null) as never}),/read-only/);
-  assert.throws(()=>define({authorize:query("bad",()=>null,{consistency:"replica-local"})}),/read-only/);
+test("compiled authorization is a private, fresh query hook", async () => {
+  const read=query("read",ctx=>ctx.principal());
+  const app=define({auth:{authenticate:(_ctx,credentials)=>typeof credentials==="string"?{subject:credentials}:null},http:{read}});
+  assert.deepEqual(app.authorize,{name:"$flower.authorize"});
+  assert.deepEqual(Object.keys(app.http),["read"]);
+  const hook=app.definitions["$flower.authorize"];
+  assert.equal(hook.kind,"queryMethod");
+  assert.equal((hook as {consistency?:string}).consistency,undefined);
+  assert.equal(define({http:{read}}).authorize,undefined);
+  assert.throws(()=>define({authorize:query("policy",()=>({subject:"alice"}))} as never),/does not accept "authorize"/);
+  assert.throws(()=>define({http:{"$flower.authorize":read}}),/reserved/);
+  assert.throws(()=>define({http:{read:query("read",{access:"authenticated"},ctx=>ctx.principal())}}),/no authenticate/);
+  const db=await testDatabase(app);
+  assert.deepEqual(db.query("read",null,{credentials:"alice"}),{subject:"alice"});
+  assert.throws(()=>db.query("read"),(error:any)=>error instanceof FlowerError&&error.status===403&&error.failure?.code==="UNAUTHENTICATED");
 });
 
 test("SDK refreshes credentials independently of stable mutation identity", async () => {

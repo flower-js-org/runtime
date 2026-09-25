@@ -1,4 +1,4 @@
-import type { Json } from "./index.ts";
+import type { Json } from "./json.ts";
 
 export type JsonPatchOperation = { op: "add" | "replace"; path: string; value: Json } | { op: "remove"; path: string };
 export interface WatchSnapshot<Value = Json> { type: "snapshot"; sequence: number; revision: number; value: Value }
@@ -150,7 +150,7 @@ export function applyWatchPatch(value: Json, operations: JsonPatchOperation[], o
 interface SseFrame { event: string; data: string; id?: string }
 
 /** Bounded streaming SSE decoder, including split UTF-8 and split CRLF. */
-export async function* readSse(body: ReadableStream<Uint8Array>, signal: AbortSignal, maxBytes = MAX_WATCH_EVENT_BYTES): AsyncGenerator<SseFrame> {
+export async function* readSse(body: ReadableStream<Uint8Array>, signal: AbortSignal, maxBytes = MAX_WATCH_EVENT_BYTES, onActivity?: () => void): AsyncGenerator<SseFrame> {
   watchBudgets({ maxEventBytes: maxBytes });
   const reader = body.getReader();
   const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -191,6 +191,7 @@ export async function* readSse(body: ReadableStream<Uint8Array>, signal: AbortSi
   try {
     while (!signal.aborted) {
       const next = await reader.read();
+      onActivity?.();
       if (next.done) {
         decode();
         if (line || data.length || event) invalid("Watch stream ended during an event");
@@ -222,7 +223,7 @@ export async function* readSse(body: ReadableStream<Uint8Array>, signal: AbortSi
   }
 }
 
-export function decodeWatchEvent(frame: SseFrame, previousSequence: number, previousRevision: number, options: WatchBudgets = {}): WatchDelta | { type: "error"; error: { code: string; message: string; status: number } } {
+export function decodeWatchEvent(frame: SseFrame, previousSequence: number, previousRevision: number, options: WatchBudgets = {}): WatchDelta | { type: "error"; error: { code: string; message: string; status: number; failure?: unknown } } {
   const limits = watchBudgets(options);
   let value: any;
   try { value = JSON.parse(frame.data); } catch { return invalid("Watch event contains invalid JSON"); }

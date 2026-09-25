@@ -25,7 +25,7 @@ pub(super) fn error(error: anyhow::Error) -> ApiError {
         "RETENTION_TRANSACTION_ACTIVE" => "RETENTION_TRANSACTION_ACTIVE",
         _ => "RETENTION_CONFLICT",
     };
-    ApiError(StatusCode::CONFLICT, code, message)
+    ApiError::new(StatusCode::CONFLICT, code, message)
 }
 
 pub(super) fn validate_session(input: &Value) -> Result<(), ApiError> {
@@ -86,7 +86,7 @@ pub(super) async fn session_commit(app: Arc<App>, input: Value) -> Result<Value,
     let admission = admission::acquire_retained(&app, admission::Class::User).await?;
     let snapshot = app.consensus.read_for_writer().await.map_err(unavailable)?;
     if !authorization::required(&snapshot) {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "FORBIDDEN",
             "retry sessions require a deployed authorization hook".into(),
@@ -230,7 +230,7 @@ pub(super) async fn handle(
         .and_then(|value| value.to_str().ok())
         != Some(format!("Bearer {}", app.admin_token).as_str())
     {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
             "operator bearer token required".into(),

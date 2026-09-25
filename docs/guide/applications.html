@@ -4,89 +4,157 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#f8f5ec">
-<meta name="description" content="Define collections, derived values, queries and mutations, and choose which methods are public.">
+<meta name="description" content="Define collections, schemas, derived values, queries and mutations, fail with structured errors, and choose which methods are public.">
 <meta property="og:title" content="Applications · Flower">
-<meta property="og:description" content="Define collections, derived values, queries and mutations, and choose which methods are public.">
+<meta property="og:description" content="Define collections, schemas, derived values, queries and mutations, fail with structured errors, and choose which methods are public.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://flower.js.org/guide/applications.html">
 <link rel="canonical" href="https://flower.js.org/guide/applications.html">
 <title>Applications · Flower</title>
 <link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
 <link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
-<link rel="stylesheet" href="../site.css?v=eb05c8aa5c04">
+<link rel="stylesheet" href="../site.css?v=fd4ad318734f">
 <script src="../site.js?v=3184f0662fa5" defer></script>
 </head>
 <body class="doc-page">
 <a class="skip-link" href="#main">Skip to content</a>
 <div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/" aria-current="page">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/flower-js-org/runtime">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
 <div class="documentation">
-<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li class="current"><a href="#top" aria-current="page"><span>02</span>Applications</a><ol id="section-nav" aria-label="On this page"><li><a href="#example">A complete example</a></li><li><a href="#a-small-context-ordinary-typescript">The context</a></li><li><a href="#reuse-initialized-application-snapshots">Static initialization</a></li></ol></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/methods.html"><span>04</span>Methods & retries</a></li><li><a href="../guide/reads.html"><span>05</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>06</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>07</span>Leases & expiry</a></li><li><a href="../guide/workers.html"><span>08</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>09</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>10</span>Crypto & tokens</a></li><li><a href="../guide/deployments.html"><span>11</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/definitions.html"><span>03</span>Contexts & definitions</a></li><li><a href="../reference/client.html"><span>04</span>Client & transports</a></li><li><a href="../reference/time.html"><span>05</span>Expiry, leases & timers</a></li><li><a href="../reference/crypto.html"><span>06</span>NaCl & JWT</a></li><li><a href="../reference/keys.html"><span>07</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>08</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>09</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>10</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>11</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>12</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
+<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li class="current"><a href="#top" aria-current="page"><span>02</span>Applications</a><ol id="section-nav" aria-label="On this page"><li><a href="#example">A complete example</a></li><li><a href="#schemas">Check inputs with schemas</a></li><li><a href="#keys">Typed keys and indexes</a></li><li><a href="#failures">Fail with a code</a></li><li><a href="#a-small-context-ordinary-typescript">The context</a></li><li><a href="#reuse-initialized-application-snapshots">Module setup</a></li></ol></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/components.html"><span>04</span>Components & tasks</a></li><li><a href="../guide/methods.html"><span>05</span>Methods & retries</a></li><li><a href="../guide/access.html"><span>06</span>Access control</a></li><li><a href="../guide/reads.html"><span>07</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>08</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>09</span>Queues & expiry</a></li><li><a href="../guide/workers.html"><span>10</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>11</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>12</span>Crypto & tokens</a></li><li><a href="../guide/testing.html"><span>13</span>Testing</a></li><li><a href="../guide/deployments.html"><span>14</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/schemas.html"><span>03</span>Schemas & failures</a></li><li><a href="../reference/definitions.html"><span>04</span>Contexts & definitions</a></li><li><a href="../reference/components.html"><span>05</span>Components & tasks</a></li><li><a href="../reference/client.html"><span>06</span>Client & transports</a></li><li><a href="../reference/time.html"><span>07</span>Queues, expiry & timers</a></li><li><a href="../reference/workers.html"><span>08</span>External values & workers</a></li><li><a href="../reference/testing.html"><span>09</span>Testing</a></li><li><a href="../reference/crypto.html"><span>10</span>NaCl & JWT</a></li><li><a href="../reference/keys.html"><span>11</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>12</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>13</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>14</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>15</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>16</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
 <main id="main" tabindex="-1">
-<header class="page-intro" id="top"><p class="eyebrow">Guide · 02</p><h1>Your code is the API.</h1><p class="lead">An app is collections of JSON records, values derived from them, and methods that read or change them. Only the methods you list are public.</p></header>
+<header class="page-intro" id="top"><p class="eyebrow">Guide · 02</p><h1>Your code is the API.</h1><p class="lead">An app is collections of JSON records, values derived from them, and methods that read or change them. Schemas check what comes in; only the methods you list are public.</p></header>
 <div class="page-content">
 <!-- content:start -->
 <p>An application is one TypeScript module built from three pieces:</p>
-<div class="definition-grid"><article><span class="small-label">SOURCE</span><h3>collection</h3><p>Named JSON records with string keys.</p></article><article><span class="small-label">DEPENDENCY</span><h3>derive</h3><p>A synchronous function of records and other derived values. Always private.</p></article><article><span class="small-label">BOUNDARY</span><h3>query / mutation</h3><p>Read a snapshot, or make one atomic change. Public only if you list it in <code>http</code>.</p></article></div>
+<div class="definition-grid"><article><span class="small-label">SOURCE</span><h3>collection</h3><p>Named JSON records. An optional schema checks every write.</p></article><article><span class="small-label">DEPENDENCY</span><h3>derive</h3><p>A synchronous function of records and other derived values. Always private.</p></article><article><span class="small-label">BOUNDARY</span><h3>query / mutation</h3><p>Read a snapshot, or make one atomic change. Public only if you list it in <code>http</code>.</p></article></div>
 <section id="example">
 <h2>A complete example</h2>
 <p>Save this as <code>examples/counter.ts</code>:</p>
-<div class="code-block"><div class="code-head"><span>examples/counter.ts</span><button type="button" class="copy-button" aria-label="Copy examples/counter.ts">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { collection, define, derive, mutation, query } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
+<div class="code-block"><div class="code-head"><span>examples/counter.ts</span><button type="button" class="copy-button" aria-label="Copy examples/counter.ts">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { collection, define, derive, fail, mutation, query, v } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
 
-<span class="kw">const</span> counters = collection&lt;<span class="kw">number</span>&gt;(<span class="str">"counters"</span>);
+<span class="kw">const</span> counterId = v.<span class="kw">string</span>({ min: <span class="num">1</span>, max: <span class="num">64</span> });
+<span class="kw">const</span> counters = collection(<span class="str">"counters"</span>, v.int({ min: <span class="num">0</span> }));
 
 <span class="kw">const</span> doubled = derive(<span class="str">"counter.doubled"</span>, (ctx, id: <span class="kw">string</span>) =&gt;
   (ctx.get(counters, id) ?? <span class="num">0</span>) * <span class="num">2</span>,
 );
 
-<span class="kw">const</span> increment = mutation(<span class="str">"internal.counter.increment"</span>, (ctx, id: <span class="kw">string</span>) =&gt; {
-  <span class="kw">if</span> (<span class="kw">typeof</span> id !== <span class="str">"string"</span> || !id) <span class="kw">throw</span> <span class="kw">new</span> TypeError(<span class="str">"An ID is required"</span>);
-  ctx.set(counters, id, (ctx.get(counters, id) ?? <span class="num">0</span>) + <span class="num">1</span>);
+<span class="kw">const</span> increment = mutation(<span class="str">"internal.counter.increment"</span>, {
+  args: v.object({ id: counterId, by: v.int({ min: <span class="num">1</span>, max: <span class="num">10</span> }) }),
+}, (ctx, { id, by }) =&gt; {
+  <span class="kw">const</span> count = (ctx.get(counters, id) ?? <span class="num">0</span>) + by;
+  <span class="kw">if</span> (count &gt; <span class="num">1_000</span>) fail(<span class="str">"COUNTER_FULL"</span>, <span class="str">"Counters stop at 1,000"</span>, { count });
+  ctx.set(counters, id, count);
   ctx.materialize(doubled, id);
   <span class="kw">return</span> ctx.get(doubled, id); <span class="comment">// Includes the write above.</span>
 });
 
-<span class="kw">const</span> get = query(<span class="str">"internal.counter.get"</span>, (ctx, id: <span class="kw">string</span>) =&gt; {
-  <span class="kw">if</span> (<span class="kw">typeof</span> id !== <span class="str">"string"</span> || !id) <span class="kw">throw</span> <span class="kw">new</span> TypeError(<span class="str">"An ID is required"</span>);
-  <span class="kw">return</span> {
-    count: ctx.get(counters, id) ?? <span class="num">0</span>,
-    doubled: ctx.get(doubled, id),
-  };
-});
+<span class="kw">const</span> get = query(<span class="str">"internal.counter.get"</span>, { args: counterId }, (ctx, id) =&gt; ({
+  count: ctx.get(counters, id) ?? <span class="num">0</span>,
+  doubled: ctx.get(doubled, id),
+}));
 
-<span class="kw">export</span> <span class="kw">default</span> define({
+<span class="kw">const</span> app = define({
   definitions: [doubled],
-  http: {
-    <span class="str">"counter.increment"</span>: increment,
-    <span class="str">"counter.get"</span>: get,
-  },
-});</code></pre></div>
+  http: { <span class="str">"counter.increment"</span>: increment, <span class="str">"counter.get"</span>: get },
+});
+<span class="kw">export</span> <span class="kw">default</span> app;</code></pre></div>
 <p>Deploy it and call it:</p>
 <div class="code-block"><div class="code-head"><span>Deploy and call</span><button type="button" class="copy-button" aria-label="Copy Deploy and call">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">node</span> sdk/cli.ts deploy examples/counter.ts
-<span class="kw">node</span> sdk/cli.ts call counter.increment <span class="str">'"visits"'</span> <span class="var">--request-id</span> visit-<span class="num">001</span>
+<span class="kw">node</span> sdk/cli.ts call counter.increment <span class="str">'{"id":"visits","by":1}'</span> <span class="var">--request-id</span> visit-<span class="num">001</span>
 <span class="kw">node</span> sdk/cli.ts call counter.get <span class="str">'"visits"'</span>
-<span class="comment"># value: { count: 1, doubled: 2 }</span></code></pre></div>
+<span class="comment"># value: { count: 1, doubled: 2 }</span>
+<span class="kw">node</span> sdk/cli.ts call counter.increment <span class="str">'{"id":"visits","by":0}'</span>
+<span class="comment"># flower: INVALID_ARGUMENT: by: must be at least 1 {"path":["by"]}</span></code></pre></div>
 <ul>
 <li>Only aliases listed in <code>http</code> are public. Everything else stays private.</li>
-<li>Aliases don't have to match internal names.</li>
-<li>Each deploy replaces the whole list of public methods.</li>
+<li>Aliases don't have to match internal names. Each deploy replaces the whole list.</li>
+<li>List every derived value you read in <code>definitions</code>. A missing one fails at run time with <code>DEFINITION_MISSING</code>.</li>
+<li>Export the module as a named constant: clients and tests take its type with <code>typeof app</code>.</li>
+</ul>
+</section>
+<section id="schemas">
+<h2>Check inputs with schemas</h2>
+<p>Pass <code>args</code> to a method and Flower checks every call before your code runs. The argument type comes from the schema, so there's nothing to annotate.</p>
+<div class="code-block"><div class="code-head"><span>A schema for method arguments</span><button type="button" class="copy-button" aria-label="Copy A schema for method arguments">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">const</span> line = v.object({
+  sku: v.<span class="kw">string</span>({ pattern: /^[A-Z0-<span class="num">9</span>-]{<span class="num">3</span>,<span class="num">32</span>}$/ }),
+  quantity: v.int({ min: <span class="num">1</span>, max: <span class="num">99</span> }),
+  note: v.optional(v.<span class="kw">string</span>({ max: <span class="num">200</span> })),
+});
+<span class="kw">const</span> place = mutation(<span class="str">"order.place"</span>, {
+  args: v.object({ id: v.<span class="kw">string</span>({ min: <span class="num">1</span> }), lines: v.array(line, { min: <span class="num">1</span>, max: <span class="num">50</span> }) }),
+}, (ctx, order) =&gt; {
+  <span class="comment">// order: { id: string; lines: { sku: string; quantity: number; note?: string }[] }</span>
+  <span class="kw">return</span> order.lines.length;
+});</code></pre></div>
+<ul>
+<li>A bad call fails with <code>INVALID_ARGUMENT</code>, a readable message such as <code>lines[0].quantity: must be at least 1</code>, and <code>details: { path }</code>. Nothing runs.</li>
+<li><code>collection(name, schema)</code> checks every write. A bad record fails the mutation with <code>INVALID_RECORD</code>. Records already stored aren't rechecked when the schema changes.</li>
+<li>Objects are closed: unknown properties are rejected. Use <code>v.record(item)</code> or <code>v.object(shape, { rest })</code> for open maps.</li>
+<li>Any synchronous <a href="https://standardschema.dev/">Standard Schema</a>, such as zod, works wherever a schema does. It is bundled with your app.</li>
+<li>Without <code>args</code>, arguments are unchecked JSON with whatever type you annotate. Check them yourself.</li>
+</ul>
+<p>Every validator is in the <a href="../reference/schemas.html">schema reference</a>.</p>
+</section>
+<section id="keys">
+<h2>Typed keys and indexes</h2>
+<p>Keys are strings unless you give the collection a key schema. Tuple keys keep related records together, and indexes find records by field.</p>
+<div class="code-block"><div class="code-head"><span>Tuple keys and a typed index</span><button type="button" class="copy-button" aria-label="Copy Tuple keys and a typed index">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">const</span> orders = collection(<span class="str">"orders"</span>, v.object({
+  shop: v.<span class="kw">string</span>(), status: v.enum([<span class="str">"open"</span>, <span class="str">"paid"</span>]), cents: v.int({ min: <span class="num">0</span> }),
+}))
+  .key(v.tuple([v.<span class="kw">string</span>(), v.<span class="kw">string</span>()])) <span class="comment">// [tenant, orderId]</span>
+  .index(<span class="str">"byShopStatus"</span>, [<span class="str">"shop"</span>, <span class="str">"status"</span>]);
+
+<span class="kw">const</span> openOrders = query(<span class="str">"orders.open"</span>, { args: v.<span class="kw">string</span>() }, (ctx, shop) =&gt;
+  ctx.query(orders.by(<span class="str">"byShopStatus"</span>).eq([shop, <span class="str">"open"</span>])));
+<span class="kw">const</span> tenantOrders = query(<span class="str">"orders.tenant"</span>, { args: v.<span class="kw">string</span>() }, (ctx, tenant) =&gt;
+  ctx.scan(orders, { prefix: [tenant] })); <span class="comment">// [{ key: [tenant, id], value }]</span>
+
+<span class="kw">export</span> <span class="kw">default</span> define({ collections: [orders], http: { openOrders, tenantOrders } });</code></pre></div>
+<ul>
+<li><code>.key()</code> and <code>.index()</code> each return a new reference. Chain them where you declare the collection and use the result everywhere.</li>
+<li>Index names and fields are checked against the record type, and so is the value you pass to <code>eq</code>.</li>
+<li>Typed keys are stored as canonical JSON. A key that doesn't match fails with <code>INVALID_KEY</code>. Scans decode keys back to tuples.</li>
+<li>List indexed collections in <code>define({ collections })</code>, or reach them through a component. Otherwise the server scans the whole collection, and tests fail with <code>UNDECLARED_INDEX</code>.</li>
+</ul>
+</section>
+<section id="failures">
+<h2>Fail with a code</h2>
+<p><code>fail(code, message, details?)</code> aborts the call with a failure the caller can act on. A failing mutation commits nothing.</p>
+<div class="code-block"><div class="code-head"><span>Inside a mutation</span><button type="button" class="copy-button" aria-label="Copy Inside a mutation">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">if</span> (shop.stock &lt; quantity) fail(<span class="str">"OUT_OF_STOCK"</span>, <span class="str">"Not enough dough"</span>, { stock: shop.stock });</code></pre></div>
+<div class="code-block"><div class="code-head"><span>What an HTTP caller receives · 422</span><button type="button" class="copy-button" aria-label="Copy What an HTTP caller receives">Copy</button></div><pre tabindex="0"><code>{"error":{"code":"EVALUATION_FAILED","message":"OUT_OF_STOCK: Not enough dough",
+  "failure":{"code":"OUT_OF_STOCK","message":"Not enough dough","details":{"stock":2}}}}</code></pre></div>
+<div class="code-block"><div class="code-head"><span>What the TypeScript client sees</span><button type="button" class="copy-button" aria-label="Copy What the TypeScript client sees">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">try</span> {
+  <span class="kw">await</span> client.mutate(<span class="str">"pizza.order"</span>, { id: <span class="str">"o-7"</span>, shop: <span class="str">"north"</span>, quantity: <span class="num">3</span> });
+} <span class="kw">catch</span> (error) {
+  <span class="kw">if</span> (!(error <span class="kw">instanceof</span> FlowerError) || error.failure?.code !== <span class="str">"OUT_OF_STOCK"</span>) <span class="kw">throw</span> error;
+  console.log(<span class="str">"Sold out"</span>, error.failure.details);
+}</code></pre></div>
+<ul>
+<li>Codes are <code>UPPER_SNAKE_CASE</code>; details must be JSON.</li>
+<li><code>error.code</code> says what happened to the request (<code>EVALUATION_FAILED</code>, <code>FORBIDDEN</code>, <code>TRANSACTION_ABORTED</code>). <code>error.failure</code> is the method's own failure, with <code>code</code>, <code>message</code> and optional <code>details</code>.</li>
+<li>A plain <code>throw</code> arrives as <code>COMPUTE_ERROR</code> with its message. Returning an error-shaped object is a success.</li>
+<li>Flower's own codes, such as <code>INVALID_ARGUMENT</code>, are listed in the <a href="../reference/schemas.html#codes">failure reference</a>.</li>
 </ul>
 </section>
 <section id="a-small-context-ordinary-typescript" data-toc="The context">
 <h2>What <code>ctx</code> can do</h2>
 <p>Queries can read; mutations can also write.</p>
-<div class="table-wrap"><table><caption class="sr-only">Database context operations</caption><thead><tr><th>Read operations</th><th>Mutation-only operations</th></tr></thead><tbody><tr><td><code>ctx.get(collection, key)</code></td><td><code>ctx.set(collection, key, value)</code></td></tr><tr><td><code>ctx.get(derived, args)</code></td><td><code>ctx.delete(collection, key)</code></td></tr><tr><td><code>ctx.scan(collection)</code></td><td><code>ctx.materialize(derived, args)</code></td></tr><tr><td><code>ctx.query(collection.by(index).eq(value))</code></td><td><code>ctx.unmaterialize(derived, args)</code></td></tr><tr><td><code>ctx.range(collection.by(index).range({prefix, lte, limit}))</code></td><td>Bounded pages over an index.</td></tr><tr><td><code>ctx.now()</code></td><td>Throw to abort the whole mutation.</td></tr></tbody></table></div>
+<div class="table-wrap"><table><caption class="sr-only">Database context operations</caption><thead><tr><th>Read operations</th><th>Mutation-only operations</th></tr></thead><tbody><tr><td><code>ctx.get(collection, key)</code></td><td><code>ctx.set(collection, key, value)</code></td></tr><tr><td><code>ctx.get(derived, args?)</code></td><td><code>ctx.delete(collection, key)</code></td></tr><tr><td><code>ctx.scan(collection, options?)</code></td><td><code>ctx.materialize(derived, args?)</code></td></tr><tr><td><code>ctx.query(collection.by(index).eq(value))</code></td><td><code>ctx.unmaterialize(derived, args?)</code></td></tr><tr><td><code>ctx.range(collection.by(index).range({ prefix, lte, limit }))</code></td><td><code>fail(code, message)</code> aborts the whole mutation.</td></tr><tr><td><code>ctx.now()</code>, and in methods <code>ctx.principal()</code></td><td>All writes commit together, or none do.</td></tr></tbody></table></div>
 <ul>
 <li><code>get</code> returns <code>null</code> for a missing record.</li>
-<li><code>scan</code> returns <code>{key, value}</code> rows in key order.</li>
-<li>Types aren't checked at runtime. Validate arguments yourself.</li>
+<li><code>scan</code> returns <code>{ key, value }</code> rows in key order.</li>
+<li>Everything a callback reads is tracked. See <a href="reactivity.html">Reactive values</a>.</li>
 </ul>
 </section>
-<section id="reuse-initialized-application-snapshots" data-toc="Static initialization">
-<h2>Start callbacks faster</h2>
-<p>If module setup doesn't depend on the call, add <code>--initialization static</code> to build or deploy. Flower initializes the module once and reuses it.</p>
+<section id="reuse-initialized-application-snapshots" data-toc="Module setup">
+<h2>Module setup runs once</h2>
+<p>When you deploy, Flower runs your module's top level once, including <code>define()</code> and every component, and snapshots the result. Each callback starts from a copy of that snapshot, so imports and setup cost nothing per call.</p>
 <ul>
-<li>Globals and closures still reset on every call.</li>
-<li>Memory and execution limits still apply.</li>
+<li>Top-level code has no database access and no randomness. Do that work inside callbacks.</li>
+<li>Globals still reset: every callback gets a fresh copy, and changes to module state don't persist.</li>
+<li>A setup heap over 8 MiB isn't snapshotted; callbacks then start from the shared base image and your compiled code.</li>
+<li>To rerun module code in every callback instead, build or deploy with <code>--initialization per-invocation</code>.</li>
 </ul>
 </section>
 <!-- content:end -->

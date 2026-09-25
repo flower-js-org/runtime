@@ -59,12 +59,14 @@ test("uncertain response retries the exact request and records one logical invoc
 
 test("application errors are not retried and explicit replays have a separate logical series", async (t) => {
   let count = 0;
+  const failure = { code: "LEASE_LOST", message: "Job lease is missing, expired, or held by another claim", details: { token: 3 } };
   const { client, phase } = await fixture(t, async (request, response) => {
     await body(request);
     count++;
-    send(response, 422, { error: { code: "EVALUATION_FAILED", message: "LEASE_LOST" } });
+    send(response, 422, { error: { code: "EVALUATION_FAILED", message: `LEASE_LOST: ${failure.message}`, failure } });
   });
-  await assert.rejects(client.call("pizza.deliver", {}, { replay: true }), (error) => error instanceof RpcError && error.status === 422);
+  await assert.rejects(client.call("pizza.deliver", {}, { replay: true }), (error) => error instanceof RpcError && error.status === 422 &&
+    error.code === "EVALUATION_FAILED" && JSON.stringify(error.failure) === JSON.stringify(failure));
   assert.equal(count, 1);
   assert.equal(phase.stats.snapshot(1_000).operations.perMethod["pizza.deliver.replay"].failed, 1);
 });
@@ -139,10 +141,12 @@ test("HTTP/2 in-flight calls respect drain cancellation and application errors a
   let failures = 0;
   const { client, phase } = await fixture(t, async (request, response) => {
     const input = JSON.parse(await body(request));
-    if (input.name === "pizza.deliver") { failures++; send(response, 422, { error: { message: "LEASE_LOST", code: "EVALUATION_FAILED" } }); }
-    else { response.writeHead(200); response.write('{"revision":'); }
+    if (input.name === "pizza.deliver") {
+      failures++;
+      send(response, 422, { error: { message: "LEASE_LOST: lost", code: "EVALUATION_FAILED", failure: { code: "LEASE_LOST", message: "lost" } } });
+    } else { response.writeHead(200); response.write('{"revision":'); }
   }, { http2: true, requestTimeoutMs: 5_000, retryBudgetMs: 300_000 });
-  await assert.rejects(client.call("pizza.deliver", {}), (error) => error.status === 422);
+  await assert.rejects(client.call("pizza.deliver", {}), (error) => error.status === 422 && error.failure?.code === "LEASE_LOST");
   assert.equal(failures, 1);
   const deadline = AbortSignal.timeout(40);
   await assert.rejects(client.call("pizza.world", null, { query: true, signal: deadline }), (error) => error === deadline.reason);

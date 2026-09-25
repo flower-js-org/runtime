@@ -12,7 +12,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { LocalCluster } from "./cluster.mjs";
 import { buildBundle } from "../sdk/bundle.ts";
-import { FlowerClient } from "../sdk/index.ts";
+import { FlowerAdmin } from "../sdk/index.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const [binaryArg, directoryArg, concurrencyArg = "16"] = process.argv.slice(2);
@@ -79,13 +79,13 @@ try {
   const fixture = join(directory, "fixture.ts");
   await writeFile(fixture, `import { define, query } from ${JSON.stringify(join(root, "sdk/index.ts"))};
 let calls = 0;
-export default define({http:{"cold.echo":query("internal.cold.echo",(_ctx,args:{id:number})=>({id:args.id,calls:++calls}),{consistency:"replica-local"})}});
+export default define({http:{"cold.echo":query("internal.cold.echo",{consistency:"replica-local"},(_ctx,args:{id:number})=>({id:args.id,calls:++calls}))}});
 `);
   const bundle = await buildBundle(fixture, { initialization: "static" });
   await writeFile(join(directory, "bundle.json"), JSON.stringify(bundle) + "\n");
   const binarySha256 = createHash("sha256").update(await readFile(binary)).digest("hex");
   await cluster.start();
-  const deployed = await new FlowerClient(cluster.url, { adminToken: cluster.adminToken }).deploy(bundle, {
+  const deployed = await new FlowerAdmin(cluster.url, { adminToken: cluster.adminToken }).deploy(bundle, {
     requestId: "cold-burst-deploy", signal: AbortSignal.timeout(60_000),
   });
   const leader = cluster.leader;

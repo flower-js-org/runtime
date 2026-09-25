@@ -13,7 +13,7 @@ import { parseArgs } from "node:util";
 import { build } from "esbuild";
 import { LocalCluster } from "../../bench/cluster.mjs";
 import { buildBundle } from "../../sdk/bundle.ts";
-import { FlowerClient, FlowerError } from "../../sdk/client.ts";
+import { FlowerAdmin, FlowerClient, FlowerError } from "../../sdk/client.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "../..");
@@ -110,7 +110,7 @@ export async function startPizzaDemo({ port = 0, binary, auto = true, signal } =
     shutdown.signal.throwIfAborted();
     const bundle = await buildBundle(resolve(root, "examples/goblin-pizza.ts"), { initialization: "static" });
     shutdown.signal.throwIfAborted();
-    await new FlowerClient(cluster.url, { adminToken: cluster.adminToken }).deploy(
+    await new FlowerAdmin(cluster.url, { adminToken: cluster.adminToken }).deploy(
       bundle, { signal: shutdown.signal });
     shutdown.signal.throwIfAborted();
     await mutate("pizza.setup", { tenants, storesPerTenant, stockPerShop: 1_000, bakeMs: 1_800, leaseMs: 4_000 });

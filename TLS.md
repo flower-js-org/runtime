@@ -50,8 +50,9 @@ a cluster compromise, not a sandbox escape prevented by route separation.
 
 If `FLOWER_PEER_TOKEN` is absent, it defaults to the operator token for local
 experiments. Set a distinct value to obtain credential separation. Neither
-credential substitutes for the application's `define({authorize})` hook. Keep
-privileged endpoints network-restricted even when TLS is enabled.
+credential substitutes for the application's authorization hook, declared with
+`define({ auth })`. Keep privileged endpoints network-restricted even when TLS
+is enabled.
 
 Peer tokens are cluster-wide and currently accept one value at a time. There is
 no seamless dual-token rotation: use a coordinated maintenance window. Operator
@@ -86,7 +87,8 @@ are copied when the transport is created. Explicit roots replace Node's default
 roots for that transport; omission preserves Node's configured defaults. TLS
 verification remains mandatory, and there is no hostname override. One HTTP/2
 session is pooled per origin. Request deadlines, cancellation, SSE backpressure,
-connection accounting and uncertain-write retry rules are unchanged.
+connection accounting and uncertain-write retry rules are unchanged. `FlowerAdmin`
+accepts the same `fetch` option, so operator calls can share the transport.
 
 Raft/group address registries remain `host:port` without a URL scheme. All peers
 must agree on TLS mode; mixed cleartext/TLS groups are unsupported. Enabling TLS

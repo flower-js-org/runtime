@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f8f5ec">
+<meta name="description" content="Reference for Flower components, maintenance tasks and triggers.">
+<meta property="og:title" content="Components &amp; tasks · Flower">
+<meta property="og:description" content="Reference for Flower components, maintenance tasks and triggers.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://flower.js.org/reference/components.html">
+<link rel="canonical" href="https://flower.js.org/reference/components.html">
+<title>Components &amp; tasks · Flower</title>
+<link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
+<link rel="stylesheet" href="../site.css?v=fd4ad318734f">
+<script src="../site.js?v=3184f0662fa5" defer></script>
+</head>
+<body class="doc-page">
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/" aria-current="page">Reference</a><a class="site-repository" href="https://github.com/flower-js-org/runtime">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
+<div class="documentation">
+<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/components.html"><span>04</span>Components & tasks</a></li><li><a href="../guide/methods.html"><span>05</span>Methods & retries</a></li><li><a href="../guide/access.html"><span>06</span>Access control</a></li><li><a href="../guide/reads.html"><span>07</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>08</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>09</span>Queues & expiry</a></li><li><a href="../guide/workers.html"><span>10</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>11</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>12</span>Crypto & tokens</a></li><li><a href="../guide/testing.html"><span>13</span>Testing</a></li><li><a href="../guide/deployments.html"><span>14</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/schemas.html"><span>03</span>Schemas & failures</a></li><li><a href="../reference/definitions.html"><span>04</span>Contexts & definitions</a></li><li class="current"><a href="#top" aria-current="page"><span>05</span>Components & tasks</a><ol id="section-nav" aria-label="On this page"><li><a href="#components">Components</a></li><li><a href="#tasks">Tasks</a></li><li><a href="#triggers">Triggers</a></li></ol></li><li><a href="../reference/client.html"><span>06</span>Client & transports</a></li><li><a href="../reference/time.html"><span>07</span>Queues, expiry & timers</a></li><li><a href="../reference/workers.html"><span>08</span>External values & workers</a></li><li><a href="../reference/testing.html"><span>09</span>Testing</a></li><li><a href="../reference/crypto.html"><span>10</span>NaCl & JWT</a></li><li><a href="../reference/keys.html"><span>11</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>12</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>13</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>14</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>15</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>16</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Clear contracts.<br>Honest limits.<br>Room to grow.</p></div></aside>
+<main id="main" tabindex="-1">
+<header class="page-intro" id="top"><p class="eyebrow">Reference · 05</p><h1>Components, tasks and triggers.</h1><p class="lead">Reusable parts for <code>define({ uses })</code>, background work, and reactions to changed rows.</p></header>
+<div class="page-content">
+<!-- content:start -->
+<section id="components" data-toc="Components">
+<h2>Components</h2>
+<p>A component packages parts for <code>define({ uses })</code>. The <a href="../guide/components.html">components guide</a> walks through a complete one.</p>
+<div class="table-wrap"><table><thead><tr><th>API</th><th>Contract</th></tr></thead><tbody>
+<tr><th scope="row"><code data-api-symbol="component">component(parts?: ComponentParts): Component</code></th><td>Freezes the parts into a component. Every field is optional and must be an array; unknown fields are rejected.</td></tr>
+<tr><th scope="row"><code data-api-symbol="ComponentParts">ComponentParts</code></th><td>Optional <code>uses</code> (nested components), <code>collections</code>, <code>definitions</code>, <code>tasks</code>, <code>triggers</code> and <code>keys</code>.</td></tr>
+<tr><th scope="row"><code data-api-symbol="Component">Component</code></th><td>Readonly <code>kind: "component"</code> and each part as a frozen array.</td></tr>
+<tr><th scope="row"><code data-api-symbol="Usable">Usable</code></th><td>What <code>uses</code> accepts: a <code>Component</code>, or an object with a <code>component</code> property, such as an <a href="workers.html#external">external value</a>.</td></tr>
+</tbody></table></div>
+<div class="code-block"><div class="code-head"><span>A helper that is also a component</span><button class="copy-button" type="button" aria-label="Copy A helper that is also a component">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { collection, component, v, <span class="kw">type</span> MutationContext } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
+
+<span class="kw">export</span> <span class="kw">function</span> tally(name: <span class="kw">string</span>) {
+  <span class="kw">const</span> counts = collection(name, v.int({ min: <span class="num">0</span> }));
+  <span class="kw">return</span> {
+    ...component({ collections: [counts] }),
+    add: (ctx: MutationContext, key: <span class="kw">string</span>) =&gt; ctx.set(counts, key, (ctx.get(counts, key) ?? <span class="num">0</span>) + <span class="num">1</span>),
+  };
+}
+<span class="comment">// const votes = tally("votes"); define({ uses: [votes], ... }); votes.add(ctx, "yes");</span></code></pre></div>
+<ul>
+<li><code>define</code> visits nested <code>uses</code> first and includes each component once, however many times it is reached.</li>
+<li>Names are global across components: two different definitions or two tasks with the same name are rejected, and so is one collection declared with different indexes.</li>
+<li>Components never add public methods; spread generated ones, like <code>jobs.http("jobs")</code>, into <code>http</code>.</li>
+</ul>
+</section>
+<section id="tasks" data-toc="Tasks">
+<h2>Tasks</h2>
+<div class="table-wrap"><table><thead><tr><th>API</th><th>Contract</th></tr></thead><tbody>
+<tr><th scope="row"><code data-api-symbol="task">task(name, { due, run, onError? }): Task</code></th><td>Background work for the maintenance handler. Names must be unique in the app.</td></tr>
+<tr><th scope="row"><code data-api-symbol="Task">Task</code></th><td>Readonly <code>kind: "task"</code>, <code>name</code>, <code>due</code>, <code>run</code> and optional <code>onError</code>.</td></tr>
+<tr><th scope="row"><code>due(ctx: QueryContext): number | null</code></th><td>The earliest time the task has work, or <code>null</code> when idle. Must depend only on data and time, and return a finite number.</td></tr>
+<tr><th scope="row"><code>run(ctx: MutationContext): Json</code></th><td>One bounded unit of work, committed on its own. The task stays eligible while <code>due</code> is in the past.</td></tr>
+<tr><th scope="row"><code>onError(ctx, failure: TaskFailure): Json</code></th><td>Runs in place of a failed <code>run</code>, against the failed invocation’s snapshot and time; its writes commit instead. Without it, the task backs off.</td></tr>
+<tr><th scope="row"><code data-api-symbol="TaskFailure">TaskFailure</code></th><td><code>error: Failure</code>, with the real code (yours, <code>COMPUTE_ERROR</code>, <code>EVALUATION_BUDGET</code>…), and <code>failedAt</code> in milliseconds.</td></tr>
+</tbody></table></div>
+<p><code>define</code> compiles every task, including those of components and of <code>materialize</code> policies, into one maintenance handler pair, <code>$flower.maintenance</code> and <code>$flower.maintenance.error</code>, named in <code>FlowerModule.maintenance</code>.</p>
+<ul>
+<li>Each run picks the task with the earliest due time and runs it in its own commit. The leader runs maintenance every <code>FLOWER_MAINTENANCE_INTERVAL_MS</code> (250 ms), in bursts of up to <code>FLOWER_MAINTENANCE_BURST_MS</code> (50 ms) while work remains.</li>
+<li>A failure without <code>onError</code> delays only that task: 1 s after the first failure, doubling up to 60 s. The next success clears it. Backoff state lives in the <code>$flower.tasks</code> collection.</li>
+<li>A run may be evaluated more than once before it commits. Keep external side effects out of tasks.</li>
+</ul>
+</section>
+<section id="triggers" data-toc="Triggers">
+<h2>Triggers</h2>
+<div class="table-wrap"><table><thead><tr><th>API</th><th>Contract</th></tr></thead><tbody>
+<tr><th scope="row"><code data-api-symbol="trigger">trigger(name, source, run): Trigger</code></th><td>Runs <code>run(ctx, change)</code> inside every mutation that changed a row of <code>source</code>, once per changed key, before the commit. The source collection is declared for you.</td></tr>
+<tr><th scope="row"><code data-api-symbol="Trigger">Trigger&lt;T, K&gt;</code></th><td>Readonly <code>kind: "trigger"</code>, <code>name</code>, <code>source</code> and <code>run</code>.</td></tr>
+<tr><th scope="row"><code data-api-symbol="Change">Change&lt;T, K&gt;</code></th><td><code>key</code> (decoded for typed-key collections), <code>before</code> and <code>after</code>; <code>null</code> means the row didn’t exist.</td></tr>
+</tbody></table></div>
+<ul>
+<li>Triggers see and join the mutation’s writes. A row that ends where it started doesn’t fire.</li>
+<li>Writes made by triggers can fire more triggers. After 32 rounds the mutation fails with <code>TRIGGER_LOOP</code>.</li>
+<li>Trigger names must be unique per collection.</li>
+</ul>
+</section>
+<!-- content:end -->
+</div>
+<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../reference/definitions.html"><small>Previous · Reference</small>Contexts & definitions</a><a rel="next" href="../reference/client.html"><small>Next · Reference</small>Client & transports</a></nav>
+</main>
+</div>
+<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/flower-js-org/runtime">Source ↗</a></div></div></div>
+<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
+</body>
+</html>

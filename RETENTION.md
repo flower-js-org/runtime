@@ -91,7 +91,7 @@ Each coordinator assigns a random durable history identity and monotonic sequenc
 
 Prepared work never aborts merely because a timeout elapsed. An incomplete sequence blocks its prefix. Committed decisions can close while the matching public receipt remains; that receipt still replays after decision collection. An aborted decision has no success receipt, so it can close only after the original public request ID is provably inadmissible: a retired epoch, acknowledged/closed session, old incarnation or legacy ID rejected by initialized retention. An admissible legacy abort therefore blocks its prefix until an operator explicitly adopts a rejecting retention policy.
 
-Use client.transactionClosureStatus() and client.controlTransactionClosure({operation:"close",through?,maxBytes?}) with operator credentials. Inspect pending and blockedReason: HTTP success can report bounded partial progress or an unavailable participant. Close is monotonic and recovery resumes a durable intent; repeating it after uncertainty is safe. client.controlTransactionClosure({operation:"collect",maxBytes?}) incrementally removes coordinator and participant detail behind the floors. Run collection on each relevant logical database; its persisted cursor prevents one history starving later records. A single record larger than maxBytes needs a larger work budget. Operations remain limited by the node transaction-byte budget. Floors and history identities themselves remain compact retained metadata.
+Use `admin.transactionClosureStatus()` and `admin.controlTransactionClosure({operation:"close",through?,maxBytes?})` on a `FlowerAdmin`. Inspect pending and blockedReason: HTTP success can report bounded partial progress or an unavailable participant. Close is monotonic and recovery resumes a durable intent; repeating it after uncertainty is safe. `admin.controlTransactionClosure({operation:"collect",maxBytes?})` incrementally removes coordinator and participant detail behind the floors. Run collection on each relevant logical database; its persisted cursor prevents one history starving later records. A single record larger than maxBytes needs a larger work budget. Operations remain limited by the node transaction-byte budget. Floors and history identities themselves remain compact retained metadata.
 
 Migration waits for outstanding participant intents and incomplete coordinators, then transfers authoritative history, closure intent, floors, collection progress and public receipts. A closure intent can resume against current owners after movement. Independently rolling back one participant or coordinator can still invalidate those proofs and is not a supported recovery protocol.
 
@@ -115,12 +115,12 @@ Prepared-key caches remain governed by current authorization and key version. Ca
 
 ## SDK and operator workflow
 
-Import from the published SDK. Retention metadata is scoped to the same root database or named partition as the client. Operator transitions use `adminToken`; session operations use current application credentials and require `define({authorize})`. The hook receives `$flower.session.open`, `.status`, `.ack` or `.close`, and the server derives ownership from its subject and tenant.
+Import from the published SDK. Retention metadata is scoped to the same root database or named partition as the client. Operator transitions use a `FlowerAdmin` holding the operator token. Session operations use a `FlowerClient` with current application credentials and require a deployed authorization hook, which `define` compiles when `auth.authenticate` or `auth.delegation` is set or an exposed method's `access` is a predicate. The hook receives `$flower.session.open`, `.status`, `.ack` or `.close`, governed by `auth.sessions` (default `auth.default`), and the server derives ownership from its subject and tenant. All anonymous callers share one owner, so give sessions to authenticated principals when ownership matters.
 
 ```ts
-import { FlowerClient } from "@flower-js/sdk/client";
+import { FlowerAdmin, FlowerClient } from "@flower-js/sdk/client";
 
-const operator = new FlowerClient("https://db.example", { adminToken });
+const operator = new FlowerAdmin("https://db.example", { adminToken });
 const status = await operator.retentionStatus();
 const hexId = () => crypto.randomUUID().replaceAll("-", "");
 await operator.controlRetention(status.revision, {
@@ -133,10 +133,10 @@ const client = new FlowerClient("https://db.example", {
 });
 const requestId = await client.newRequestId("order:business-id");
 // Persist requestId and intent before sending; retry these exact bytes.
-const receipt = await client.mutate("order", { id: "business-id" }, { requestId });
+const receipt = await client.mutate("order", { id: "business-id" }, { requestId, retry: true });
 ```
 
-`f1:database:incarnation:epoch:SHA256(intent)` IDs retain the original epoch even when the operator advertises a newer one. `refreshRetryIdentity()` is an explicit action for **new** intent. Initialization rejects all unscoped legacy request IDs, including retries whose old receipt remains stored. Pre-initialization legacy receipts remain retained and epoch collection does not remove them. Do not convert an uncertain legacy request into a new scoped intent without business-level reconciliation. Choose a migration policy for that finite legacy history before enabling retention in a long-running database.
+`f1:database:incarnation:epoch:SHA256(intent)` IDs retain the original epoch even when the operator advertises a newer one. The SDK's `retry` option resends the same ID and never retries `409` outcomes such as `RETRY_WINDOW_EXPIRED` or `HISTORY_MISMATCH`. `refreshRetryIdentity()` is an explicit action for **new** intent. Initialization rejects all unscoped legacy request IDs, including retries whose old receipt remains stored. Pre-initialization legacy receipts remain retained and epoch collection does not remove them. Do not convert an uncertain legacy request into a new scoped intent without business-level reconciliation. Choose a migration policy for that finite legacy history before enabling retention in a long-running database.
 
 For sustained clients, use sessions:
 
@@ -161,5 +161,5 @@ A session request is `f2:database:incarnation:epoch:session:sequence`. Sequence 
 
 - Transaction collection requires explicit durable closure. Unavailable participants, undecided work and still-admissible aborts can delay it; never manually delete their protocol state.
 - Retention epochs advance explicitly; automatic time-based retirement needs a trusted clock-error policy first.
-- Session acknowledgements do not replace durable business IDs or an outbox. `ctx.history()` exposes database/incarnation after initialization, and TS workQueue claims bind it into lease identity. Old-history completion/failure is rejected after reincarnation; existing old-history leases can wait until their expiry before reclamation. External sinks must independently select the accepted incarnation and enforce increasing fencing tokens. Flower cannot retract an external effect after worker lease expiry.
+- Session acknowledgements do not replace durable business IDs or an outbox. `ctx.history()` exposes database/incarnation after initialization, and `queue()` claims bind it into lease identity. Old-history completion/failure is rejected after reincarnation; existing old-history leases can wait until their expiry before reclamation. External sinks must independently select the accepted incarnation and enforce increasing fencing tokens. Flower cannot retract an external effect after worker lease expiry.
 - Logical key destruction does not erase prior backups or plaintext results. Wrapping-key rewrap and mounted previous KEKs support operational rotation, with backup retention managed separately.

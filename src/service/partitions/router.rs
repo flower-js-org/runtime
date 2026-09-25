@@ -124,7 +124,7 @@ impl Gate {
     }
 }
 fn moving(message: &str) -> ApiError {
-    ApiError(
+    ApiError::new(
         StatusCode::SERVICE_UNAVAILABLE,
         "PARTITION_MOVING",
         message.into(),
@@ -186,7 +186,7 @@ impl Registry {
         for (id, epoch) in active {
             self.app(&id, epoch)
                 .await
-                .map_err(|e| anyhow::anyhow!("{}", e.2))?;
+                .map_err(|e| anyhow::anyhow!("{}", e.message))?;
         }
         Ok(())
     }
@@ -276,7 +276,7 @@ fn authorize(runtime: &Runtime, headers: &HeaderMap) -> Result<(), ApiError> {
     if headers.get("authorization").and_then(|v| v.to_str().ok())
         != Some(format!("Bearer {}", runtime.token).as_str())
     {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
             "operator bearer token required".into(),
@@ -290,7 +290,7 @@ fn authenticated(runtime: &Runtime, headers: &HeaderMap, group: &str) -> Result<
         .and_then(|value| value.to_str().ok())
         != Some(format!("Bearer {}", runtime.consensus.peer_token()).as_str())
     {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
             "peer bearer token required".into(),
@@ -505,7 +505,7 @@ async fn dispatch(
         "query" | "watch" | "identity" | "tx-status" | "tx-prepare" | "tx-finish"
         | "tx-closure-status" | "tx-closure-ack" => {}
         _ => {
-            return Err(ApiError(
+            return Err(ApiError::new(
                 StatusCode::NOT_FOUND,
                 "METHOD_NOT_FOUND",
                 "unknown partition endpoint".into(),
@@ -771,8 +771,8 @@ async fn route(
             match dispatch(registry, invocation.clone(), true).await {
                 Ok(response) => return Ok(response),
                 Err(error)
-                    if error.0 == StatusCode::SERVICE_UNAVAILABLE
-                        && matches!(error.1, "PARTITION_MOVING" | "UNAVAILABLE") =>
+                    if error.status == StatusCode::SERVICE_UNAVAILABLE
+                        && matches!(error.code, "PARTITION_MOVING" | "UNAVAILABLE") =>
                 {
                     last = error
                 }

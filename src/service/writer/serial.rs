@@ -58,7 +58,9 @@ impl Execution {
                 .map_err(|_| "serial evaluation worker panicked".to_owned()),
         };
         result
-            .map_err(|error| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "WORKER_FAILED", error))?
+            .map_err(|error| {
+                ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "WORKER_FAILED", error)
+            })?
             .map_err(evaluation_error)
     }
 }

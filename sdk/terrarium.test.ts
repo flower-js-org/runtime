@@ -2,163 +2,136 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createContext, runInContext } from "node:vm";
-import { build } from "esbuild";
+import type app from "../docs/terrarium.ts";
+import { FlowerError, type Update } from "./client.ts";
+import { testDatabase, type TestDatabase } from "./testing.ts";
 
-// Keep the downloadable npm imports intact, but exercise current SDK source.
-// Tests must work before `npm run build` and must never read stale dist/ files.
-const bundle = await build({
-  entryPoints: [fileURLToPath(new URL("../docs/terrarium.ts", import.meta.url))],
-  alias: {
-    "@flower-js/sdk": fileURLToPath(new URL("./index.ts", import.meta.url)),
-    "@flower-js/sdk/scheduler": fileURLToPath(new URL("./scheduler.ts", import.meta.url)),
-  },
-  bundle: true,
-  write: false,
-  format: "iife",
-  globalName: "__flowerBundle",
-  platform: "neutral",
-  target: "es2020",
-  logLevel: "silent",
-});
-const engine = readFileSync(new URL("../runtime/engine.js", import.meta.url), "utf8");
-const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value));
+// The downloadable app bundles against current SDK source (esbuild follows the
+// tsconfig paths for @flower-js/sdk, never dist/) and runs isolated like the server.
+const entry = fileURLToPath(new URL("../docs/terrarium.ts", import.meta.url));
+const terrarium = () => testDatabase<typeof app>(entry, { now: 1_000 });
+const seedlings = { spacesLeft: 11, blooming: 0, flowers: { luna: "🌱" } };
+const blooming = { spacesLeft: 11, blooming: 1, flowers: { luna: "🌼" } };
+const empty = { spacesLeft: 12, blooming: 0, flowers: {} };
 
-// Run the downloadable application through the reactive reference engine.
-// Only the trusted clock and commit loop are simulated here.
-function terrarium() {
-  const sandbox = createContext(Object.create(null));
-  runInContext(bundle.outputFiles[0].text, sandbox, { timeout: 1_000 });
-  runInContext(engine, sandbox, { timeout: 1_000 });
-  const module = sandbox.__flowerBundle.default;
-  let state: Record<string, unknown> = {};
-  let time = 1_000;
-  let sequence = 0;
-  function invoke(kind: string, name: string, args: unknown) {
-    const output = plain(sandbox.flowerInvoke(state, { kind, name, args, requestId: `terrarium-${sequence++}` },
-      (method: string, input: unknown, ctx: unknown) => module.definitions[method].compute(ctx, input),
-      (derived: string, input: unknown, ctx: unknown) => module.definitions[derived].compute(ctx, input), time));
-    state = { ...state, ...output.puts };
-    for (const key of output.deletes) delete state[key];
-    return output;
-  }
-  return {
-    get manifest() { return plain(module); },
-    get state() { return plain(state); },
-    set time(value: number) { time = value; },
-    call(alias: string, args: unknown) {
-      const method = module.http[alias];
-      assert.ok(method, `No public method ${alias}`);
-      return invoke(method.kind, method.name, args).value;
-    },
-    maintenance() { return invoke("mutation", module.maintenance.name, null).value; },
-    internal(name: string, args: unknown) { return invoke("mutation", name, args).value; },
-  };
+function fails(action: () => unknown, code: string): FlowerError {
+  let caught: unknown;
+  assert.throws(action, (error) => { caught = error; return true; });
+  assert.ok(caught instanceof FlowerError, String(caught));
+  assert.equal(caught.failure?.code, code, caught.message);
+  return caught;
 }
 
-test("the terrarium blooms on its durable deadline and updates only the matching garden", () => {
-  const db = terrarium();
-  assert.deepEqual(Object.keys(db.manifest.http).sort(), ["garden.plant", "garden.view"]);
-  assert.equal(db.manifest.http["garden.view"].consistency, "replica-local");
-  assert.ok(db.manifest.collections.some((entry: { name: string }) => entry.name === "seasons"));
+async function next<T>(updates: AsyncGenerator<Update<T>>): Promise<T> {
+  const result = await updates.next();
+  assert.equal(result.done, false);
+  return (result.value as Update<T>).value;
+}
 
-  db.call("garden.plant", { garden: "moon", id: "luna" });
-  db.time = 2_000;
-  db.call("garden.plant", { garden: "sun", id: "luna" });
-  const seedlings = { spacesLeft: 11, blooming: 0, flowers: { luna: "🌱" } };
-  assert.deepEqual(db.call("garden.view", "moon"), seedlings);
-  assert.deepEqual(db.call("garden.view", "sun"), seedlings);
+test("flowers bloom 5 s and perish 35 s after planting, each garden on its own schedule", async () => {
+  const db = await terrarium();
+  db.mutate("garden.plant", { garden: "moon", id: "luna" });
+  assert.equal(db.advance(1_000), 0);
+  db.mutate("garden.plant", { garden: "sun", id: "luna" });
+  assert.deepEqual(db.query("garden.view", "moon"), seedlings);
+  assert.deepEqual(db.query("garden.view", "sun"), seedlings);
 
-  db.time = 5_999;
-  assert.equal(db.maintenance(), null);
-  db.time = 6_000;
-  assert.equal(db.maintenance().id, 'bloom:["moon","luna"]');
-  assert.deepEqual(db.call("garden.view", "moon"), { spacesLeft: 11, blooming: 1, flowers: { luna: "🌼" } });
-  assert.deepEqual(db.call("garden.view", "sun"), seedlings);
-  assert.equal(db.maintenance(), null);
-  db.time = 7_000;
-  assert.equal(db.maintenance().id, 'bloom:["sun","luna"]');
-  assert.deepEqual(db.call("garden.view", "sun"), { spacesLeft: 11, blooming: 1, flowers: { luna: "🌼" } });
-  assert.equal(db.maintenance(), null, "committed timer is removed atomically with its bloom");
+  assert.equal(db.advance(3_999), 0);
+  assert.equal(db.advance(1), 1);
+  assert.deepEqual(db.query("garden.view", "moon"), blooming);
+  assert.deepEqual(db.query("garden.view", "sun"), seedlings);
+  assert.equal(db.advance(999), 0);
+  assert.equal(db.advance(1), 1);
+  assert.deepEqual(db.query("garden.view", "sun"), blooming);
 
-  db.time = 35_999;
-  assert.equal(db.maintenance(), null);
-  db.time = 36_000;
-  assert.equal(db.maintenance().id, 'perish:["moon","luna"]');
-  assert.deepEqual(db.call("garden.view", "moon"), { spacesLeft: 12, blooming: 0, flowers: {} });
-  assert.deepEqual(db.call("garden.view", "sun"), { spacesLeft: 11, blooming: 1, flowers: { luna: "🌼" } });
-  db.time = 37_000;
-  assert.equal(db.maintenance().id, 'perish:["sun","luna"]');
-  assert.deepEqual(db.call("garden.view", "sun"), { spacesLeft: 12, blooming: 0, flowers: {} });
-  assert.equal(db.maintenance(), null);
+  assert.equal(db.advance(28_999), 0);
+  assert.equal(db.advance(1), 1);
+  assert.deepEqual(db.query("garden.view", "moon"), empty);
+  assert.deepEqual(db.query("garden.view", "sun"), blooming);
+  assert.equal(db.advance(1_000), 1);
+  assert.deepEqual(db.query("garden.view", "sun"), empty);
+  assert.equal(db.maintain(), 0, "each timer left with the change it made");
 });
 
-test("the terrarium rejects bad plants without changing state and uses collision-free composite keys", () => {
-  const db = terrarium();
-  db.call("garden.plant", { garden: "moon/fern", id: "luna" });
-  db.call("garden.plant", { garden: "moon", id: "fern/luna" });
-  assert.deepEqual(db.call("garden.view", "moon/fern"), { spacesLeft: 11, blooming: 0, flowers: { luna: "🌱" } });
-  assert.deepEqual(db.call("garden.view", "moon"), { spacesLeft: 11, blooming: 0, flowers: { "fern/luna": "🌱" } });
-  const before = db.state;
-  assert.throws(() => db.call("garden.plant", { garden: "moon/fern", id: "luna" }), /already planted/);
-  for (const args of [null, {}, { garden: "moon", id: "" }, { garden: 42, id: "luna" }]) {
-    assert.throws(() => db.call("garden.plant", args), /Give your garden and seed a name/);
+test("a garden view streams every season as time advances", async () => {
+  const db = await terrarium();
+  const view = db.client.subscribe("garden.view", "moon");
+  try {
+    assert.deepEqual(await next(view), empty);
+    db.mutate("garden.plant", { garden: "moon", id: "luna" });
+    assert.deepEqual(await next(view), seedlings);
+    db.advance(5_000);
+    assert.deepEqual(await next(view), blooming);
+    db.advance(30_000);
+    assert.deepEqual(await next(view), empty);
+  } finally { await view.return(undefined); }
+});
+
+test("a full garden and a taken spot reject planting without side effects, and perishing frees space", async () => {
+  const db = await terrarium();
+  for (let index = 0; index < 12; index++) db.mutate("garden.plant", { garden: "moon", id: `seed-${index}` });
+  assert.equal(db.query("garden.view", "moon").spacesLeft, 0);
+  const full = db.data;
+  assert.equal(fails(() => db.mutate("garden.plant", { garden: "moon", id: "one-too-many" }), "GARDEN_FULL").failure?.message,
+    "Garden full! Wait for a flower to make room.");
+  assert.equal(fails(() => db.mutate("garden.plant", { garden: "moon", id: "seed-3" }), "SPOT_TAKEN").failure?.message,
+    "That spot is already planted.");
+  assert.deepEqual(db.data, full, "rejected seeds create neither timers nor records");
+  db.mutate("garden.plant", { garden: "sun", id: "luna" });
+  assert.equal(db.query("garden.view", "sun").spacesLeft, 11);
+
+  assert.equal(db.advance(34_999), 13, "every overdue bloom runs, no flower perishes yet");
+  assert.deepEqual([db.query("garden.view", "moon").spacesLeft, db.query("garden.view", "moon").blooming], [0, 12]);
+  db.now += 1;
+  assert.equal(db.maintain(1), 1);
+  assert.equal(db.query("garden.view", "moon").spacesLeft, 1);
+  db.mutate("garden.plant", { garden: "moon", id: "next-generation" });
+  assert.equal(db.query("garden.view", "moon").spacesLeft, 0);
+  assert.equal(db.advance(0), 12);
+  assert.deepEqual(db.query("garden.view", "moon"), { spacesLeft: 11, blooming: 0, flowers: { "next-generation": "🌱" } });
+  assert.deepEqual(db.query("garden.view", "sun"), empty);
+});
+
+test("plant validates its arguments and composite keys never collide across gardens", async () => {
+  const db = await terrarium();
+  db.mutate("garden.plant", { garden: "moon/fern", id: "luna" });
+  db.mutate("garden.plant", { garden: "moon", id: "fern/luna" });
+  assert.deepEqual(db.query("garden.view", "moon/fern"), seedlings);
+  assert.deepEqual(db.query("garden.view", "moon"), { spacesLeft: 11, blooming: 0, flowers: { "fern/luna": "🌱" } });
+  const before = db.data;
+  for (const args of [null, {}, { garden: "moon", id: "" }, { garden: 42, id: "luna" }, { garden: "moon", id: "x".repeat(65) }, { garden: "moon", id: "a", color: "red" }]) {
+    fails(() => db.mutate("garden.plant", args as never), "INVALID_ARGUMENT");
   }
-  assert.deepEqual(db.state, before);
+  fails(() => db.query("garden.view", ""), "INVALID_ARGUMENT");
+  assert.deepEqual(db.data, before);
 });
 
-test("garden capacity is scoped, enforced atomically, and freed when flowers perish", () => {
-  const db = terrarium();
-  for (let index = 0; index < 12; index++) {
-    db.call("garden.plant", { garden: "moon", id: `seed-${index}` });
+test("lifecycle callbacks stay private, and a replanted flower starts a fresh lifecycle", async () => {
+  const db = await terrarium();
+  for (const alias of ["internal.bloom", "internal.perish", "plant", "view"]) {
+    assert.throws(() => (db as unknown as TestDatabase).call(alias), { status: 404, code: "METHOD_NOT_FOUND" });
   }
-  assert.equal(db.call("garden.view", "moon").spacesLeft, 0);
-  const full = db.state;
-  assert.throws(() => db.call("garden.plant", { garden: "moon", id: "one-too-many" }), /Garden full/);
-  assert.deepEqual(db.state, full, "a rejected seed creates neither timers nor records");
-  db.call("garden.plant", { garden: "sun", id: "luna" });
-  assert.equal(db.call("garden.view", "sun").spacesLeft, 11);
-
-  db.time = 36_000;
-  for (let index = 0; index < 13; index++) db.maintenance(); // All overdue blooms first.
-  assert.equal(db.call("garden.view", "moon").spacesLeft, 0);
-  assert.equal(db.maintenance().id, 'perish:["moon","seed-0"]');
-  assert.equal(db.call("garden.view", "moon").spacesLeft, 1);
-  db.call("garden.plant", { garden: "moon", id: "next-generation" });
-  assert.equal(db.call("garden.view", "moon").spacesLeft, 0);
-});
-
-test("old lifecycle callbacks cannot bloom or delete a replanted name", () => {
-  const db = terrarium();
-  db.call("garden.plant", { garden: "moon", id: "luna" });
-  db.time = 36_000;
-  db.maintenance();
-  db.maintenance();
-  db.call("garden.plant", { garden: "moon", id: "luna" });
-  const replacement = db.state;
-  const old = { key: '["moon","luna"]', plantedAt: 1_000 };
-  db.internal("internal.bloom", old);
-  db.internal("internal.perish", old);
-  assert.deepEqual(db.state, replacement);
-  assert.deepEqual(db.call("garden.view", "moon"), { spacesLeft: 11, blooming: 0, flowers: { luna: "🌱" } });
-  db.time = 41_000;
-  db.maintenance();
-  assert.deepEqual(db.call("garden.view", "moon"), { spacesLeft: 11, blooming: 1, flowers: { luna: "🌼" } });
-  db.time = 71_000;
-  db.maintenance();
-  assert.deepEqual(db.call("garden.view", "moon"), { spacesLeft: 12, blooming: 0, flowers: {} });
+  assert.throws(() => (db as unknown as TestDatabase).mutate("garden.view", "moon"), { status: 422, code: "METHOD_KIND_MISMATCH" });
+  db.mutate("garden.plant", { garden: "moon", id: "luna" });
+  assert.equal(db.advance(35_000), 2);
+  assert.deepEqual(db.query("garden.view", "moon"), empty);
+  db.mutate("garden.plant", { garden: "moon", id: "luna" });
+  assert.equal(db.advance(4_999), 0);
+  assert.equal(db.advance(1), 1);
+  assert.deepEqual(db.query("garden.view", "moon"), blooming);
+  assert.equal(db.advance(29_999), 0);
+  assert.equal(db.advance(1), 1);
+  assert.deepEqual(db.query("garden.view", "moon"), empty);
 });
 
 test("homepage snippets are the complete downloadable terrarium and client", () => {
   const html = readFileSync(new URL("../docs/index.html", import.meta.url), "utf8");
   const snippets = [...html.matchAll(/<code class="language-ts">([\s\S]*?)<\/code>/g)].map(([, code]) =>
-    code.replace(/<\/?span\b[^>]*>/g, "").replaceAll("&lt;", "<").replaceAll("&gt;", ">")
-      .replaceAll("&quot;", '"').replaceAll("&amp;", "&"));
+    code.replace(/<\/?span\b[^>]*>/g, "").replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&quot;", '"').replaceAll("&amp;", "&"));
   assert.equal(snippets.length, 3);
   for (const [file, source] of [["terrarium.ts", snippets.slice(0, 2).join("\n\n")], ["terrarium-client.ts", snippets[2]]]) {
     assert.equal(source, readFileSync(new URL(`../docs/${file}`, import.meta.url), "utf8").trimEnd());
-    for (const match of source.matchAll(/\bfrom\s+["']([^"']+)["']/g)) {
-      assert.match(match[1], /^@flower-js\/sdk(?:\/scheduler)?$/);
-    }
+    // The two files download together, so the client may import the app's type.
+    for (const match of source.matchAll(/\bfrom\s+["']([^"']+)["']/g)) assert.match(match[1], /^(?:@flower-js\/sdk(?:\/scheduler)?|\.\/terrarium\.ts)$/);
   }
 });

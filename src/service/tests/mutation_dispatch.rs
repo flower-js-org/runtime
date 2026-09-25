@@ -205,7 +205,7 @@ async fn mutation_dispatch_rechecks_revocation_and_authorization_before_receipt_
     )
     .await
     .unwrap_err();
-    assert_eq!(error.1, "FORBIDDEN");
+    assert_eq!(error.code, "FORBIDDEN");
     metadata(
         &app,
         BTreeMap::from([("authorizationMethod".into(), Value::Null)]),
@@ -218,7 +218,7 @@ async fn mutation_dispatch_rechecks_revocation_and_authorization_before_receipt_
     )
     .await
     .unwrap_err();
-    assert_eq!(error.1, "METHOD_NOT_FOUND");
+    assert_eq!(error.code, "METHOD_NOT_FOUND");
     assert_eq!(
         app.consensus.read().await.unwrap().data["source:[\"records\",\"value\"]"],
         8
@@ -232,7 +232,7 @@ async fn mutation_dispatch_retains_cas_retry_and_input_validation_contracts() {
     let missing = call(State(app.clone()), Json(json!({"name":"change","args":2})))
         .await
         .unwrap_err();
-    assert_eq!(missing.1, "INPUT_INVALID");
+    assert_eq!(missing.code, "INPUT_INVALID");
     let input = json!({"name":"change","requestId":"once","expectedRevision":1,"args":2});
     let first = decode(call(State(app.clone()), Json(input.clone())).await.unwrap()).await;
     let duplicate = decode(call(State(app.clone()), Json(input.clone())).await.unwrap()).await;
@@ -242,13 +242,19 @@ async fn mutation_dispatch_retains_cas_retry_and_input_validation_contracts() {
     let mut changed = input.clone();
     changed["args"] = json!(3);
     assert_eq!(
-        call(State(app.clone()), Json(changed)).await.unwrap_err().1,
+        call(State(app.clone()), Json(changed))
+            .await
+            .unwrap_err()
+            .code,
         "REQUEST_ID_REUSED"
     );
     let mut stale = input;
     stale["requestId"] = json!("stale");
     assert_eq!(
-        call(State(app.clone()), Json(stale)).await.unwrap_err().1,
+        call(State(app.clone()), Json(stale))
+            .await
+            .unwrap_err()
+            .code,
         "REVISION_CONFLICT"
     );
     app.consensus.shutdown().await.unwrap();
@@ -257,7 +263,7 @@ async fn mutation_dispatch_retains_cas_retry_and_input_validation_contracts() {
 #[tokio::test]
 async fn mutation_dispatch_only_retries_exact_kind_rejections_and_preserves_forwarded_bodies() {
     let (_directory, app) = application(public_bundle()).await;
-    let mismatch = ApiError(
+    let mismatch = ApiError::new(
         StatusCode::UNPROCESSABLE_ENTITY,
         "METHOD_KIND_MISMATCH",
         "changed".into(),

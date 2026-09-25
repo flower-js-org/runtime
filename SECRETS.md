@@ -12,19 +12,17 @@ covers every declaration, overload, operator method and option.
 ## Declare; then grant
 
 ```ts
-import { define, key, mutation, query } from "@flower-js/sdk";
+import { define, key, mutation, query, v } from "@flower-js/sdk";
 import { jwt } from "@flower-js/sdk/crypto";
 
 const sessions = key("sessions", {
   algorithm: "Ed25519", usages: ["sign", "verify"],
 });
-const issue = mutation("session.issue", (ctx, user: string) => {
-  // Authenticate this caller and authorize issuance before exposing this method.
-  if (typeof user !== "string" || !user) throw new TypeError("user required");
-  return jwt.sign({ sub: user, iss: "shop", aud: "shop-api",
-    exp: ctx.now() / 1000 + 900 }, sessions);
-});
-const check = query("session.check", (_ctx, token: string) =>
+const issue = mutation("session.issue", { args: v.string({ min: 1 }) }, (ctx, user) =>
+  // Gate issuance with define({ auth }) and an access policy before exposing it.
+  jwt.sign({ sub: user, iss: "shop", aud: "shop-api",
+    exp: ctx.now() / 1000 + 900 }, sessions));
+const check = query("session.check", { args: v.string() }, (_ctx, token) =>
   jwt.verify(token, sessions, { issuer: "shop", audience: ["shop-api"] }).claims);
 
 export default define({ keys: [sessions], http: { issue, check } });
@@ -32,10 +30,33 @@ export default define({ keys: [sessions], http: { issue, check } });
 
 `key` returns a frozen `{kind:"key", name, algorithm, usages}` descriptor. It
 contains no material and grants nothing by itself. Include every descriptor in
-`define({keys})`; the operator must separately bind each alias to a stored key
-and approved usages. Native code checks the declaration, algorithm and binding
-on every use, even if JavaScript fabricates a descriptor. Duplicate declaration
-names and unsupported algorithm/usage combinations fail validation.
+`define({keys})` or a component's `keys`; the operator must separately bind
+each alias to a stored key and approved usages. Native code checks the
+declaration, algorithm and binding on every use, even if JavaScript fabricates
+a descriptor. Identical repeated declarations merge; conflicting declarations
+of one name and unsupported algorithm/usage combinations fail validation.
+
+A managed key can also authenticate callers. `jwtBearer` verifies bearer
+credentials natively in the application's authorization hook and adds its key to
+`define({keys})` automatically:
+
+```ts
+import { define, jwtBearer, key, query } from "@flower-js/sdk";
+
+const sessions = key("sessions", { algorithm: "Ed25519", usages: ["sign", "verify"] });
+const me = query("me", (ctx) => ctx.principal());
+
+export default define({
+  auth: { authenticate: jwtBearer({ key: sessions, issuer: "shop", audience: ["shop-api"] }) },
+  http: { me },
+});
+```
+
+The binding decides the verification algorithm; an optional `algorithms` list
+must agree with it. Missing credentials are anonymous, and an invalid token
+fails authorization with `UNAUTHENTICATED`. See the README's access section for
+per-method policy. Like any managed-key application, this one serves every
+query and watch from fresh quorum-backed state.
 
 A key catalog belongs to one logical database, with a generated immutable
 security domain. Named partitions have separate catalogs; no application or
@@ -152,8 +173,8 @@ Public-only imports, certificates, SEC1 EC PRIVATE KEY wrappers and encrypted
 PEM are not supported. Raw public-key JWT/NaCl APIs remain available. Standard
 canonical DER/parser-stack guards apply before parsing untrusted key material.
 
-`FlowerClient` exposes keyList, keyCacheStats, keyGenerate, keyImport, keyBind,
-keyUnbind, keyRotate, keyRetire, keyRevoke, keyDestroy and keyRewrap. Use `client.partition(id)` for a named
+`FlowerAdmin` exposes keyList, keyCacheStats, keyGenerate, keyImport, keyBind,
+keyUnbind, keyRotate, keyRetire, keyRevoke, keyDestroy and keyRewrap. Use `admin.partition(id)` for a named
 catalog. HTTP equivalents are POST `/admin/keys` and
 `/partitions/{id}/admin/keys`, with an operator bearer token. Requests use
 `operation: list|cache|generate|import|bind|unbind|rotate|retire|revoke|destroy|rewrap`; mutations
@@ -263,7 +284,7 @@ backups; it does not promise that an authorized server host cannot access them.
 
 ## Observe reuse
 
-Use `client.keyCacheStats()` or `flower key cache` against each node to inspect
+Use `admin.keyCacheStats()` or `flower key cache` against each node to inspect
 retained bytes, loads, evictions and coalesced preparation. These counters are
 node-local, reset on restart, and exclude invocation-local hits. Compare deltas
 during your actual workload alongside request latency and CPU use. To measure

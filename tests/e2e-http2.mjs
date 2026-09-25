@@ -1,15 +1,20 @@
 // Run after cargo build: node tests/e2e-http2.mjs
 // Raw Node HTTP/2 proves the server contract independently of the SDK adapter.
 import assert from "node:assert/strict";
+import { writeFile } from "node:fs/promises";
 import { connect, constants } from "node:http2";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
 import { LocalCluster } from "../bench/cluster.mjs";
 import { buildBundle } from "../sdk/bundle.ts";
+import { FlowerClient, FlowerError } from "../sdk/client.ts";
+import { createHttp2Transport } from "../sdk/http2.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const binary = process.env.E2E_FLOWER_BIN ? resolve(process.env.E2E_FLOWER_BIN) : join(root, "target/debug/flower");
 const cluster = new LocalCluster({ nodes: 3, binary });
+const transport = createHttp2Transport({ requestTimeoutMs: 15_000 });
 const sessions = new Set();
 const streamIds = new Set();
 let active = 0;
@@ -71,8 +76,50 @@ async function success(client, path, body, token) {
   return response.value;
 }
 
+// The orders example plus one method whose structured failure carries JSON details.
+function source() {
+  const sdk = JSON.stringify(join(root, "sdk/index.ts"));
+  const orders = JSON.stringify(join(root, "examples/orders.ts"));
+  return `import { define, fail, mutation, v } from ${sdk};
+import { orders, lines, subtotal, total, privateReset, createOrder, updateLine, updateShipping, getOrder } from ${orders};
+const reject = mutation("internal.order.reject", { args: v.object({ orderId: v.string({ min: 1 }), reason: v.string() }) }, (ctx, args) => {
+  ctx.set(orders, args.orderId, { shippingCents: 1 }); // Staged, then rolled back by the failure.
+  return fail("ORDER_REJECTED", "Order " + args.orderId + " rejected: " + args.reason, {
+    orderId: args.orderId, reasons: [args.reason, "🌻"], retryable: false, limits: { lines: 3, cents: 12.5 }, note: null,
+  });
+});
+export default define({
+  collections: [lines],
+  definitions: [subtotal, total, privateReset],
+  http: { "order.create": createOrder, "order.updateLine": updateLine, "order.updateShipping": updateShipping, "order.get": getOrder, "order.reject": reject },
+});`;
+}
+const rejection = { orderId: "h2-rejected", reason: "burnt crust" };
+const rejectionFailure = {
+  code: "ORDER_REJECTED", message: "Order h2-rejected rejected: burnt crust",
+  details: { orderId: "h2-rejected", reasons: ["burnt crust", "🌻"], retryable: false, limits: { lines: 3, cents: 12.5 }, note: null },
+};
+async function expectFailure(label, operation, failure) {
+  await assert.rejects(operation(), (error) => {
+    assert.ok(error instanceof FlowerError, `${label}: ${error}`);
+    assert.equal(error.status, 422, label);
+    assert.equal(error.code, "EVALUATION_FAILED", label);
+    assert.equal(error.message, `${failure.code}: ${failure.message}`, label);
+    assert.deepEqual(error.failure, failure, label);
+    return true;
+  });
+}
+async function identityRevision(url) {
+  const response = await fetch(url + "/v1/identity", {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal: AbortSignal.timeout(15_000),
+  });
+  assert.equal(response.status, 200);
+  return (await response.json()).revision;
+}
+
 const interrupt = () => {
   for (const client of sessions) client.destroy();
+  void transport.close();
   void cluster.close();
 };
 process.once("SIGINT", interrupt);
@@ -106,10 +153,19 @@ try {
   assert.equal((await request(client, "/raft/forward", probe, cluster.adminToken, peerHeaders)).status, 503,
     "internal forwarding never forwards recursively from a follower");
 
-  const bundle = await buildBundle(join(root, "examples/orders.ts"));
+  const fixture = join(cluster.directory, "orders-with-rejection.ts");
+  await writeFile(fixture, source());
+  const bundle = await buildBundle(fixture);
   const deployment = { requestId: "h2-deploy", bundle };
   assert.equal((await request(client, "/admin/deploy", deployment)).status, 401);
-  await success(client, "/admin/deploy", deployment, cluster.adminToken);
+  const deployed = await success(client, "/admin/deploy", deployment, cluster.adminToken);
+  // order.total is materialized for each order; its private backfill marker is
+  // one maintenance commit. Settle it so later revision equalities stay exact.
+  for (const deadline = Date.now() + 15_000; await identityRevision(seed.url) === deployed.revision;) {
+    assert.ok(Date.now() < deadline, "maintenance did not commit the materialization marker");
+    await delay(50);
+  }
+  assert.equal(await identityRevision(seed.url), deployed.revision + 1);
   await success(client, "/v1/call", {
     name: "order.create", requestId: "h2-create", args: {
       orderId: "h2-order", shippingCents: 5,
@@ -151,6 +207,33 @@ try {
   assert.equal((await request(client, "/v1/call", { ...calls[0], args: { lineId: "h2-line", quantity: 999 } })).status, 409);
   assert.equal((await request(client, "/v1/query", { name: "internal.order.read", args: "h2-order" })).status, 404);
 
+  // fail(code, message, details) reaches every caller intact: raw HTTP/2 streams,
+  // the SDK's HTTP/2 transport and HTTP/1.1, through the follower's forwarding
+  // to the leader as well as directly on the leader.
+  const rawRejection = await request(client, "/v1/mutate", { name: "order.reject", args: rejection, requestId: "h2-reject-raw" });
+  assert.equal(rawRejection.status, 422);
+  assert.deepEqual(rawRejection.value, { error: {
+    code: "EVALUATION_FAILED", message: `${rejectionFailure.code}: ${rejectionFailure.message}`, failure: rejectionFailure,
+  } });
+  const h2Client = new FlowerClient(seed.url, { fetch: transport.fetch });
+  const h1Client = new FlowerClient(seed.url);
+  const leaderClient = new FlowerClient(cluster.leader.url);
+  for (const [label, sdk] of [["HTTP/2 follower", h2Client], ["HTTP/1.1 follower", h1Client], ["HTTP/1.1 leader", leaderClient]]) {
+    await expectFailure(`${label} mutate`, () => sdk.mutate("order.reject", rejection, { requestId: `h2-reject-${label}` }), rejectionFailure);
+    await expectFailure(`${label} generic call`, () => sdk.call("order.reject", rejection), rejectionFailure);
+    await expectFailure(`${label} query`, () => sdk.query("order.get", rejection.orderId),
+      { code: "ORDER_NOT_FOUND", message: "Order h2-rejected does not exist" });
+    await assert.rejects(sdk.mutate("order.updateLine", { lineId: "h2-line", quantity: -1 }), (error) => {
+      assert.equal(error.status, 422);
+      assert.deepEqual(error.failure, { code: "INVALID_ARGUMENT", message: "quantity: must be at least 0", details: { path: ["quantity"] } });
+      return true;
+    });
+  }
+  const h2Failure = await request(client, "/v1/query", { name: "order.get", args: rejection.orderId });
+  assert.equal(h2Failure.status, 422);
+  assert.deepEqual(h2Failure.value.error.failure, { code: "ORDER_NOT_FOUND", message: "Order h2-rejected does not exist" },
+    "the staged write was rolled back with the failure");
+
   // The same application and listener continue to serve existing HTTP/1 clients.
   const h1 = await fetch(seed.url + "/v1/query", {
     method: "POST", headers: { "content-type": "application/json" },
@@ -180,13 +263,14 @@ try {
   });
   assert.equal(after.revision, current.revision + 1);
   assert.equal(after.value.total, 145);
-  console.log("PASS: HTTP/2 multiplexed methods through a follower, forwarding auth/identity/no loops, allowlist, receipts, HTTP/1, same-seed leader failover and durable replay");
+  console.log("PASS: HTTP/2 multiplexed methods through a follower, forwarding auth/identity/no loops, allowlist, receipts, structured failures over h2/HTTP/1 and forwarding, HTTP/1, same-seed leader failover and durable replay");
 } catch (error) {
   console.error(error);
   console.error(cluster.logTails());
   process.exitCode = 1;
 } finally {
   for (const client of sessions) client.destroy();
+  await transport.close();
   await cluster.close();
   process.removeListener("SIGINT", interrupt);
   process.removeListener("SIGTERM", interrupt);

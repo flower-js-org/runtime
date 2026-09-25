@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
-import { FlowerClient, FlowerError } from "../sdk/index.ts";
+import { FlowerAdmin, FlowerClient, FlowerError } from "../sdk/index.ts";
 import { buildBundle } from "../sdk/bundle.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -19,6 +19,7 @@ assert.ok(Number.isFinite(stageTimeout) && stageTimeout > 0, "E2E_TIMEOUT_MS mus
 const processes = [];
 const reservations = [];
 const adminToken = randomUUID();
+const admin = (node) => new FlowerAdmin(node.url, { adminToken });
 let directory;
 
 async function bounded(label, operation, timeout = stageTimeout) {
@@ -100,6 +101,17 @@ async function json(node, path) {
   return response.json();
 }
 
+/** The current committed revision, independent of any application method. */
+async function currentRevision(node) {
+  const response = await fetch(node.url + "/v1/identity", {
+    method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal: AbortSignal.timeout(2_000),
+  });
+  if (!response.ok) throw new Error(`Node ${node.id} identity: HTTP ${response.status} ${await response.text()}`);
+  const { revision } = await response.json();
+  assert.ok(Number.isSafeInteger(revision));
+  return revision;
+}
+
 async function waitLeader(nodes) {
   return until("elect a leader with a serving quorum", async () => {
     const observed = await Promise.all(nodes.filter((node) => !node.process.ended).map(async (node) => {
@@ -140,7 +152,19 @@ async function workerValue(client, name, args = null) {
 async function expectLostLease(client, claim) {
   await assert.rejects(bounded("reject obsolete lease completion", () => client.call("jobs.complete", {
     id: claim.id, owner: claim.owner, token: claim.token, result: "obsolete worker result",
-  })), (error) => error instanceof FlowerError && error.status === 422 && /LEASE_LOST/.test(error.message));
+  })), (error) => error instanceof FlowerError && error.status === 422 && error.code === "EVALUATION_FAILED" &&
+    error.failure?.code === "LEASE_LOST");
+}
+
+/** A method's structured failure reaches the caller intact, separately from the transport code. */
+async function expectFailure(label, operation, expected, { status = 422, code = "EVALUATION_FAILED" } = {}) {
+  let caught;
+  await assert.rejects(bounded(label, operation), (error) => { caught = error; return error instanceof FlowerError; });
+  assert.equal(caught.status, status, `${label}: ${caught.message}`);
+  assert.equal(caught.code, code, label);
+  if (typeof expected === "function") expected(caught.failure);
+  else assert.deepEqual(caught.failure, expected, label);
+  return caught;
 }
 
 async function restartAndCatchUp(node, leader) {
@@ -158,32 +182,37 @@ async function checkWorkers(nodes, initialLeader) {
 
   const entry = join(directory, "workers-with-orders.ts");
   await writeFile(entry, `
-import { define, query, mutation } from ${JSON.stringify(join(root, "sdk/index.ts"))};
-import { subtotal, total } from ${JSON.stringify(join(root, "examples/orders.ts"))};
-import application, { cache, jobs } from ${JSON.stringify(join(root, "examples/workers.ts"))};
-const definitions = application.definitions;
-const http = Object.fromEntries(Object.entries(application.http).map(([alias, entry]) => [alias, definitions[entry.name]]));
-const rawCache = query("internal.test.cacheRaw", (ctx, key: string) => ctx.get(cache.records, key));
-const rawJob = query("internal.test.jobRaw", (ctx, key: string) => ctx.get(jobs.records, key));
-const expiredCache = mutation("internal.test.expiredCache", (ctx, key: string) => {
-  cache.set(ctx, key, "expired value", {afterUpdateMs: 0});
-  return {stored: ctx.get(cache.records, key), visible: cache.get(ctx, key)};
+import { define, query, mutation, v } from ${JSON.stringify(join(root, "sdk/index.ts"))};
+import { lines, subtotal, total } from ${JSON.stringify(join(root, "examples/orders.ts"))};
+import { cache, jobs, setCache, getCache, entryCache } from ${JSON.stringify(join(root, "examples/workers.ts"))};
+const rawCache = query("internal.test.cacheRaw", { args: v.string({ min: 1 }) }, (ctx, key) => ctx.get(cache.records, key));
+const rawJob = query("internal.test.jobRaw", { args: v.string({ min: 1 }) }, (ctx, id) => ctx.get(jobs.records, ["", id]));
+const expiredCache = mutation("internal.test.expiredCache", { args: v.string({ min: 1 }) }, (ctx, key) => {
+  cache.set(ctx, key, "expired value", { afterUpdateMs: 0 });
+  return { stored: ctx.get(cache.records, key), visible: cache.get(ctx, key) };
 });
+// Keep the earlier order definitions, including maintained totals, beside the workers.
 export default define({
-  definitions: [subtotal, total, ...Object.values(definitions)],
-  http: {...http, "test.cache.raw": rawCache, "test.job.raw": rawJob, "test.cache.expired": expiredCache},
-  maintenance: definitions[application.maintenance.name],
+  uses: [jobs, cache],
+  collections: [lines],
+  definitions: [subtotal, total],
+  http: {
+    ...jobs.http("jobs", { methods: ["enqueue", "claim", "renew", "complete", "fail", "retry", "get", "ready", "stats"] }),
+    "cache.set": setCache, "cache.get": getCache, "cache.entry": entryCache,
+    "test.cache.raw": rawCache, "test.job.raw": rawJob, "test.cache.expired": expiredCache,
+  },
 });
 `);
   const bundle = await bounded("build worker and expiration module", () => buildBundle(entry));
-  await bounded("deploy worker and expiration module", () => new FlowerClient(leader.url, { adminToken })
+  await bounded("deploy worker and expiration module", () => admin(leader)
     .deploy(bundle, { requestId: "e2e-workers-deploy" }));
   let client = new FlowerClient(leader.url);
-  await expectNotExposed(client, "internal.workers.maintenance");
+  await expectNotExposed(client, "$flower.maintenance");
+  await expectNotExposed(client, "$flower.maintenance.error");
   await expectNotExposed(client, "maintenance");
   const spoof = await fetch(leader.url + "/v1/call", {
     method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ name: "jobs.get", args: "lease-job", requestId: "e2e-spoof-time", now: Number.MAX_SAFE_INTEGER }),
+    body: JSON.stringify({ name: "jobs.get", args: { id: "lease-job" }, requestId: "e2e-spoof-time", now: Number.MAX_SAFE_INTEGER }),
     signal: AbortSignal.timeout(2_000),
   });
   assert.equal(spoof.status, 400, "public callers cannot supply trusted time");
@@ -202,7 +231,7 @@ export default define({
   assert.deepEqual(first.payload, { task: "assemble" });
   assert.equal(contenders.filter((result) => result.value === null).length, 1);
   const expired = await until("lease becomes claimable after its deadline", async () => {
-    const job = await workerValue(client, "jobs.get", "lease-job");
+    const job = await workerValue(client, "jobs.get", { id: "lease-job" });
     return job.state === "pending" ? job : null;
   });
   assert.equal(expired.error.code, "LEASE_EXPIRED");
@@ -211,16 +240,19 @@ export default define({
   assert.ok(reclaimed.token > first.token, "reclaim issues a newer fencing token");
   assert.equal(reclaimed.attempt, 2);
   await expectLostLease(client, first);
+  // The queue retries with backoff by default; retry: false makes this failure final.
   const failed = await workerValue(client, "jobs.fail", {
     id: reclaimed.id, owner: reclaimed.owner, token: reclaimed.token,
-    error: { code: "RETRYABLE", message: "temporary worker failure" },
+    error: { code: "RETRYABLE", message: "temporary worker failure" }, retry: false,
   });
   assert.equal(failed.state, "failed");
   assert.equal(failed.lease, null);
   assert.equal(failed.error.code, "RETRYABLE");
-  assert.equal((await workerValue(client, "jobs.retry", first.id)).state, "pending");
+  await expectFailure("only failed jobs can be retried", () => client.call("jobs.retry", { id: "never-enqueued" }),
+    { code: "JOB_NOT_FAILED", message: "Only failed jobs can be retried" });
+  assert.equal((await workerValue(client, "jobs.retry", { id: first.id })).state, "pending");
   const retried = await workerValue(client, "jobs.claim", { owner: "worker-d", leaseMs: 1_000 });
-  assert.equal(retried.attempt, 3);
+  assert.equal(retried.attempt, 1, "a manual retry grants a fresh attempt budget");
   assert.ok(retried.token > reclaimed.token);
   const completed = await workerValue(client, "jobs.complete", {
     id: retried.id, owner: retried.owner, token: retried.token, result: { assembled: true },
@@ -230,6 +262,8 @@ export default define({
   assert.deepEqual(completed.result, { assembled: true });
   await expectLostLease(client, reclaimed);
   assert.equal(await workerValue(client, "jobs.claim", { owner: "empty-queue-worker" }), null);
+  await expectFailure("leases are bounded by the queue policy", () => client.call("jobs.claim", { owner: "greedy-worker", leaseMs: 60_000 }),
+    { code: "LEASE_TOO_LONG", message: "Leases last at most 30000 ms" });
 
   const byCreation = await workerValue(client, "cache.set", {
     key: "creation-ttl", value: "first", expiration: { afterCreationMs: 300 },
@@ -287,7 +321,7 @@ export default define({
   leader = await waitLeader(nodes);
   assert.notEqual(leader.id, workerLeader.id);
   client = new FlowerClient(leader.url);
-  await expectNotExposed(client, "internal.workers.maintenance");
+  await expectNotExposed(client, "$flower.maintenance");
   await until("replacement leader physically expires old cache storage", async () =>
     await workerValue(client, "test.cache.raw", "failover-ttl") === null);
   await until("replacement leader persists expired lease reclamation", async () =>
@@ -304,12 +338,12 @@ export default define({
   await stop(leader);
   leader = await waitLeader(nodes);
   client = new FlowerClient(leader.url);
-  assert.equal((await workerValue(client, "jobs.get", "failover-job")).result, "recovered");
+  assert.equal((await workerValue(client, "jobs.get", { id: "failover-job" })).result, "recovered");
   assert.equal(await workerValue(client, "cache.get", "no-expiry"), "durable");
   await workerValue(client, "cache.set", { key: "restart-ttl", value: "cleanup after restart", expiration: { afterUpdateMs: 150 } });
   await until("maintenance remains active after restart and another failover", async () =>
     await workerValue(client, "test.cache.raw", "restart-ttl") === null);
-  await expectNotExposed(client, "internal.workers.maintenance");
+  await expectNotExposed(client, "$flower.maintenance");
   console.log("Leases, fencing, TTL cleanup, and private maintenance survived leader loss, restart, and another failover.");
   return leader;
 }
@@ -320,20 +354,27 @@ async function checkScheduling(nodes, initialLeader) {
 
   const entry = join(directory, "scheduling-with-orders.ts");
   await writeFile(entry, `
-import { collection, define, derive, mutation, query } from ${JSON.stringify(join(root, "sdk/index.ts"))};
+import { collection, define, derive, fail, mutation, query, task, v } from ${JSON.stringify(join(root, "sdk/index.ts"))};
 import { scheduler } from ${JSON.stringify(join(root, "sdk/scheduler.ts"))};
-import { subtotal, total } from ${JSON.stringify(join(root, "examples/orders.ts"))};
-import application, { publishDocument } from ${JSON.stringify(join(root, "examples/scheduling.ts"))};
-const effects = collection("e2eScheduledEffects");
-const audit = collection("e2eScheduledAudit");
+import { lines, subtotal, total } from ${JSON.stringify(join(root, "examples/orders.ts"))};
+import {
+  cancelPublication, getDocument, publicationStatus, publishDocument, retryPublication, updateDocument,
+} from ${JSON.stringify(join(root, "examples/scheduling.ts"))};
+const effects = collection<any>("e2eScheduledEffects");
+const audit = collection<any>("e2eScheduledAudit");
+const probes = collection<any>("e2eTaskProbes");
 const effectView = derive("internal.e2e.effectView", (ctx, key: string) => {
   const effect = ctx.get(effects, key);
   return effect === null ? null : {...effect, doubled: effect.count * 2};
 });
-const fail = mutation("internal.e2e.scheduledFailure", (ctx, args: any) => {
+const failing = mutation("internal.e2e.scheduledFailure", (ctx, args: any) => {
   ctx.set(effects, args.key, {value: "partial write", count: 100});
   ctx.set(audit, args.key, {partial: true});
-  throw new Error("scheduled callback failed after writing");
+  return fail("CALLBACK_FAILED", "scheduled callback failed after writing", {key: args.key});
+});
+const crashing = mutation("internal.e2e.scheduledCrash", (ctx, args: any) => {
+  ctx.set(effects, args.key, {value: "partial write", count: 100});
+  throw new Error("scheduled callback crashed after writing");
 });
 const healthy = mutation("internal.e2e.scheduledHealthy", (ctx, args: any) => {
   const previous = ctx.get(effects, args.key);
@@ -341,35 +382,61 @@ const healthy = mutation("internal.e2e.scheduledHealthy", (ctx, args: any) => {
   ctx.set(audit, args.key, {committed: true});
   return null;
 });
-const timers = scheduler("publicationTimers", {publish: publishDocument, fail, healthy},
+// The same durable timer collection as examples/scheduling.ts, with more handlers.
+const timers = scheduler("publicationTimers", {publish: publishDocument, fail: failing, crash: crashing, healthy},
   {maxAttempts: 2, retryDelayMs: 50, maxRetryDelayMs: 100});
 const schedule = mutation("internal.e2e.schedule", (ctx, args: any) => {
   ctx.materialize(effectView, args.key);
   return timers.after(ctx, args.id, args.delayMs, args.handler, {key: args.key, value: args.value ?? null});
 });
-const status = query("internal.e2e.scheduleStatus", (ctx, id: string) => timers.get(ctx, id));
-const inspect = query("internal.e2e.effects", (ctx, key: string) => ({
+const status = query("internal.e2e.scheduleStatus", {args: v.string({min: 1})}, (ctx, id) => timers.get(ctx, id));
+const inspect = query("internal.e2e.effects", {args: v.string({min: 1})}, (ctx, key) => ({
   derived: ctx.get(effectView, key), audit: ctx.get(audit, key),
 }));
-const definitions = application.definitions;
-const oldMaintenance = application.maintenance;
-const retained = Object.values(definitions).filter(definition =>
-  definition.name !== oldMaintenance.name && definition.name !== oldMaintenance.onError?.name);
-const http = Object.fromEntries(Object.entries(application.http).map(([alias, method]) => [alias, definitions[method.name]]));
+// A task's onError receives the failed invocation's own code, message and details.
+const probe = task("e2e.failingTask", {
+  due: (ctx) => ctx.get(probes, "armed") === null ? null : 0,
+  run: (ctx) => fail("TASK_EXPLODED", "maintenance task failed on purpose", {armed: ctx.get(probes, "armed")}),
+  onError(ctx, failure) {
+    ctx.delete(probes, "armed");
+    ctx.set(probes, "seen", failure);
+    return null;
+  },
+});
+const arm = mutation("internal.e2e.armTask", {args: v.string({min: 1})}, (ctx, label) => {
+  ctx.set(probes, "armed", {label});
+  ctx.delete(probes, "seen");
+  return null;
+});
+const seen = query("internal.e2e.taskSeen", (ctx) => ctx.get(probes, "seen"));
 export default define({
-  definitions: [subtotal, total, effectView, fail, healthy, ...retained],
-  http: {...http, "test.schedule": schedule, "test.schedule.status": status, "test.effects": inspect},
-  maintenance: timers.maintenance,
+  uses: [timers],
+  collections: [lines],
+  definitions: [subtotal, total, effectView, failing, crashing, healthy],
+  tasks: [probe],
+  http: {
+    "documents.update": updateDocument, "documents.get": getDocument, "documents.cancelPublication": cancelPublication,
+    "documents.publication": publicationStatus, "documents.retryPublication": retryPublication,
+    "test.schedule": schedule, "test.schedule.status": status, "test.effects": inspect,
+    "test.task.arm": arm, "test.task.seen": seen,
+  },
 });
 `);
   const bundle = await bounded("build general scheduling module", () => buildBundle(entry));
-  await bounded("deploy general scheduling module", () => new FlowerClient(leader.url, { adminToken })
+  await bounded("deploy general scheduling module", () => admin(leader)
     .deploy(bundle, { requestId: "e2e-scheduling-deploy" }));
   let client = new FlowerClient(leader.url);
-  for (const name of ["internal.scheduler.publicationTimers.run", "internal.scheduler.publicationTimers.onError",
-    "internal.documents.publish", "internal.e2e.scheduledFailure", "internal.e2e.scheduledHealthy"]) {
+  for (const name of ["$flower.maintenance", "$flower.maintenance.error", "internal.documents.publish",
+    "internal.e2e.scheduledFailure", "internal.e2e.scheduledCrash", "internal.e2e.scheduledHealthy"]) {
     await expectNotExposed(client, name);
   }
+  await workerValue(client, "test.task.arm", "first");
+  const observed = await until("a task's onError receives its structured failure", async () =>
+    await workerValue(client, "test.task.seen"));
+  assert.deepEqual(observed.error, {
+    code: "TASK_EXPLODED", message: "maintenance task failed on purpose", details: { armed: { label: "first" } },
+  }, "maintenance onError sees the real failure instead of a generic code");
+  assert.ok(Number.isSafeInteger(observed.failedAt));
 
   const updated = await workerValue(client, "documents.update", {
     id: "delayed-document", text: "publish after this update", publishAfterMs: 200,
@@ -425,8 +492,8 @@ export default define({
     return timer?.state === "failed" ? timer : null;
   });
   assert.equal(failed.attempts, 2);
-  assert.equal(failed.error.code, "MAINTENANCE_FAILED");
-  assert.match(failed.error.message, /scheduled callback failed after writing/);
+  assert.deepEqual(failed.error, { code: "CALLBACK_FAILED", message: "scheduled callback failed after writing", details: { key: "rolled-back" } },
+    "the scheduler's onError records the callback's own failure");
   assert.deepEqual(await workerValue(client, "test.effects", "rolled-back"), { derived: null, audit: null },
     "all callback writes roll back before failure bookkeeping commits");
   assert.equal(await workerValue(client, "test.schedule.status", "healthy-callback"), null);
@@ -448,7 +515,7 @@ export default define({
   assert.equal(afterFailover.text, "timer survives the leader");
   assert.ok(afterFailover.publishedAt >= durableTimer.timer.dueAt);
   assert.equal(await workerValue(client, "documents.publication", "failover-document"), null);
-  await expectNotExposed(client, "internal.scheduler.publicationTimers.onError");
+  await expectNotExposed(client, "$flower.maintenance.error");
 
   await restartAndCatchUp(schedulerLeader, leader);
   await stop(leader);
@@ -459,13 +526,17 @@ export default define({
   await until("durable scheduler remains active after restart and another failover", async () =>
     (await workerValue(client, "documents.get", "restart-document")).status === "published");
   await workerValue(client, "test.schedule", {
-    id: "post-restart-failure", delayMs: 0, handler: "fail", key: "restart-rollback", value: null,
+    id: "post-restart-failure", delayMs: 0, handler: "crash", key: "restart-rollback", value: null,
   });
-  await until("private failure handler persists through restart and failover", async () =>
-    (await workerValue(client, "test.schedule.status", "post-restart-failure"))?.state === "failed");
+  const crashed = await until("private failure handler persists through restart and failover", async () => {
+    const timer = await workerValue(client, "test.schedule.status", "post-restart-failure");
+    return timer?.state === "failed" ? timer : null;
+  });
+  assert.equal(crashed.error.code, "COMPUTE_ERROR", "an uncoded exception reaches onError as COMPUTE_ERROR");
+  assert.match(crashed.error.message, /scheduled callback crashed after writing/);
   assert.deepEqual(await workerValue(client, "test.effects", "restart-rollback"), { derived: null, audit: null });
-  await expectNotExposed(client, "internal.scheduler.publicationTimers.run");
-  await expectNotExposed(client, "internal.scheduler.publicationTimers.onError");
+  await expectNotExposed(client, "$flower.maintenance");
+  await expectNotExposed(client, "$flower.maintenance.error");
   console.log("General scheduled actions and private failure handling survived leader loss, restart, and another failover.");
 }
 
@@ -490,7 +561,7 @@ async function main() {
     });
     assert.equal(response.status, 401, `${path} requires the admin credential`);
   }
-  await bounded("cluster initialization", () => new FlowerClient(nodes[0].url, { adminToken })
+  await bounded("cluster initialization", () => admin(nodes[0])
     .initialize(Object.fromEntries(nodes.map((node) => [String(node.id), node.address]))));
   let leader = await waitLeader(nodes);
   let client = new FlowerClient(leader.url);
@@ -504,15 +575,22 @@ async function main() {
     assert.equal(response.status, 404, `${path} must not expose raw database access`);
   }
   const bundle = await bounded("build TypeScript module", () => buildBundle(join(root, "examples/orders.ts")));
-  const deployed = await bounded("deploy TypeScript bundle", () => new FlowerClient(leader.url, { adminToken })
+  const deployed = await bounded("deploy TypeScript bundle", () => admin(leader)
     .deploy(bundle, { requestId: "e2e-deploy" }));
   assert.equal(deployed.revision, 1);
+  // order.total declares materialize: { each: orders }. Private maintenance
+  // commits its one-time backfill marker; settle it so CAS revisions are exact.
+  const settled = await until("maintenance commits the materialization backfill", async () => {
+    const revision = await currentRevision(leader);
+    return revision > deployed.revision && revision;
+  });
+  assert.equal(settled, deployed.revision + 1, "the backfill marker is one private maintenance commit");
 
   const initialArgs = JSON.parse(await readFile(join(root, "examples/orders.create.json"), "utf8"));
-  const initialOptions = { requestId: "e2e-initial-order", expectedRevision: deployed.revision };
+  const initialOptions = { requestId: "e2e-initial-order", expectedRevision: settled };
   const initial = await bounded("generic call dispatches mutation", () => client.call("order.create", initialArgs, initialOptions));
   assert.equal(initial.duplicate, false);
-  assert.equal(initial.revision, 2);
+  assert.equal(initial.revision, settled + 1);
   assertOrder(initial, 3200, 500); // Mutation return reads its own staged sources and derived values.
   const beforeUpdate = await bounded("generic call dispatches query", () => client.call("order.get", "order-42"));
   assertOrder(beforeUpdate, 3200, 500);
@@ -523,7 +601,7 @@ async function main() {
   const updateArgs = JSON.parse(await readFile(join(root, "examples/orders.update.json"), "utf8"));
   const updateOptions = { requestId: "e2e-update-lines", expectedRevision: initial.revision };
   const updated = await bounded("update line method", () => client.mutate("order.updateLine", updateArgs, updateOptions));
-  assert.equal(updated.revision, 3);
+  assert.equal(updated.revision, initial.revision + 1);
   assertOrder(updated, 4600, 500);
   const watchedUpdate = (await bounded("watch updated order", () => watcher.next())).value;
   assertOrder(watchedUpdate, 4600, 500);
@@ -559,24 +637,44 @@ async function main() {
     ["internal.order.reset", "order-42"],
     ["order.total", "order-42"],
   ]) await expectNotExposed(client, name, args);
-  // The handler stages the order before validating its lines; an error must roll it all back.
-  await assert.rejects(bounded("rollback throwing method", () => client.mutate("order.create", {
-    orderId: "failed-order", shippingCents: 100, lines: [{ id: "bad-line", quantity: -1, unitCents: 100 }],
-  })), (error) => error instanceof FlowerError && error.status === 422);
-  await assert.rejects(bounded("rolled-back order is absent", () => client.query("order.get", "failed-order")),
-    (error) => error instanceof FlowerError && error.status === 422);
+  // The handler stages the order and a fresh line before finding a duplicate one;
+  // its structured failure must reach the caller and roll back every staged write.
+  const staged = {
+    orderId: "failed-order", shippingCents: 100,
+    lines: [{ id: "fresh-line", quantity: 1, unitCents: 100 }, { id: "line-1", quantity: 1, unitCents: 100 }],
+  };
+  const rolledBack = await expectFailure("rollback failing method", () => client.mutate("order.create", staged),
+    { code: "LINE_EXISTS", message: "Line line-1 already exists" });
+  assert.equal(rolledBack.message, "LINE_EXISTS: Line line-1 already exists", "the transport message keeps the method code");
+  await expectFailure("rolled-back order is absent", () => client.query("order.get", "failed-order"),
+    { code: "ORDER_NOT_FOUND", message: "Order failed-order does not exist" });
+  // Argument schemas reject before the handler runs, with the offending path as details.
+  await expectFailure("argument schema failure", () => client.call("order.create", {
+    orderId: "invalid-order", shippingCents: 100, lines: [{ id: "bad-line", quantity: -1, unitCents: 100 }],
+  }, { requestId: "e2e-invalid-arguments" }), (failure) => {
+    assert.equal(failure.code, "INVALID_ARGUMENT");
+    assert.equal(failure.message, "lines[0].quantity: must be at least 0");
+    assert.deepEqual(failure.details, { path: ["lines", 0, "quantity"] });
+  });
+  // A follower forwards the write to the leader and relays the leader's failure intact.
+  const follower = nodes.find((node) => node !== leader && !node.process.ended);
+  await expectFailure("forwarded failure through a follower", () => new FlowerClient(follower.url).mutate("order.create", staged,
+    { requestId: "e2e-forwarded-failure" }), { code: "LINE_EXISTS", message: "Line line-1 already exists" });
+  await expectFailure("follower query failure", () => new FlowerClient(follower.url).query("order.get", "failed-order"),
+    { code: "ORDER_NOT_FOUND", message: "Order failed-order does not exist" });
   const afterRejected = await bounded("query after rejected methods", () => client.query("order.get", "order-42"));
   assert.equal(afterRejected.revision, updated.revision);
   assert.deepEqual(afterRejected, afterUpdate);
-  console.log("Code-owned HTTP aliases, generic dispatch, reactive reads, query watch, rollback, and deduplication passed.");
+  console.log("Code-owned HTTP aliases, generic dispatch, reactive reads, query watch, rollback, structured failures, and deduplication passed.");
 
   // Change only the public exposure in a new deployed TS module. Keep all of the
   // original definitions, including the formerly public method and private one.
   const exposureEntry = join(directory, "alternate-exposure.ts");
   await writeFile(exposureEntry, `
 import { define } from ${JSON.stringify(join(root, "sdk/index.ts"))};
-import { subtotal, total, privateReset, getOrder, createOrder, updateLine, updateShipping } from ${JSON.stringify(join(root, "examples/orders.ts"))};
+import { lines, subtotal, total, privateReset, getOrder, createOrder, updateLine, updateShipping } from ${JSON.stringify(join(root, "examples/orders.ts"))};
 export default define({
+  collections: [lines],
   definitions: [subtotal, total, privateReset, getOrder, createOrder, updateLine, updateShipping],
   http: {
     "orders.inspect": getOrder,
@@ -587,7 +685,7 @@ export default define({
 });
 `);
   const exposureBundle = await bounded("build changed HTTP exposure", () => buildBundle(exposureEntry));
-  const exposure = await bounded("deploy changed HTTP exposure", () => new FlowerClient(leader.url, { adminToken })
+  const exposure = await bounded("deploy changed HTTP exposure", () => admin(leader)
     .deploy(exposureBundle, { requestId: "e2e-change-exposure" }));
   assert.equal(exposure.revision, updated.revision + 1);
   await expectNotExposed(client, "order.get", "order-42");
@@ -607,7 +705,7 @@ export default define({
     javascript: invalidJavascript,
     hash: createHash("sha256").update(invalidJavascript).digest("hex"),
   };
-  await assert.rejects(bounded("reject invalid HTTP registry deployment", () => new FlowerClient(leader.url, { adminToken })
+  await assert.rejects(bounded("reject invalid HTTP registry deployment", () => admin(leader)
     .deploy(invalidBundle, { requestId: "e2e-invalid-registry" })),
   (error) => error instanceof FlowerError && error.status === 422);
   const afterInvalid = await bounded("prior code and registry survive rejected deployment", () => client.call("orders.inspect", "order-42"));

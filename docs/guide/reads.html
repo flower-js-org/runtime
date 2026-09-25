@@ -13,76 +13,78 @@
 <title>Reads &amp; live queries · Flower</title>
 <link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
 <link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
-<link rel="stylesheet" href="../site.css?v=eb05c8aa5c04">
+<link rel="stylesheet" href="../site.css?v=fd4ad318734f">
 <script src="../site.js?v=3184f0662fa5" defer></script>
 </head>
 <body class="doc-page">
 <a class="skip-link" href="#main">Skip to content</a>
 <div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/" aria-current="page">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/flower-js-org/runtime">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
 <div class="documentation">
-<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/methods.html"><span>04</span>Methods & retries</a></li><li class="current"><a href="#top" aria-current="page"><span>05</span>Reads & live queries</a><ol id="section-nav" aria-label="On this page"><li><a href="#replica-reads">Spread reads across replicas</a></li><li><a href="#choose-replica-local-reads-in">Replica-local reads</a></li><li><a href="#use-http-2-from-node">Use HTTP/2 from Node.js</a></li><li><a href="#live-queries">Watch live queries</a></li><li><a href="#errors">Common errors</a></li></ol></li><li><a href="../guide/timers.html"><span>06</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>07</span>Leases & expiry</a></li><li><a href="../guide/workers.html"><span>08</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>09</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>10</span>Crypto & tokens</a></li><li><a href="../guide/deployments.html"><span>11</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/definitions.html"><span>03</span>Contexts & definitions</a></li><li><a href="../reference/client.html"><span>04</span>Client & transports</a></li><li><a href="../reference/time.html"><span>05</span>Expiry, leases & timers</a></li><li><a href="../reference/crypto.html"><span>06</span>NaCl & JWT</a></li><li><a href="../reference/keys.html"><span>07</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>08</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>09</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>10</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>11</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>12</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
+<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/components.html"><span>04</span>Components & tasks</a></li><li><a href="../guide/methods.html"><span>05</span>Methods & retries</a></li><li><a href="../guide/access.html"><span>06</span>Access control</a></li><li class="current"><a href="#top" aria-current="page"><span>07</span>Reads & live queries</a><ol id="section-nav" aria-label="On this page"><li><a href="#replica-reads">Spread reads across replicas</a></li><li><a href="#choose-replica-local-reads-in">Replica-local reads</a></li><li><a href="#use-http-2-from-node">Use HTTP/2 from Node.js</a></li><li><a href="#live-queries">Watch live queries</a></li></ol></li><li><a href="../guide/timers.html"><span>08</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>09</span>Queues & expiry</a></li><li><a href="../guide/workers.html"><span>10</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>11</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>12</span>Crypto & tokens</a></li><li><a href="../guide/testing.html"><span>13</span>Testing</a></li><li><a href="../guide/deployments.html"><span>14</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/schemas.html"><span>03</span>Schemas & failures</a></li><li><a href="../reference/definitions.html"><span>04</span>Contexts & definitions</a></li><li><a href="../reference/components.html"><span>05</span>Components & tasks</a></li><li><a href="../reference/client.html"><span>06</span>Client & transports</a></li><li><a href="../reference/time.html"><span>07</span>Queues, expiry & timers</a></li><li><a href="../reference/workers.html"><span>08</span>External values & workers</a></li><li><a href="../reference/testing.html"><span>09</span>Testing</a></li><li><a href="../reference/crypto.html"><span>10</span>NaCl & JWT</a></li><li><a href="../reference/keys.html"><span>11</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>12</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>13</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>14</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>15</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>16</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
 <main id="main" tabindex="-1">
-<header class="page-intro" id="top"><p class="eyebrow">Guide · 05</p><h1>Read from any replica.</h1><p class="lead">Spread queries across replicas, choose between fresh and fast reads, and watch values change live.</p></header>
+<header class="page-intro" id="top"><p class="eyebrow">Guide · 07</p><h1>Read from any replica.</h1><p class="lead">Spread queries across replicas, choose between fresh and fast reads, and watch values change live.</p></header>
 <div class="page-content">
 <!-- content:start -->
 <section id="replica-reads">
 <h2>Spread reads across replicas</h2>
 <p>Give the client a list of <code>queryUrls</code> to run queries and watches on every node. Reads stay fresh by default: each one is confirmed with a quorum, so it needs a working majority.</p>
-<div class="code-block"><div class="code-head"><span>client-replicas.ts · checkout root</span><button type="button" class="copy-button" aria-label="Copy client-replicas.ts">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { FlowerClient } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
+<div class="code-block"><div class="code-head"><span>client-replicas.ts</span><button type="button" class="copy-button" aria-label="Copy client-replicas.ts">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { FlowerClient } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
+<span class="kw">import</span> <span class="kw">type</span> counter <span class="kw">from</span> <span class="str">"./counter.ts"</span>;
 
-<span class="kw">const</span> client = <span class="kw">new</span> FlowerClient(<span class="str">"http://127.0.0.1:7101"</span>, {
+<span class="kw">const</span> client = <span class="kw">new</span> FlowerClient&lt;<span class="kw">typeof</span> counter&gt;(<span class="str">"http://127.0.0.1:7101"</span>, {
   queryUrls: [
     <span class="str">"http://127.0.0.1:7101"</span>,
     <span class="str">"http://127.0.0.1:7102"</span>,
     <span class="str">"http://127.0.0.1:7103"</span>,
   ],
 });
-<span class="kw">const</span> [first, second] = <span class="kw">await</span> Promise.all([
+<span class="kw">const</span> [visits, clicks] = <span class="kw">await</span> Promise.all([
   client.query(<span class="str">"counter.get"</span>, <span class="str">"visits"</span>),
   client.query(<span class="str">"counter.get"</span>, <span class="str">"clicks"</span>),
 ]);
-<span class="kw">const</span> updates = client.watch(<span class="str">"counter.get"</span>, <span class="str">"visits"</span>);</code></pre></div>
+console.log(visits.value.count, clicks.value.count);</code></pre></div>
 <ul>
-<li>Queries and new watches rotate through <code>queryUrls</code>. A watch stays on the node it started on.</li>
+<li>Queries and new watches rotate through <code>queryUrls</code>. A watch stays on the node it started on; <code>subscribe</code> moves to the next one when it reconnects.</li>
 <li>Mutations, deploys and <code>call()</code> use the main URL. Any node works; it forwards writes to the leader.</li>
-<li>The client doesn't retry, discover nodes or change consistency for you.</li>
+<li>The client retries only when you pass <code>retry</code>. It doesn't discover nodes or change consistency.</li>
 </ul>
 <details><summary>Query result caching</summary><div class="details-body">
-<p>Flower reuses a query's result while the records, indexes and code it read are unchanged. This never makes a read staler: fresh queries still confirm with a quorum first, and authorization still runs on every request. Queries that read <code>ctx.now()</code> are never cached.</p>
+<p>Flower reuses a query's result while the records, indexes and code it read are unchanged. This never makes a read staler: fresh queries still confirm with a quorum first, and access checks still run on every request. Queries that read <code>ctx.now()</code> are never cached.</p>
 <ul>
 <li><code>FLOWER_QUERY_CACHE_BYTES</code>: cache size per logical database. Default 16 MiB; 0 disables it.</li>
 <li><code>FLOWER_QUERY_FLIGHT_BYTES</code>: memory for sharing identical concurrent reads. Default 512 KiB; 0 disables it.</li>
-<li><code>FLOWER_QUERY_WORKERS</code>: bounds fast cache lookups and authorization callbacks. Heavy query work shares <code>FLOWER_PREPARATION_WORKERS</code> with writes and watches.</li>
+<li><code>FLOWER_QUERY_WORKERS</code>: bounds fast cache lookups and access checks. Heavy query work shares <code>FLOWER_PREPARATION_WORKERS</code> with writes and watches.</li>
 </ul>
 </div></details>
 </section>
 <section id="choose-replica-local-reads-in" data-toc="Replica-local reads">
 <h2>Allow stale reads (opt in)</h2>
 <p>If a query can tolerate lag, declare it <code>replica-local</code>. It then reads the node's own data without asking a quorum, and keeps working during a network partition.</p>
-<div class="code-block"><div class="code-head"><span>Application · optional local read</span><button type="button" class="copy-button" aria-label="Copy optional local read">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">const</span> getLocal = query(<span class="str">"internal.counter.local"</span>, (ctx, id: <span class="kw">string</span>) =&gt;
-  ctx.get(counters, id) ?? <span class="num">0</span>,
-  { consistency: <span class="str">"replica-local"</span> },
-);
-<span class="comment">// Include "counter.local": getLocal in define({ http: ... }).</span></code></pre></div>
+<div class="code-block"><div class="code-head"><span>Application · optional local read</span><button type="button" class="copy-button" aria-label="Copy optional local read">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">const</span> getLocal = query(<span class="str">"internal.counter.local"</span>, {
+  args: v.<span class="kw">string</span>({ min: <span class="num">1</span> }), consistency: <span class="str">"replica-local"</span>,
+}, (ctx, id) =&gt; ctx.get(counters, id) ?? <span class="num">0</span>);
+<span class="comment">// Expose it: define({ http: { "counter.local": getLocal } }).</span></code></pre></div>
 <div class="note"><span class="note-mark" aria-hidden="true">↳</span><p><strong>Replica-local reads can be stale, with no bound.</strong> Data, code and the list of public methods may all lag. Two calls on different nodes can return revisions that go backwards.</p></div>
 <ul>
 <li>The policy lives in the application. HTTP callers can't change it.</li>
 <li>Only queries can declare it. Leave it out, or use <code>linearizable</code>, for fresh reads.</li>
+<li>Apps with <a href="access.html">access checks</a> or managed keys read fresh anyway.</li>
 <li>A restarted node may need a quorum once before it serves these reads.</li>
 </ul>
 </section>
 <section id="use-http-2-from-node">
 <h2>Use HTTP/2 from Node.js</h2>
 <p>Use the HTTP/2 transport to send many requests over one connection per node.</p>
-<div class="code-block"><div class="code-head"><span>client-h2.ts · checkout root</span><button type="button" class="copy-button" aria-label="Copy client-h2.ts · checkout root">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { FlowerClient } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
+<div class="code-block"><div class="code-head"><span>client-h2.ts</span><button type="button" class="copy-button" aria-label="Copy client-h2.ts">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { FlowerClient } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
 <span class="kw">import</span> { createHttp2Transport } <span class="kw">from</span> <span class="str">"@flower-js/sdk/http2"</span>;
+<span class="kw">import</span> <span class="kw">type</span> counter <span class="kw">from</span> <span class="str">"./counter.ts"</span>;
 
 <span class="kw">const</span> transport = createHttp2Transport({ requestTimeoutMs: <span class="num">10_000</span> });
-<span class="kw">const</span> client = <span class="kw">new</span> FlowerClient(<span class="str">"http://127.0.0.1:7101"</span>, {
+<span class="kw">const</span> client = <span class="kw">new</span> FlowerClient&lt;<span class="kw">typeof</span> counter&gt;(<span class="str">"http://127.0.0.1:7101"</span>, {
   fetch: transport.fetch,
 });
 <span class="kw">try</span> {
-  console.log(<span class="kw">await</span> client.call(<span class="str">"counter.increment"</span>, <span class="str">"visits"</span>, {
+  console.log(<span class="kw">await</span> client.mutate(<span class="str">"counter.increment"</span>, { id: <span class="str">"visits"</span>, by: <span class="num">1</span> }, {
     requestId: <span class="str">"visit-over-h2-001"</span>,
     signal: AbortSignal.timeout(<span class="num">5_000</span>),
   }));
@@ -93,7 +95,7 @@
 <li>Import it from <code>@flower-js/sdk/http2</code>. It works in Node.js only.</li>
 <li>Options and defaults: <code>requestTimeoutMs</code> (30 s), <code>idleTimeoutMs</code> (30 s), <code>maxRequestBytes</code> (8 MiB), <code>maxResponseBytes</code> (64 MiB), <code>maxSessions</code> (16).</li>
 <li>For watches, the timeout covers only the response headers. Your signal or <code>transport.close()</code> ends the stream.</li>
-<li>Close the transport when done; that cancels open streams. It never retries, redirects or downgrades.</li>
+<li>Close the transport when done; that cancels open streams. It never redirects or downgrades.</li>
 <li><strong>Cancelling doesn't undo a mutation that already committed.</strong> After an uncertain result, retry with the same request ID.</li>
 </ul>
 <p>The server port speaks HTTP/1.1 and cleartext HTTP/2 (<code>h2c</code>). To check it with curl:</p>
@@ -102,44 +104,45 @@
 </section>
 <section id="live-queries">
 <h2>Watch live queries</h2>
-<p>Use <code>client.watch</code> to get a query's value now and again every time it changes.</p>
+<p><code>client.subscribe</code> gives you a query's value now and again every time it changes, and keeps going through disconnects.</p>
 <div class="code-block"><div class="code-head"><span>One query, kept current</span><button type="button" class="copy-button" aria-label="Copy One query, kept current">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">const</span> stop = <span class="kw">new</span> AbortController();
-<span class="kw">for</span> <span class="kw">await</span> (<span class="kw">const</span> { revision, value } <span class="kw">of</span> client.watch(<span class="str">"counter.get"</span>, <span class="str">"visits"</span>, {
+<span class="kw">for</span> <span class="kw">await</span> (<span class="kw">const</span> { value, revision, reset } <span class="kw">of</span> client.subscribe(<span class="str">"counter.get"</span>, <span class="str">"visits"</span>, {
   signal: stop.signal,
 })) {
-  console.log(revision, value);
+  <span class="kw">if</span> (reset) console.log(<span class="str">"fresh snapshot"</span>);
+  console.log(revision, value.count);
   <span class="comment">// Break the loop or call stop.abort() to disconnect.</span>
-}</code></pre></div>
+}
+
+<span class="kw">const</span> { value } = <span class="kw">await</span> client.waitUntil(<span class="str">"counter.get"</span>, <span class="str">"visits"</span>, (counter) =&gt; counter.count &gt;= <span class="num">10</span>);</code></pre></div>
 <ul>
 <li>The first update is the full value. After that the server sends only changes, and the SDK rebuilds the value for you.</li>
-<li>Watches may skip intermediate values when changes come fast. Use a watch for current state, not as an event log.</li>
-<li>Nothing is sent if the value doesn't change.</li>
-<li>Each subscriber is authorized on its own, and the watch closes if its credentials expire or are revoked.</li>
-<li>A deploy or principal change ends the stream with <code>WATCH_SCOPE_CHANGED</code>.</li>
-<li>Streams don't reconnect themselves. After an error, start a new watch on any node; it begins with a fresh full value. There is no replay of missed events.</li>
+<li>Updates may skip intermediate values when changes come fast. Use them for current state, not as an event log. Nothing is sent if the value doesn't change.</li>
+<li>After a disconnect, a stall (no bytes for 45 s; the server sends a keepalive every 15 s) or a transient error, <code>subscribe</code> reconnects with backoff and marks the next value <code>reset: true</code>. Other errors end the loop.</li>
+<li>Pass <code>monotonic: true</code> to skip values older than one already delivered, such as from a lagging replica.</li>
+<li><code>waitUntil</code> resolves with the first value that passes your test, reconnecting as needed.</li>
+<li>Each subscriber is authorized on its own, and the stream closes if its credentials expire or are revoked.</li>
+<li>A deploy or principal change ends a stream with <code>WATCH_SCOPE_CHANGED</code>. <code>subscribe</code> reconnects and delivers a fresh snapshot.</li>
 <li>Fresh watches recheck on a timer as well as on commits: <code>FLOWER_WATCH_REFRESH_MS</code>, default 250 ms.</li>
 <li>A client that can't accept an update within the send timeout (5 s by default) is disconnected.</li>
 </ul>
-<p>Client-side size limits, on both <code>watch</code> and <code>watchDeltas</code>. Raise them if your server allows larger results:</p>
+<p><code>client.watch</code> is the single-connection version: it yields <code>{ revision, value }</code> and ends at the first disconnect. <code>watchPoll(alias, args, { intervalMs, signal })</code> polls instead.</p>
+<p>Client-side size limits apply to <code>subscribe</code>, <code>watch</code> and <code>watchDeltas</code>. Raise them if your server allows larger results:</p>
 <ul>
 <li><code>maxValueBytes</code>: 16 MiB</li>
 <li><code>maxEventBytes</code>: 17 MiB</li>
 <li><code>maxPatchOperations</code>: 256</li>
 </ul>
 <p>The CLI takes the same limits: <code>watch --max-value-bytes 33554432 --max-event-bytes 34603008 --max-patch-operations 512</code>.</p>
-<p>Use <code>watchPoll(query, args, {intervalMs, signal})</code> if you want polling instead.</p>
 <details><summary>Raw deltas with <code>watchDeltas</code></summary><div class="details-body">
-<p><code>POST /v1/watch</code> takes <code>{name, args?}</code> and returns server-sent events. The first is a snapshot; later ones are RFC 6902 JSON Patch deltas, or a new snapshot when that is cheaper.</p>
-<p><code>watchDeltas</code> gives you those events with a <code>type</code> field. Snapshots carry <code>sequence, revision, value</code>. Patches carry <code>sequence, baseSequence, revision, patch</code>. A patch applies only to the event whose sequence matches its <code>baseSequence</code>. Sequences can start above zero and skip after a reset. A value that depends on time can change without a new revision.</p>
+<p><code>POST /v1/watch</code> takes <code>{name, args?, credentials?}</code> and returns server-sent events. The first is a snapshot; later ones are RFC 6902 JSON Patch deltas, or a new snapshot when that is cheaper.</p>
+<p><code>watchDeltas</code> gives you those events with a <code>type</code> field. Snapshots carry <code>sequence, revision, value</code>. Patches carry <code>sequence, baseSequence, revision, patch</code>. A patch applies only to the event whose sequence matches its <code>baseSequence</code>. Sequences can start above zero and skip after a reset. A value that depends on time can change without a new revision. Error events carry the method's <code>failure</code>, like HTTP errors.</p>
 </div></details>
-</section>
-<section id="errors">
-<h2>Common errors</h2>
-<div class="table-wrap"><table><caption class="sr-only">Common errors</caption><thead><tr><th>Response</th><th>What to do</th></tr></thead><tbody><tr><td><code>404 METHOD_NOT_FOUND</code></td><td>Use a name the current deployment exposes. Removing a name also rejects old retries through it.</td></tr><tr><td><code>409 REQUEST_ID_REUSED</code></td><td>That ID was already used with different arguments.</td></tr><tr><td><code>409 REVISION_CONFLICT</code></td><td>Read the current state, then decide whether to send a new operation.</td></tr><tr><td><code>422 EVALUATION_FAILED</code></td><td>Your code threw. Nothing committed.</td></tr><tr><td><code>503 UNAVAILABLE</code></td><td>Wait for the leader or queue to recover, then retry with the same request ID.</td></tr></tbody></table></div>
+<p>For error codes, see <a href="methods.html#failures">Handle failures</a>.</p>
 </section>
 <!-- content:end -->
 </div>
-<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../guide/methods.html"><small>Previous · Guide</small>Methods & retries</a><a rel="next" href="../guide/timers.html"><small>Next · Guide</small>Scheduled logic</a></nav>
+<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../guide/access.html"><small>Previous · Guide</small>Access control</a><a rel="next" href="../guide/timers.html"><small>Next · Guide</small>Scheduled logic</a></nav>
 </main>
 </div>
 <div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/flower-js-org/runtime">Source ↗</a></div></div></div>

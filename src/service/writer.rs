@@ -895,7 +895,7 @@ async fn prepare_candidate_inner(
     .map_err(retention::error)?;
     if let Some(receipt) = state.requests.get(&request_id) {
         if receipt.fingerprint != fingerprint {
-            return Err(ApiError(
+            return Err(ApiError::new(
                 StatusCode::CONFLICT,
                 "REQUEST_ID_REUSED",
                 "requestId was already used for different content".into(),
@@ -921,7 +921,7 @@ async fn prepare_candidate_inner(
     if let Some(expected) = input.get("expectedRevision").and_then(Value::as_u64)
         && expected != state.revision
     {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::CONFLICT,
             "REVISION_CONFLICT",
             format!(
@@ -938,7 +938,7 @@ async fn prepare_candidate_inner(
             .as_ref()
             .expect("staged deployment command");
         if command.expected_revision != state.revision {
-            return Err(ApiError(
+            return Err(ApiError::new(
                 StatusCode::CONFLICT,
                 "DEPLOYMENT_CONFLICT",
                 "Database changed during online preparation; retry the same request ID, or use preparation: blocking".into(),
@@ -1135,7 +1135,7 @@ fn stage_prepared(
                     if !commands.is_empty() {
                         return None;
                     }
-                    Err(ApiError(
+                    Err(ApiError::new(
                         StatusCode::PAYLOAD_TOO_LARGE,
                         "RESULT_TOO_LARGE",
                         format!(

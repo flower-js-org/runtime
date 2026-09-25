@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LocalCluster } from "../bench/cluster.mjs";
 import { buildBundle } from "../sdk/bundle.ts";
-import { FlowerClient } from "../sdk/index.ts";
+import { FlowerAdmin, FlowerClient } from "../sdk/index.ts";
 import { createHttp2Transport } from "../sdk/http2.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -14,7 +14,8 @@ process.env.FLOWER_SNAPSHOT_LAG_LOGS = "16";
 process.env.FLOWER_SNAPSHOT_KEEP_LOGS = "0";
 const cluster = new LocalCluster({ nodes: 3, binary: process.env.E2E_FLOWER_BIN ?? join(root, "target/debug/flower") });
 const transport = createHttp2Transport({ requestTimeoutMs: 15_000 });
-const client = (node = cluster.leader) => new FlowerClient(node.url, { adminToken: cluster.adminToken, fetch: transport.fetch });
+const client = (node = cluster.leader) => new FlowerClient(node.url, { fetch: transport.fetch });
+const admin = (node = cluster.leader) => new FlowerAdmin(node.url, { adminToken: cluster.adminToken, fetch: transport.fetch });
 let sequence = 0;
 const mutate = (name, args) => client().mutate(name, args, { requestId: `index-${++sequence}`, signal: AbortSignal.timeout(20_000) });
 
@@ -44,7 +45,7 @@ try {
   await cluster.start();
   const fixture = join(cluster.directory, "indexes.ts");
   await writeFile(fixture, source());
-  await client().deploy(await buildBundle(fixture, { initialization: "static" }), { requestId: "index-deploy" });
+  await admin().deploy(await buildBundle(fixture, { initialization: "static" }), { requestId: "index-deploy" });
   assert.deepEqual((await mutate("seed")).value, { total: 1000, count: 100 });
   for (let i = 1; i <= 16; i++) await mutate("change", { key: "0", value: { shop: "a", cents: i } });
   await verify({total:1006,count:100},{total:0,count:0});
@@ -69,7 +70,7 @@ try {
   // A code deployment rebuilds the accumulator, including previously persisted
   // materializations, instead of combining a new reducer with old arithmetic.
   await writeFile(fixture, source(2));
-  await client().deploy(await buildBundle(fixture, { initialization: "static" }), { requestId: "index-redeploy" });
+  await admin().deploy(await buildBundle(fixture, { initialization: "static" }), { requestId: "index-redeploy" });
   await verify({total:1960,count:98},{total:40,count:2});
   console.log("PASS: durable equality indexes, delta aggregates, fresh replica reads, full-cluster redb checkpoint restart, leader recovery, row moves/deletes, and reducer redeployment");
 } catch (error) {

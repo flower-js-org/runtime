@@ -7,7 +7,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { FlowerClient } from "../sdk/client.ts";
+import { FlowerAdmin, FlowerClient } from "../sdk/client.ts";
 import { buildBundle } from "../sdk/bundle.ts";
 
 const directory = await mkdtemp(join(tmpdir(), "flower-precopy-"));
@@ -58,16 +58,16 @@ try {
     await until(`${node.id} starts`,async()=> (await fetch(node.url+"/health")).ok);
     await post(node,"/raft/initialize",{1:node.address});
   }
-  const sdk=new FlowerClient(nodes.get("catalog").url,{adminToken:token,credentials:{subject:"tester"}});
+  const sdk=new FlowerAdmin(nodes.get("catalog").url,{adminToken:token});
   await until("catalog leader",async()=>{await sdk.layout();return true;});
   const version=await fetch(nodes.get("a").url+"/raft/version",{headers:{authorization:`Bearer ${token}`,"x-flower-target-node-id":"1"}}).then(response=>response.json());
   const c=version.compatibility;contract=`raft${c.raftWire}-state${c.stateMachine}-snapshot${c.snapshotFormat}-value${c.valueFormat}-qjs${c.quickjsSha256}`;
-  for(const id of ["catalog","a","b"])await until(`${id} registers`,async()=>{await sdk.registerGroup({id,addresses:registry[id]},{requestId:`register-${id}`});return true;});
+  for(const id of ["catalog","a","b"])await until(`${id} registers`,async()=>{await sdk.registerGroup({id,addresses:registry[id]});return true;});
   const entry=join(directory,"app.ts");
   await writeFile(entry,`
 import {collection,define,query,mutation} from ${JSON.stringify(resolve("sdk/index.ts"))};
 const rows=collection("rows");
-export default define({authorize:query("authorize",(_ctx,r)=>r.credentials?.subject==="tester"?{subject:"tester",tenant:r.partition}:null),http:{
+export default define({auth:{authenticate:(_ctx,credentials:any,request)=>credentials?.subject==="tester"?{subject:"tester",...(request.partition?{tenant:request.partition}:{})}:null},http:{
   fill:mutation("fill",ctx=>{const value="🌸".repeat(2048);for(let i=0;i<256;i++)ctx.set(rows,String(i),value);ctx.set(rows,"obsolete","remove during copy");return 256;}),
   bump:mutation("bump",ctx=>{const n=(ctx.get(rows,"n")??0)+1;ctx.set(rows,"n",n);return n;}),
   erase:mutation("erase",ctx=>{ctx.delete(rows,"obsolete");return true;}),
@@ -76,7 +76,8 @@ export default define({authorize:query("authorize",(_ctx,r)=>r.credentials?.subj
 `);
   await sdk.createPartition("shop","a",{requestId:"create-shop"});await sdk.waitForPartition("shop",{timeoutMs:45_000});
   const admin=sdk.partition("shop");await admin.deploy(await buildBundle(entry),{requestId:"deploy"});
-  assert.equal((await admin.mutate("fill",null,{requestId:"fill"})).value,256);
+  const tester=new FlowerClient(nodes.get("catalog").url,{credentials:{subject:"tester"}}).partition("shop");
+  assert.equal((await tester.mutate("fill",null,{requestId:"fill"})).value,256);
   const incarnation=randomBytes(16).toString("hex");
   let status=await admin.retentionStatus();
   await admin.controlRetention(status.revision,{operation:"initialize",database:randomBytes(16).toString("hex"),incarnation,max_receipt_bytes:null});

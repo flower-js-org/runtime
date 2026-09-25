@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LocalCluster } from "../bench/cluster.mjs";
 import { buildBundle } from "../sdk/bundle.ts";
-import { FlowerClient, FlowerError } from "../sdk/index.ts";
+import { FlowerAdmin, FlowerClient, FlowerError } from "../sdk/index.ts";
 import { createHttp2Transport } from "../sdk/http2.ts";
 import { applyWatchPatch } from "../sdk/watch.ts";
 
@@ -27,7 +27,10 @@ async function within(promise, label, timeoutMs = 15_000) {
 }
 
 function client(node = cluster.leader, options = {}) {
-  return new FlowerClient(node.url, { adminToken: cluster.adminToken, fetch: transport.fetch, ...options });
+  return new FlowerClient(node.url, { fetch: transport.fetch, ...options });
+}
+function admin(node = cluster.leader) {
+  return new FlowerAdmin(node.url, { adminToken: cluster.adminToken, fetch: transport.fetch });
 }
 function watched(node, name) {
   const iterator = client(node).watchDeltas(name);
@@ -76,8 +79,8 @@ const change = mutation("internal.replica.change", (ctx, counter: number) => {
   return row;
 });
 const read = query("internal.replica.read", ctx => ctx.get(rows, "value"));
-const local = query("internal.replica.local", ctx => ctx.get(rows, "value"), { consistency: "replica-local" });
-const clock = query("internal.replica.clock", ctx => ({ now: ctx.now(), counter: ctx.get(rows, "value").counter }), { consistency: "replica-local" });
+const local = query("internal.replica.local", { consistency: "replica-local" }, ctx => ctx.get(rows, "value"));
+const clock = query("internal.replica.clock", { consistency: "replica-local" }, ctx => ({ now: ctx.now(), counter: ctx.get(rows, "value").counter }));
 export default define({ http: {
   "counter.change": change, "counter.clock": clock,
   ${exposed ? '"counter.read": read, "counter.local": local,' : ""}
@@ -99,7 +102,7 @@ try {
   const fixture = join(cluster.directory, "replica-reads.ts");
   await writeFile(fixture, source());
   const bundle = await buildBundle(fixture, { initialization: "static" });
-  await client().deploy(bundle, { requestId: "replica-deploy" });
+  await admin().deploy(bundle, { requestId: "replica-deploy" });
   let receipt = await change(1);
   await assertFreshEverywhere(receipt);
 
@@ -152,9 +155,9 @@ try {
   const locals = followers.map((node) => watched(node, "counter.local"));
   await Promise.all(locals.map(next));
   await writeFile(fixture, source(false));
-  await client().deploy(await buildBundle(fixture, { initialization: "static" }), { requestId: "replica-revoke" });
+  await admin().deploy(await buildBundle(fixture, { initialization: "static" }), { requestId: "replica-revoke" });
   await Promise.all([...watches.map(({ iterator }) => iterator), ...locals].map((iterator) => expectWatchError(iterator, "METHOD_NOT_FOUND", 404)));
-  await client().deploy(bundle, { requestId: "replica-restore" });
+  await admin().deploy(bundle, { requestId: "replica-restore" });
   receipt = await change(7);
   await assertFreshEverywhere(receipt);
 

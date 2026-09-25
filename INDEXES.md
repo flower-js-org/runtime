@@ -3,9 +3,9 @@
 Declare indexes in TypeScript and include their collections in the application. Flower stores the index entries in Raft alongside the rows. Queries then visit the matching entries instead of scanning the collection.
 
 ```ts
-import { aggregate, collection, define, mutation, query } from "@flower-js/sdk";
+import { aggregate, collection, define, mutation, query, v } from "@flower-js/sdk";
 
-const orders = collection<{ shop: string; cents: number }>("orders")
+const orders = collection("orders", v.object({ shop: v.string({ min: 1 }), cents: v.int() }))
   .index("byShop", ["shop"]);
 
 const total = aggregate("shop.total", {
@@ -16,16 +16,16 @@ const total = aggregate("shop.total", {
   remove: (sum, row) => sum - row.cents,
 });
 
-const save = mutation("orders.save", (ctx, input: {
-  id: string; shop: string; cents: number;
-}) => {
-  // Validate business input here; use define({ authorize }) for caller admission.
-  ctx.set(orders, input.id, { shop: input.shop, cents: input.cents });
-  ctx.materialize(total, input.shop);
-  return ctx.get(total, input.shop);
+const save = mutation("orders.save", {
+  args: v.object({ id: v.string({ min: 1 }), shop: v.string({ min: 1 }), cents: v.int() }),
+}, (ctx, { id, shop, cents }) => {
+  // Validate business rules here; use define({ auth }) and access for caller admission.
+  ctx.set(orders, id, { shop, cents });
+  ctx.materialize(total, shop);
+  return ctx.get(total, shop);
 });
 
-const read = query("shop.read", (ctx, shop: string) => ({
+const read = query("shop.read", { args: v.string() }, (ctx, shop) => ({
   total: ctx.get(total, shop),
   orders: ctx.query(orders.by("byShop").eq(shop)),
 }));
@@ -39,13 +39,15 @@ export default define({
 
 Only those HTTP methods are public. The same `read` method can be watched over SSE. Materializing `total` retains its accumulator; a materialized derived value that reads it also retains it. An unmaterialized aggregate computed only for a query can be rebuilt from matching rows for that query.
 
+`.index(name, fields)` returns a new collection reference; keep and pass the one that carries the index. Index names and fields are checked against the record type, and `orders.by("byShop").eq(shop)` takes a value of the `shop` field's type.
+
 ## Equality and dependencies
 
 A single-field index takes a JSON equality value. A composite index such as `.index("shopState", ["shop", "state"])` takes `.eq([shop, state])`. Values use Flower's canonical JSON equality; object property order does not affect a match. A missing field does not match `null`. Query results retain the existing source-key ordering, including Unicode keys.
 
 Methods see their pending writes when querying an index. Derived queries depend on the equality bucket and the matching rows. An insertion into a previously empty bucket invalidates its readers; changes in unrelated buckets do not. Ordinary `derive` callbacks still rerun when their dependencies change.
 
-The declaration matters: a collection omitted from `define({ collections })` keeps the existing scan-based query behavior. Indexes support JSON equality and ordered scalar ranges. They do not enforce uniqueness constraints or arbitrary projections.
+The declaration matters: a collection reaches the application's durable index schema through `define({ collections })`, a component in `uses` (schedulers, queues and expiring collections declare theirs), an aggregate's `source`, or a trigger's or `materialize: { each }` collection. A collection that reaches none of these keeps the existing scan-based query behavior. One collection name must always carry the same indexes; conflicting declarations fail `define`. Indexes support JSON equality and ordered scalar ranges. They do not enforce uniqueness constraints or arbitrary projections.
 
 ## Ordered scans, ranges, and continuations
 
@@ -54,7 +56,7 @@ The declaration matters: a collection omitted from `define({ collections })` kee
 ```ts
 const orders = collection<{ shop: string; createdAt: number }>("orders")
   .index("created", ["shop", "createdAt"]);
-const recent = query("orders.recent", (ctx, shop: string) =>
+const recent = query("orders.recent", { args: v.string() }, (ctx, shop) =>
   ctx.scan(orders, {
     index: "created", prefix: [shop], gte: 0,
     reverse: true, offset: 20, limit: 10,
@@ -62,21 +64,23 @@ const recent = query("orders.recent", (ctx, shop: string) =>
 // Include orders in define({ collections: [orders], http: { recent } }).
 ```
 
-Scan constraints use the same `prefix`, `gt`/`gte`, and `lt`/`lte` rules as ranges below. Matching rows are ordered, optionally reversed, then skipped by `offset` and capped by `limit`. Both counts must be nonnegative safe integers; `offset` defaults to zero, an omitted `limit` returns all remaining matches, and `limit: 0` returns no rows. Without `index`, bounds must be strings and apply to source keys; `prefix` is either empty or a single exact source key. Unknown options and index names are rejected. An index name refers to the collection reference's `.index()` declarations; listing the collection in `define({collections})` enables persistent index seeks.
+Scan constraints use the same `prefix`, `gt`/`gte`, and `lt`/`lte` rules as ranges below. Matching rows are ordered, optionally reversed, then skipped by `offset` and capped by `limit`. Both counts must be nonnegative safe integers; `offset` defaults to zero, an omitted `limit` returns all remaining matches, and `limit: 0` returns no rows. Without `index`, bounds must be strings and apply to source keys; `prefix` is either empty or a single exact source key. Unknown options and index names are rejected. An index name refers to the collection reference's `.index()` declarations; declaring the collection in the application enables persistent index seeks.
+
+Collections with typed keys, `.key(v.tuple([v.string(), v.string()]))` for example, store each key as canonical JSON and return decoded keys from `scan` and `range`. Without an index, their `prefix` lists leading tuple components, so `ctx.scan(lines, { prefix: [orderId] })` returns that order's rows; source-key bounds fail with `INVALID_SCAN`, because canonical JSON text does not order tuple components by value. Declare an index for ordered access to key components.
 
 Scans see pending mutation writes. Ordered scans share the scalar ordering and conservative index dependencies described below; source-key scans depend on the collection. Missing or nonscalar indexed fields are excluded from ordered scans, while source-key scans include every row. Offsets count matching rows in the selected direction and require walking past those rows; large offsets still cost work. Declared indexes skip those rows without retaining them, keeping selected results and pending-write candidates. Source-key scans and undeclared indexes retain up to `offset + limit` candidates while ordering native source records. Use `ctx.range` when a continuation cursor is more appropriate than an offset.
 
 ```ts
 const timers = collection<{ tenant: string; state: string; dueAt: number }>("timers")
   .index("due", ["tenant", "state", "dueAt"]);
-const due = query("timers.due", (ctx, tenant: string) =>
+const due = query("timers.due", { args: v.string() }, (ctx, tenant) =>
   ctx.range(timers.by("due").range({
     prefix: [tenant, "pending"], lte: ctx.now(), limit: 20,
   })));
 // Include timers in define({ collections: [timers], http: { due } }).
 ```
 
-`ctx.range` returns `{ rows: [{key,value}], cursor: string | null }`. Pass a cursor as `after` to continue. `prefix` fixes initial fields; `gt`/`gte` and `lt`/`lte` bound the next field. `reverse: true` reverses the entire order. `limit` is a positive safe integer, subject to normal memory and output budgets. A full prefix cannot also have bounds; duplicate exclusive/inclusive alternatives are rejected.
+`ctx.range` returns `{ rows: [{key,value}], cursor: string | null }`, with typed keys decoded. Pass a cursor as `after` to continue. `prefix` fixes initial fields, typed from the index fields; `gt`/`gte` and `lt`/`lte` bound the next field. `reverse: true` reverses the entire order. `limit` is a positive safe integer, subject to normal memory and output budgets. A full prefix cannot also have bounds; duplicate exclusive/inclusive alternatives are rejected.
 
 Ordered components are finite numbers, strings, booleans, or null. Their order is null, false, true, numbers ascending, strings in UTF-16 order. Composite tuples compare component by component; source keys break ties in UTF-16 order. Missing or nonscalar indexed fields have no ordered entry; equality queries still accept every JSON value. Each scalar-indexed row stores an additional ordered entry alongside its equality entry.
 
@@ -84,7 +88,7 @@ Declared ranges seek into persistent ordered storage and retain at most `limit +
 
 Derived ranges track empty-result phantoms. The current invalidation is conservative: any scalar-indexed row change invalidates all ordered readers of that index, including when only unindexed row fields change. Precise interval invalidation remains an optimization.
 
-The TypeScript scheduler declares a `(state, dueAt)` index. Expiring collections seek expired deadlines. Work queues use scoped pending and lease-deadline indexes; pending selection is bounded, while expired leases are inspected in bounded pages to preserve original creation-order FIFO. A large expired-lease herd still costs work. Explicit helper inspection APIs can return full datasets. Policies, retry behavior, lease fencing, and callbacks remain TypeScript.
+The TypeScript scheduler declares a `(state, dueAt)` index. Expiring collections seek expired deadlines. Queues index `(scope, state, availableAt)`, `(scope, state, leaseExpiresAt)` and `(state, leaseExpiresAt)`: selecting a ready job is bounded, while expired leases are inspected in bounded pages so a claim still takes the job that has been available longest. A large expired-lease herd still costs work. Explicit helper inspection APIs can return full datasets. Policies, retry behavior, lease fencing, and callbacks remain TypeScript.
 
 ## Delta reducers
 
@@ -98,7 +102,7 @@ add(accumulator, row, sourceKey, group)
 remove(accumulator, row, sourceKey, group)
 ```
 
-Use deterministic, order-independent operations with `remove` as the inverse of `add`. Counts, integer sums, and objects containing these are straightforward. Use integer units for exact money or quantity totals; floating-point addition can depend on update history. Arbitrary sorting, minima, or joins need additional accumulator state or a regular derived query.
+`index` must name one of the source reference's declared indexes. `group` is that index's equality value, typed like `.eq()`, and `sourceKey` is decoded for collections with typed keys. Use deterministic, order-independent operations with `remove` as the inverse of `add`. Counts, integer sums, and objects containing these are straightforward. Use integer units for exact money or quantity totals; floating-point addition can depend on update history. Arbitrary sorting, minima, or joins need additional accumulator state or a regular derived query.
 
 Reducers receive no database context. They may use pure helper functions and constants. Flower rejects attempts to call database context even if the callback catches the error. Return the usual finite JSON values.
 
@@ -110,28 +114,33 @@ Rows, index entries, accumulator cells, and their dependencies are committed ato
 
 A direct deployment builds added indexes and removes dropped index entries in its atomic candidate. For larger existing collections, use the resumable staged path below. Remove or replace any aggregate using that index in the same bundle: an aggregate whose index is undeclared is rejected. Existing applications without declarations need no data conversion.
 
-Deployment defaults to optimistic online preparation: a bounded native worker builds the complete candidate against one fresh immutable snapshot while the previous code, authorization policy and indexes keep serving. Cutover enters the ordered writer lane and checks the exact base revision before publishing code, keys declarations, policy, indexes and recomputed values atomically. Any intervening committed application change produces `DEPLOYMENT_CONFLICT`; no candidate changes are published. Retry with the same request ID, or call `client.deploy(bundle, {requestId, preparation: "blocking"})` / `flower deploy FILE --preparation blocking` to hold the writer lane for preparation on a continuously busy database. The strategy is excluded from receipt identity, so changing it on a retry is safe. Already committed receipts return before rebuilding.
+Deployment defaults to optimistic online preparation: a bounded native worker builds the complete candidate against one fresh immutable snapshot while the previous code, authorization policy and indexes keep serving. Cutover enters the ordered writer lane and checks the exact base revision before publishing code, keys declarations, policy, indexes and recomputed values atomically. Any intervening committed application change produces `DEPLOYMENT_CONFLICT`; no candidate changes are published. Retry with the same request ID, or call `admin.deploy(bundle, {requestId, preparation: "blocking"})` on a `FlowerAdmin` / `flower deploy FILE --preparation blocking` to hold the writer lane for preparation on a continuously busy database. The strategy is excluded from receipt identity, so changing it on a retry is safe. Already committed receipts return before rebuilding.
 
 Direct online/blocking deployment remains a whole-candidate operation. Its backfill, initial materialization and reducer rebuilds consume the normal evaluation time, Rust/QuickJS memory, output and transaction budgets. Exceeding a budget aborts instead of installing half an index. Candidate output stays byte-accounted until durable cutover; its execution slot and snapshot are released before waiting in the writer queue. Blocking preparation pauses writes and maintenance in that logical database; committed snapshots remain readable. Size budgets for the largest full deployment or group rebuild you expect.
 
 ## Resumable staged deployment
 
-Use an operator client, including `client.partition(id)` for a named logical database:
+Use a `FlowerAdmin`, including `admin.partition(id)` for a named logical database:
 
 ```ts
+import { FlowerAdmin } from "@flower-js/sdk/client";
+import { buildBundle } from "@flower-js/sdk/bundle";
+
+const admin = new FlowerAdmin("http://127.0.0.1:7101", { adminToken: process.env.FLOWER_ADMIN_TOKEN });
+const bundle = await buildBundle("app.ts");
 const id = "orders-by-shop-v2"; // Preserve this request ID across retries.
-let build = (await client.stageDeployment(bundle, { requestId: id })).value;
+let build = (await admin.stageDeployment(bundle, { requestId: id })).value;
 while (build.phase === "backfill" || build.phase === "rebuilding") {
-  build = (await client.controlStagedDeployment({
+  build = (await admin.controlStagedDeployment({
     operation: "advance", requestId: id, maxBytes: 256 * 1024,
   })).value;
 }
 if (build.phase === "failed") throw new Error(build.error ?? "Staged graph failed");
 if (build.phase === "ready") {
-  build = (await client.controlStagedDeployment({ operation: "activate", requestId: id })).value;
+  build = (await admin.controlStagedDeployment({ operation: "activate", requestId: id })).value;
 }
 while (build.phase === "active" || build.phase === "canceled") {
-  build = (await client.controlStagedDeployment({
+  build = (await admin.controlStagedDeployment({
     operation: "collect", requestId: id, maxBytes: 256 * 1024,
   })).value;
 }
@@ -143,7 +152,7 @@ From that admission revision, each ordinary source mutation maintains both the a
 
 During `rebuilding`, each `advance` evaluates a bounded batch of retained roots and their required dependencies using the target bundle, storing results in a separate graph generation. Existing target outcomes and aggregate accumulators are reused. `graphCursor` and `rebuiltRoots` record durable traversal progress; roots added or removed during preparation are included by ordinary mutations, even behind the cursor. Source rows are stored once. Each mutation and managed-key update also maintains the already-built target graph, and both graphs publish in the same commit. Only the active code, policy, and graph serve public requests. This temporarily adds graph storage, derived callback work, and index writes. Speculative mutation preparation is bypassed while a target graph is being maintained; serial batching and grouped commits remain available. Rebuild progress alone does not invalidate query caches; active data, code, policy and graph changes still do.
 
-Progress survives leader changes, complete restarts, snapshots, and logical-partition moves. Resume with `stagedDeploymentStatus()` and the same request ID; there is no background worker choosing page sizes or activating code. `maxBytes` bounds inspected row/entry work during index backfill and the graph patch during rebuilding; it defaults to the configured transaction byte budget. Exact encoded command size, control admission, and evaluation limits also apply. Graph pages start with one root and adapt the next root count to observed execution time and output size, growing by at most twice per page. Batches target `FLOWER_DEPLOYMENT_PAGE_MS` (default 200 ms, capped by the evaluation timeout). This setting is independent of ordinary writer batching. If a multi-root candidate fails or exceeds its output/transaction allowance, it retries only its first root using the normal evaluation timeout; no partial candidate is published. This fallback can take the page target plus one full evaluation allowance. A single root that cannot fit makes no durable progress, preserving earlier successful pages. `scannedRows` and `builtEntries` count index backfill visits/emitted entries; `rebuiltRoots` counts roots visited by graph pages, not roots created by concurrent writes.
+Progress survives leader changes, complete restarts, snapshots, and logical-partition moves. Resume with `admin.stagedDeploymentStatus()` and the same request ID; there is no background worker choosing page sizes or activating code. `maxBytes` bounds inspected row/entry work during index backfill and the graph patch during rebuilding; it defaults to the configured transaction byte budget. Exact encoded command size, control admission, and evaluation limits also apply. Graph pages start with one root and adapt the next root count to observed execution time and output size, growing by at most twice per page. Batches target `FLOWER_DEPLOYMENT_PAGE_MS` (default 200 ms, capped by the evaluation timeout). This setting is independent of ordinary writer batching. If a multi-root candidate fails or exceeds its output/transaction allowance, it retries only its first root using the normal evaluation timeout; no partial candidate is published. This fallback can take the page target plus one full evaluation allowance. A single root that cannot fit makes no durable progress, preserving earlier successful pages. `scannedRows` and `builtEntries` count index backfill visits/emitted entries; `rebuiltRoots` counts roots visited by graph pages, not roots created by concurrent writes.
 
 A single root and its newly reached dependency subgraph must still fit one evaluation. Callbacks and initial aggregate-group scans are not resumable, and the full retained graph metadata still consumes the graph memory budget. Append-only graph growth validates new cells against a cached reachability and depth proof; it does not traverse all earlier roots on every page. Removing roots or changing existing derived dependency edges can still require a full traversal, and restored metadata must establish its proof again. Activation refreshes clock/key-dependent work within normal budgets. These limits matter for a giant connected computation even though independent roots no longer need one combined rebuild. Arbitrary source-record transformations remain explicit application mutations.
 

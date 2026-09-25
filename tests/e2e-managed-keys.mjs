@@ -41,16 +41,16 @@ const encryption = key("encryption", {algorithm:"A256GCM",usages:["encrypt","dec
 const imported = key("imported", {algorithm:"HS256",usages:["sign","verify"]});
 const mailbox = key("mailbox", {algorithm:"X25519",usages:["derive","encrypt","decrypt","publicKey"]});
 const visible = collection("visible");
-const status = query("status",ctx=>ctx.get(visible,"status"),{consistency:"replica-local"});
+const status = query("status",{consistency:"replica-local"},ctx=>ctx.get(visible,"status"));
 const fingerprint = derive("fingerprint", () => Array.from(publicKey(sessions)));
 const issue = mutation("issue", (ctx) => {
   ctx.set(visible,"status","sunny");
   const claims = {sub:"🌻",exp:ctx.now()/1000+600};
   return {signed:jwt.sign(claims,sessions),encrypted:jwt.encrypt(claims,encryption),mac:jwt.sign(claims,imported)};
 });
-const check = query("check", (_ctx,args) => ({signed:jwt.verify(args.signed,sessions).claims,encrypted:jwt.decrypt(args.encrypted,encryption).claims}), {consistency:"replica-local"});
+const check = query("check", {consistency:"replica-local"}, (_ctx,args:any) => ({signed:jwt.verify(args.signed,sessions).claims,encrypted:jwt.decrypt(args.encrypted,encryption).claims}));
 const materialize = mutation("materialize", (ctx) => {ctx.materialize(fingerprint,null);return ctx.get(fingerprint,null);});
-const current = query("current", (ctx) => ctx.get(fingerprint,null), {consistency:"replica-local"});
+const current = query("current", {consistency:"replica-local"}, (ctx) => ctx.get(fingerprint,null));
 const forge = query("forge", () => jwt.sign({sub:"bad",exp:9e9},{kind:"key",name:"undeclared",algorithm:"Ed25519",usages:["sign"]}));
 const primitive = query("primitive", () => {
  const msg = new Uint8Array([7,8,9]);

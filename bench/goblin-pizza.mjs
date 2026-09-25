@@ -25,7 +25,7 @@ import { mergeRouting, startRustDriver } from "./rust-driver.mjs";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const execute = promisify(execFile);
 const methods = ["deploy", "pizza.setup", "pizza.order", "pizza.tip", "pizza.shop", "pizza.shop.local", "pizza.claim", "pizza.deliver", "pizza.world"];
-const lostLease = (error) => error instanceof RpcError && error.status === 422 && /LEASE_LOST/.test(error.message);
+const lostLease = (error) => error instanceof RpcError && error.status === 422 && error.failure?.code === "LEASE_LOST";
 const format = (value) => value === null || value === undefined ? "n/a" : value.toFixed(1);
 
 function newPhase() {

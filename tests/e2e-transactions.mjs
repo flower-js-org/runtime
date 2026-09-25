@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
-import { FlowerClient, FlowerError } from "../sdk/client.ts";
+import { FlowerAdmin, FlowerClient, FlowerError } from "../sdk/client.ts";
 import { buildBundle } from "../sdk/bundle.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -71,6 +71,16 @@ async function leader(group) {
   });
 }
 async function value(node) { return (await new FlowerClient(node.url).call("read")).value; }
+const participantFailure = { code: "DELIBERATE_FAILURE", message: "deliberate participant failure", details: { staged: 999, tags: ["🌻", null] } };
+async function expectAborted(operation, label) {
+  await assert.rejects(operation(), error => {
+    assert.ok(error instanceof FlowerError, `${label}: ${error}`);
+    assert.equal(error.status, 422, label);
+    assert.equal(error.code, "TRANSACTION_ABORTED", label);
+    assert.deepEqual(error.failure, participantFailure, label);
+    return true;
+  });
+}
 
 try {
   for (const group of Object.keys(groups)) for (let id = 1; id <= 3; id++) await reserve(group, id);
@@ -86,18 +96,18 @@ try {
   }
   const entry = join(directory, "transactions.ts");
   await writeFile(entry, `
-import { collection, define, mutation, query, transaction } from ${JSON.stringify(join(root, "sdk/index.ts"))};
+import { collection, define, fail, mutation, query, transaction } from ${JSON.stringify(join(root, "sdk/index.ts"))};
 const rows=collection<number>("rows");
 const add=mutation("internal.add",(ctx,amount:number)=>{const next=(ctx.get(rows,"count")??0)+amount;ctx.set(rows,"count",next);return next;});
 const read=query("internal.read",ctx=>ctx.get(rows,"count")??0);
-const fail=mutation("internal.fail",ctx=>{ctx.set(rows,"count",999);throw Error("deliberate participant failure");});
+const failing=mutation("internal.fail",ctx=>{ctx.set(rows,"count",999);return fail("DELIBERATE_FAILURE","deliberate participant failure",{staged:999,tags:["🌻",null]});});
 const run=transaction("internal.transaction",(plan:any)=>plan);
-export default define({http:{add,read,fail,run}});
+export default define({http:{add,read,fail:failing,run}});
 `);
   const bundle = await buildBundle(entry);
   for (const group of Object.keys(groups)) {
     const node = await leader(group);
-    await new FlowerClient(node.url, { adminToken: token }).deploy(bundle, { requestId: `deploy-${group}` });
+    await new FlowerAdmin(node.url, { adminToken: token }).deploy(bundle, { requestId: `deploy-${group}` });
   }
   let coordinator = await leader("a");
   const client = new FlowerClient(coordinator.url);
@@ -114,9 +124,13 @@ export default define({http:{add,read,fail,run}});
   assert.equal(retry.duplicate, true); assert.equal(retry.revision, first.revision);
   await assert.rejects(client.call("run", { ...input, value: "different" }, { requestId: "cross-group-success" }),
     error => error instanceof FlowerError && error.code === "REQUEST_ID_REUSED");
-  await assert.rejects(client.call("run", { calls: [
-    { group: "a", method: "add", args: 100 }, { group: "b", method: "fail" },
-  ] }, { requestId: "cross-group-abort" }), error => error instanceof FlowerError && error.code === "TRANSACTION_ABORTED");
+  // A participant's own failure aborts every group and reaches the caller intact,
+  // whether that participant is remote or the coordinator's own group.
+  const remoteAbort = { calls: [{ group: "a", method: "add", args: 100 }, { group: "b", method: "fail" }] };
+  const localAbort = { calls: [{ group: "b", method: "add", args: 100 }, { group: "a", method: "fail" }] };
+  await expectAborted(() => client.call("run", remoteAbort, { requestId: "cross-group-abort" }), "remote participant failure");
+  await expectAborted(() => client.call("run", localAbort, { requestId: "local-group-abort" }), "local participant failure");
+  await expectAborted(() => client.call("run", remoteAbort, { requestId: "cross-group-abort" }), "replayed abort keeps its failure");
   for (const node of nodes) assert.equal(await value(node), node.group === "a" ? 1 : 10, "fresh reads across replicas observe only committed work");
   await assert.rejects(client.call("run", { calls: [{ group: "b", method: "internal.add", args: 100 }] }, { requestId: "private-method" }),
     error => error instanceof FlowerError && error.code === "TRANSACTION_ABORTED");
@@ -150,6 +164,8 @@ export default define({http:{add,read,fail,run}});
   assert.equal(await value(await leader("b")), 10, "late preparation cannot apply after the durable abort");
   const afterFailover = await new FlowerClient(replacement.url).call("run", input, { requestId: "cross-group-success" });
   assert.equal(afterFailover.duplicate, true); assert.deepEqual(afterFailover.value, first.value);
+  await expectAborted(() => new FlowerClient(replacement.url).call("run", remoteAbort, { requestId: "cross-group-abort" }),
+    "the durable abort decision keeps the participant failure across coordinator failover");
   start(coordinator);
   await until("restarted coordinator catches up", async () => await value(coordinator) === 1);
   for (const node of nodes) await stop(node);
@@ -158,7 +174,7 @@ export default define({http:{add,read,fail,run}});
   const afterRestart = await new FlowerClient(coordinator.url).call("run", input, { requestId: "cross-group-success" });
   assert.equal(afterRestart.duplicate, true);
   for (const node of nodes) await until(`${node.group}/${node.id} durable balance`, async () => await value(node) === (node.group === "a" ? 1 : 10));
-  console.log("PASS: two three-node Raft groups; ordered sequential calls; atomic commit/abort; method exposure; nested/auth rejection; fresh replica reads; abort recovery after coordinator death during preparation; retry across leader failure and full restart");
+  console.log("PASS: two three-node Raft groups; ordered sequential calls; atomic commit/abort with durable participant failures; method exposure; nested/auth rejection; fresh replica reads; abort recovery after coordinator death during preparation; retry across leader failure and full restart");
 } catch (error) {
   for (const node of nodes) console.error(`\n${node.group}/${node.id}\n${node.runtime?.logs ?? "not started"}`);
   throw error;

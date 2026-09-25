@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f8f5ec">
+<meta name="description" content="Authenticate Flower callers with JWTs or your own function, and set access per method.">
+<meta property="og:title" content="Access control · Flower">
+<meta property="og:description" content="Authenticate Flower callers with JWTs or your own function, and set access per method.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://flower.js.org/guide/access.html">
+<link rel="canonical" href="https://flower.js.org/guide/access.html">
+<title>Access control · Flower</title>
+<link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
+<link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
+<link rel="stylesheet" href="../site.css?v=fd4ad318734f">
+<script src="../site.js?v=3184f0662fa5" defer></script>
+</head>
+<body class="doc-page">
+<a class="skip-link" href="#main">Skip to content</a>
+<div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/" aria-current="page">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/flower-js-org/runtime">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
+<div class="documentation">
+<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/components.html"><span>04</span>Components & tasks</a></li><li><a href="../guide/methods.html"><span>05</span>Methods & retries</a></li><li class="current"><a href="#top" aria-current="page"><span>06</span>Access control</a><ol id="section-nav" aria-label="On this page"><li><a href="#protect">Protect an app</a></li><li><a href="#access">Access per method</a></li><li><a href="#authenticate">Authenticate your own way</a></li><li><a href="#rules">How the check runs</a></li></ol></li><li><a href="../guide/reads.html"><span>07</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>08</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>09</span>Queues & expiry</a></li><li><a href="../guide/workers.html"><span>10</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>11</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>12</span>Crypto & tokens</a></li><li><a href="../guide/testing.html"><span>13</span>Testing</a></li><li><a href="../guide/deployments.html"><span>14</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/schemas.html"><span>03</span>Schemas & failures</a></li><li><a href="../reference/definitions.html"><span>04</span>Contexts & definitions</a></li><li><a href="../reference/components.html"><span>05</span>Components & tasks</a></li><li><a href="../reference/client.html"><span>06</span>Client & transports</a></li><li><a href="../reference/time.html"><span>07</span>Queues, expiry & timers</a></li><li><a href="../reference/workers.html"><span>08</span>External values & workers</a></li><li><a href="../reference/testing.html"><span>09</span>Testing</a></li><li><a href="../reference/crypto.html"><span>10</span>NaCl & JWT</a></li><li><a href="../reference/keys.html"><span>11</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>12</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>13</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>14</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>15</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>16</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
+<main id="main" tabindex="-1">
+<header class="page-intro" id="top"><p class="eyebrow">Guide · 06</p><h1>Decide who can call what.</h1><p class="lead">Authenticate callers once, then give each public method an access rule. Flower checks it before every call, retry and watch refresh.</p></header>
+<div class="page-content">
+<!-- content:start -->
+<p>Without <code>auth</code>, every exposed method is public. With it, each call passes one check before it runs: the credentials become a principal, then the method's access rule decides.</p>
+<section id="protect">
+<h2>Protect an app</h2>
+<p>This notes app accepts JWTs signed with a <a href="crypto.html">managed key</a>. Everyone must sign in except for <code>health</code>, and only a note's owner can read it.</p>
+<div class="code-block"><div class="code-head"><span>notes.ts</span><button type="button" class="copy-button" aria-label="Copy notes.ts">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { collection, define, fail, jwtBearer, key, mutation, query, v } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
+
+<span class="kw">const</span> sessions = key(<span class="str">"sessions"</span>, { algorithm: <span class="str">"Ed25519"</span>, usages: [<span class="str">"verify"</span>] });
+<span class="kw">const</span> notes = collection(<span class="str">"notes"</span>, v.object({ owner: v.<span class="kw">string</span>(), text: v.<span class="kw">string</span>({ max: <span class="num">10_000</span> }) }));
+<span class="kw">const</span> noteId = v.<span class="kw">string</span>({ min: <span class="num">1</span>, max: <span class="num">128</span> });
+
+<span class="kw">const</span> read = query(<span class="str">"note.read"</span>, {
+  args: noteId,
+  access: (ctx, principal, id) =&gt; principal !== <span class="kw">null</span> &amp;&amp; ctx.get(notes, id)?.owner === principal.subject,
+}, (ctx, id) =&gt; ctx.get(notes, id));
+
+<span class="kw">const</span> write = mutation(<span class="str">"note.write"</span>, {
+  args: v.object({ id: noteId, text: v.<span class="kw">string</span>({ max: <span class="num">10_000</span> }) }),
+}, (ctx, { id, text }) =&gt; {
+  <span class="kw">const</span> owner = ctx.principal()!.subject;
+  <span class="kw">if</span> ((ctx.get(notes, id)?.owner ?? owner) !== owner) fail(<span class="str">"NOT_OWNER"</span>, <span class="str">"Someone else owns this note"</span>);
+  ctx.set(notes, id, { owner, text });
+  <span class="kw">return</span> <span class="kw">null</span>;
+});
+
+<span class="kw">const</span> health = query(<span class="str">"health"</span>, { access: <span class="str">"public"</span> }, () =&gt; <span class="str">"ok"</span>);
+
+<span class="kw">const</span> app = define({
+  auth: { authenticate: jwtBearer({ key: sessions, issuer: <span class="str">"notes"</span>, audience: [<span class="str">"notes-api"</span>] }) },
+  http: { <span class="str">"note.read"</span>: read, <span class="str">"note.write"</span>: write, health },
+});
+<span class="kw">export</span> <span class="kw">default</span> app;</code></pre></div>
+<ul>
+<li><code>jwtBearer</code> verifies tokens natively. Callers send the token as <code>credentials</code>: the token itself, <code>"Bearer …"</code>, or <code>{ token }</code>.</li>
+<li>No credentials means an anonymous caller. A bad or expired token is rejected with <code>UNAUTHENTICATED</code>.</li>
+<li>The principal is the token's <code>sub</code>, its <code>tenant</code> claim if any, and all its claims. Pass <code>principal: (claims) =&gt; …</code> to map claims yourself.</li>
+<li>A managed key is added to the app's keys for you. A raw key needs <code>algorithms</code>.</li>
+<li>From the terminal, pass <code>--credentials</code> or set <code>FLOWER_CREDENTIALS</code>.</li>
+</ul>
+</section>
+<section id="access">
+<h2>Access per method</h2>
+<div class="table-wrap"><table><caption class="sr-only">Access rules</caption><thead><tr><th>Access</th><th>Who may call</th></tr></thead><tbody>
+<tr><td><code>"public"</code></td><td>Anyone, including anonymous callers.</td></tr>
+<tr><td><code>"authenticated"</code></td><td>Any principal. Anonymous callers get <code>403</code> with <code>UNAUTHENTICATED</code>.</td></tr>
+<tr><td><code>(ctx, principal, args) =&gt; boolean</code></td><td>Whoever the predicate allows; <code>false</code> is <code>403</code> with <code>FORBIDDEN</code>. <code>args</code> have already passed the method's schema, and <code>principal</code> is <code>null</code> for anonymous callers.</td></tr>
+</tbody></table></div>
+<ul>
+<li>Methods without <code>access</code> follow <code>auth.default</code>: <code>"authenticated"</code> when there is an <code>authenticate</code>, otherwise <code>"public"</code>.</li>
+<li><code>auth.sessions</code> sets access to retry sessions; it defaults to <code>auth.default</code>.</li>
+<li>Inside a method, <code>ctx.principal()</code> returns the caller, or <code>null</code> for anonymous callers.</li>
+<li>The check reads a fresh snapshot, but it runs before the mutation. Recheck anything that can change in between inside the mutation, like <code>note.write</code> does.</li>
+</ul>
+</section>
+<section id="authenticate">
+<h2>Authenticate your own way</h2>
+<p><code>authenticate</code> can be any function of the credentials. Return a principal <code>{ subject, tenant?, claims? }</code>, return <code>null</code> for an anonymous caller, or <code>fail()</code> to reject the call.</p>
+<div class="code-block"><div class="code-head"><span>Sessions stored in the database</span><button type="button" class="copy-button" aria-label="Copy Sessions stored in the database">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">const</span> sessions = collection(<span class="str">"sessions"</span>, v.object({ subject: v.<span class="kw">string</span>(), expiresAt: v.int() }));
+
+<span class="kw">const</span> app = define({
+  collections: [sessions],
+  auth: {
+    authenticate: (ctx, credentials) =&gt; {
+      <span class="kw">if</span> (credentials === <span class="kw">null</span>) <span class="kw">return</span> <span class="kw">null</span>;
+      <span class="kw">const</span> session = <span class="kw">typeof</span> credentials === <span class="str">"string"</span> ? ctx.get(sessions, credentials) : <span class="kw">null</span>;
+      <span class="kw">if</span> (!session || session.expiresAt &lt;= ctx.now()) fail(<span class="str">"UNAUTHENTICATED"</span>, <span class="str">"Sign in again"</span>);
+      <span class="kw">return</span> { subject: session.subject };
+    },
+  },
+  http: { <span class="str">"note.read"</span>: read, <span class="str">"note.write"</span>: write, health },
+});</code></pre></div>
+<p>A sign-in mutation creates session rows. Deleting a row revokes the session at the next call, retry or watch refresh.</p>
+</section>
+<section id="rules">
+<h2>How the check runs</h2>
+<ul>
+<li>It runs before every call, retry replay, cached read and watch refresh. Watches close when a refresh is denied; data already sent can't be taken back.</li>
+<li>Credentials are separate from arguments. A retry with refreshed credentials for the same subject and tenant gets the original result; a different caller can't.</li>
+<li>Flower adds the check only when a call could be refused: with <code>authenticate</code> or <code>delegation</code>, or a method whose access is a predicate. <code>access: "public"</code> alone adds nothing.</li>
+<li>The check has a cost: replica-local reads become fresh, cached reads wait for full admission, and some write batching is skipped.</li>
+<li>In a named partition, the principal's tenant must be the partition's name. Anonymous callers are admitted there with that tenant.</li>
+<li>Transaction participants see the coordinator's principal, with the participant partition as its tenant. <code>auth.delegation(ctx, coordinator, principal)</code> can refuse a coordinator; by default, cluster peers are trusted.</li>
+<li>Authorization doesn't secure peer or operator traffic. Protect the network and the operator token too.</li>
+</ul>
+<p>Every option is in the <a href="../reference/access.html#authorization">authorization reference</a>. The <a href="testing.html">test database</a> runs your access rules, but can't verify JWTs.</p>
+</section>
+<!-- content:end -->
+</div>
+<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../guide/methods.html"><small>Previous · Guide</small>Methods & retries</a><a rel="next" href="../guide/reads.html"><small>Next · Guide</small>Reads & live queries</a></nav>
+</main>
+</div>
+<div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/flower-js-org/runtime">Source ↗</a></div></div></div>
+<p class="sr-only" id="copy-status" role="status" aria-live="polite"></p>
+</body>
+</html>

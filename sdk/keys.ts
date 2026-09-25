@@ -51,19 +51,21 @@ export function key(name: string, options: KeyOptions): ManagedKey {
 export function keyManifest(input: unknown): readonly ManagedKey[] {
   if (input === undefined) return [];
   if (!Array.isArray(input)) throw new TypeError("keys must be an array");
-  const seen = new Set<string>();
-  const declarations = input.map(value => {
+  const declarations = new Map<string, ManagedKey>();
+  for (const value of input) {
     canonicalJson(value);
     if (value === null || typeof value !== "object" || Array.isArray(value) || value.kind !== "key" ||
         Object.keys(value).length !== 4 || Object.keys(value).some(name => !["kind", "name", "algorithm", "usages"].includes(name))) {
       throw new TypeError("Invalid managed key declaration");
     }
     const declaration = key(value.name, { algorithm: value.algorithm, usages: value.usages });
-    if (seen.has(declaration.name)) throw new TypeError(`Duplicate key declaration ${JSON.stringify(declaration.name)}`);
-    seen.add(declaration.name);
-    return declaration;
-  });
-  return Object.freeze(declarations.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    const previous = declarations.get(declaration.name);
+    if (previous && canonicalJson(previous) !== canonicalJson(declaration)) {
+      throw new TypeError(`Conflicting key declaration ${JSON.stringify(declaration.name)}`);
+    }
+    declarations.set(declaration.name, previous ?? declaration);
+  }
+  return Object.freeze([...declarations.values()].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
 export function isManaged(value: unknown): value is ManagedKey | ManagedKeyVersion | SharedKey {

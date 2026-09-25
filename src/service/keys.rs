@@ -73,7 +73,7 @@ pub(super) async fn handle(
         .and_then(|value| value.to_str().ok())
         != Some(format!("Bearer {}", app.admin_token).as_str())
     {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
             "operator bearer token required".into(),
@@ -131,7 +131,7 @@ pub(super) async fn commit(app: Arc<App>, input: Value) -> Result<Value, ApiErro
     let fingerprint = evaluator::hash(&serde_json::to_vec(&json!({"keys":input})).unwrap());
     if let Some(receipt) = state.requests.get(&request_id) {
         if receipt.fingerprint != fingerprint {
-            return Err(ApiError(
+            return Err(ApiError::new(
                 StatusCode::CONFLICT,
                 "REQUEST_ID_REUSED",
                 "requestId was already used for different content".into(),

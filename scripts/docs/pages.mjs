@@ -16,8 +16,8 @@ export const pages = [
   {
     path: "guide/applications.html", group: "guide", label: "Applications",
     title: "Your code is the API.",
-    lead: "An app is collections of JSON records, values derived from them, and methods that read or change them. Only the methods you list are public.",
-    description: "Define collections, derived values, queries and mutations, and choose which methods are public.",
+    lead: "An app is collections of JSON records, values derived from them, and methods that read or change them. Schemas check what comes in; only the methods you list are public.",
+    description: "Define collections, schemas, derived values, queries and mutations, fail with structured errors, and choose which methods are public.",
   },
   {
     path: "guide/reactivity.html", group: "guide", label: "Reactive values",
@@ -26,10 +26,22 @@ export const pages = [
     description: "How Flower tracks dependencies, keeps materialized values current, and maintains aggregates from row deltas.",
   },
   {
+    path: "guide/components.html", group: "guide", label: "Components & tasks",
+    title: "Build from parts.",
+    lead: "A component bundles collections, definitions, background tasks and triggers. Plug it into <code>define({ uses })</code> and it just works.",
+    description: "Compose Flower applications from components, background tasks and triggers, and learn how maintenance runs them.",
+  },
+  {
     path: "guide/methods.html", group: "guide", label: "Methods & retries",
     title: "Call methods safely.",
-    lead: "Call queries and mutations from TypeScript, the CLI or plain HTTP. A request ID makes retries safe.",
-    description: "Call Flower methods over HTTP or the SDK, authorize callers, retry safely, and span several groups in one transaction.",
+    lead: "Call queries and mutations from typed TypeScript, the CLI or plain HTTP. A request ID makes retries safe.",
+    description: "Call Flower methods with the typed client or HTTP, handle structured failures, retry safely, and span several partitions in one transaction.",
+  },
+  {
+    path: "guide/access.html", group: "guide", label: "Access control",
+    title: "Decide who can call what.",
+    lead: "Authenticate callers once, then give each public method an access rule. Flower checks it before every call, retry and watch refresh.",
+    description: "Authenticate Flower callers with JWTs or your own function, and set access per method.",
   },
   {
     path: "guide/reads.html", group: "guide", label: "Reads & live queries",
@@ -44,10 +56,10 @@ export const pages = [
     description: "Schedule durable callbacks that run application mutations after a deadline.",
   },
   {
-    path: "guide/leases.html", group: "guide", label: "Leases & expiry",
+    path: "guide/leases.html", group: "guide", label: "Queues & expiry",
     title: "Hand out work. Let records expire.",
-    lead: "Give a job to one worker at a time, and treat old records as gone. Both are plain TypeScript helpers.",
-    description: "Lease work to external workers, fence results, and expire records with ordinary TypeScript.",
+    lead: "Queue jobs for workers, with leases, retries and delays, and let old records disappear. Both are components written in plain TypeScript.",
+    description: "Queue jobs with leases, retries and fencing for external workers, and expire records, with ordinary TypeScript components.",
   },
   {
     path: "guide/workers.html", group: "guide", label: "External workers",
@@ -58,14 +70,20 @@ export const pages = [
   {
     path: "guide/worker-pools.html", group: "guide", label: "Worker pools",
     title: "Run a pool of workers.",
-    lead: "A complete, tested job worker. Start as many copies as you like: they share one queue, and when one dies, another finishes its jobs.",
-    description: "A complete, tested Flower job worker: run many copies, survive crashes and outages, and know when to add more.",
+    lead: "A complete job worker in forty lines. Start as many copies as you like: they share one queue, and when one dies, another finishes its jobs.",
+    description: "Run a pool of Flower job workers with runQueueWorker: many copies, crashes and outages survived, and when to add more.",
   },
   {
     path: "guide/crypto.html", group: "guide", label: "Crypto & tokens",
     title: "Sign and encrypt without seeing the keys.",
     lead: "Use NaCl and JWT inside your methods. Private keys stay in the server; your code only gets handles.",
     description: "Use NaCl and JWT inside Flower callbacks, with managed keys that never enter application memory.",
+  },
+  {
+    path: "guide/testing.html", group: "guide", label: "Testing",
+    title: "Test without a server.",
+    lead: "Run your application in-process, call it synchronously, move the clock, and drive the real client from <code>node --test</code>.",
+    description: "Test Flower applications in-process with testDatabase: calls, time, maintenance, clients, partitions and transactions.",
   },
   {
     path: "guide/deployments.html", group: "guide", label: "Deploy changes",
@@ -108,25 +126,49 @@ export const pages = [
     path: "reference/data.html", group: "reference", label: "Values & collections",
     title: "Values and collections.",
     lead: "What a value can be, how collections and indexes work, and incremental totals.",
-    description: "Reference for Flower values, collections, indexes, ordered scans and incremental aggregates.",
+    description: "Reference for Flower values, collections, typed keys, indexes, ordered scans and incremental aggregates.",
+  },
+  {
+    path: "reference/schemas.html", group: "reference", label: "Schemas & failures",
+    title: "Schemas and failures.",
+    lead: "Validators whose types flow into methods, records and clients, and the structured failures callers receive.",
+    description: "Reference for Flower schemas (v), validation errors, fail() and the built-in failure codes.",
   },
   {
     path: "reference/definitions.html", group: "reference", label: "Contexts & definitions",
     title: "Contexts and definitions.",
     lead: "What a method can do with <code>ctx</code>, and how <code>define</code> builds the public method list.",
-    description: "Reference for callback contexts, definitions and the public method table.",
+    description: "Reference for callback contexts, definitions, method specs and the public method table.",
+  },
+  {
+    path: "reference/components.html", group: "reference", label: "Components & tasks",
+    title: "Components, tasks and triggers.",
+    lead: "Reusable parts for <code>define({ uses })</code>, background work, and reactions to changed rows.",
+    description: "Reference for Flower components, maintenance tasks and triggers.",
   },
   {
     path: "reference/client.html", group: "reference", label: "Client & transports",
     title: "Client and transports.",
-    lead: "<code>FlowerClient</code>, live watches, and the HTTP/2 transport.",
-    description: "Reference for FlowerClient, SSE watches and the HTTP/2 transport.",
+    lead: "<code>FlowerClient</code> for your methods, <code>FlowerAdmin</code> for operators, live values, and the HTTP/2 transport.",
+    description: "Reference for FlowerClient, FlowerAdmin, retries, live subscriptions and the HTTP/2 transport.",
   },
   {
-    path: "reference/time.html", group: "reference", label: "Expiry, leases & timers",
-    title: "Expiry, leases and timers.",
-    lead: "Records that expire, jobs leased to one worker, and callbacks that run later.",
-    description: "Reference for expiring records, worker leases and delayed callbacks.",
+    path: "reference/time.html", group: "reference", label: "Queues, expiry & timers",
+    title: "Queues, expiry and timers.",
+    lead: "Jobs leased to one worker at a time, records that expire, and callbacks that run later.",
+    description: "Reference for work queues, expiring records and delayed callbacks.",
+  },
+  {
+    path: "reference/workers.html", group: "reference", label: "External values & workers",
+    title: "External values and workers.",
+    lead: "Results computed outside the database, and the worker loops that keep them current and queues moving.",
+    description: "Reference for external values, reconcile and runQueueWorker.",
+  },
+  {
+    path: "reference/testing.html", group: "reference", label: "Testing",
+    title: "Testing.",
+    lead: "An in-process database for tests: the same methods, errors and client, with time under your control.",
+    description: "Reference for testDatabase, TestDatabase and TestPartition.",
   },
   {
     path: "reference/crypto.html", group: "reference", label: "NaCl & JWT",
@@ -161,8 +203,8 @@ export const pages = [
   {
     path: "reference/access.html", group: "reference", label: "Authorization & retention",
     title: "Authorization and retention.",
-    lead: "Check every caller, and limit how long retry results are kept.",
-    description: "Reference for application authorization and retry-history retention.",
+    lead: "Authenticate callers, set access per method, and limit how long retry results are kept.",
+    description: "Reference for authentication, per-method access and retry-history retention.",
   },
   {
     path: "reference/limits.html", group: "reference", label: "Operational limits",

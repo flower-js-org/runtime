@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { FlowerClient } from "./client.ts";
+import { FlowerAdmin, FlowerClient } from "./client.ts";
 
 test("bounded retry IDs pin their original epoch until explicitly refreshed", async()=>{
   let epoch=0;const sent:any[]=[];
@@ -35,7 +35,7 @@ test("bounded retries fail before mutation when the server has no history identi
 test("transaction closure uses operator routing and preserves explicit bounded progress",async()=>{
   const sent:any[]=[];
   const value={history:"a".repeat(32),nextSequence:10,closedThrough:4,pending:null,blockedReason:null,deletedRecords:0};
-  const client=new FlowerClient("https://db.example/partitions/shop",{adminToken:"operator",fetch:async(url,init)=>{
+  const client=new FlowerAdmin("https://db.example/partitions/shop",{adminToken:"operator",fetch:async(url,init)=>{
     sent.push({url,headers:init.headers,body:JSON.parse(init.body)});
     return new Response(JSON.stringify({revision:20,value}));
   }});
@@ -46,11 +46,24 @@ test("transaction closure uses operator routing and preserves explicit bounded p
   assert.deepEqual(sent.map(item=>item.body),[{operation:"status"},{operation:"close",through:7,maxBytes:4096},{operation:"collect",maxBytes:2048}]);
 });
 
+test("retention control is revision-conditional operator routing",async()=>{
+  const sent:any[]=[];
+  const admin=new FlowerAdmin("https://db.example/",{adminToken:"operator",fetch:async(url,init)=>{
+    sent.push({url,headers:init.headers,body:JSON.parse(init.body)});
+    return new Response(JSON.stringify({revision:3,value:null,duplicate:false}));
+  }});
+  assert.equal((await admin.retentionStatus()).revision,3);
+  const action={operation:"advance" as const,incarnation:"b".repeat(32),current_epoch:2,min_epoch:1};
+  await admin.controlRetention(3,action);
+  assert.ok(sent.every(item=>item.url==="https://db.example/admin/retention"&&item.headers.authorization==="Bearer operator"));
+  assert.deepEqual(sent.map(item=>item.body),[{operation:"status"},{expected_revision:3,action}]);
+});
+
 test("staged deployment controls preserve durable job identity and explicit progress",async()=>{
   const sent:any[]=[];
   const value={requestId:"deploy-1",phase:"backfill",baseRevision:10,baseBundleHash:null,
     bundleHash:"a".repeat(64),cursor:null,scannedRows:0,builtEntries:0,cleanupCursor:null};
-  const client=new FlowerClient("https://db.example/partitions/shop",{adminToken:"operator",fetch:async(url,init)=>{
+  const client=new FlowerAdmin("https://db.example/partitions/shop",{adminToken:"operator",fetch:async(url,init)=>{
     sent.push({url,headers:init.headers,body:JSON.parse(init.body)});
     return new Response(JSON.stringify({revision:20,value}));
   }});

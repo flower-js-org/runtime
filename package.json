@@ -24,6 +24,14 @@
       "types": "./dist/scheduler.d.ts",
       "import": "./dist/scheduler.js"
     },
+    "./worker": {
+      "types": "./dist/worker.d.ts",
+      "import": "./dist/worker.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js"
+    },
     "./http2": {
       "types": "./dist/http2.d.ts",
       "import": "./dist/http2.js"

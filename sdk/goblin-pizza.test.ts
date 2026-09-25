@@ -1,313 +1,307 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { createContext, runInContext } from "node:vm";
-import { buildBundle } from "./bundle.ts";
-import { canonicalJson } from "./index.ts";
+import { fileURLToPath } from "node:url";
+import app from "../examples/goblin-pizza.ts";
+import { FlowerError, type Update } from "./client.ts";
+import { canonicalJson, type Json } from "./json.ts";
+import { testDatabase, type TestDatabase } from "./testing.ts";
 
-const bundle = await buildBundle(new URL("../examples/goblin-pizza.ts", import.meta.url).pathname);
-const engine = readFileSync(new URL("../runtime/engine.js", import.meta.url), "utf8");
-const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value));
+// The bundled example runs in an isolated context on Flower's reference engine,
+// as the server runs it; the imported module is only read for its manifest.
+const entry = fileURLToPath(new URL("../examples/goblin-pizza.ts", import.meta.url));
+const T0 = 1_000_000;
 const tenant = "tenant-0";
 const shop = (index: number, owner = tenant): [string, string] => [owner, `store-${index}`];
-const key = (id: string, index = 0, owner = tenant): string => canonicalJson([owner, `store-${index}`, id]);
-const cell = (name: string, args: unknown): string => `cell:${canonicalJson([name, args])}`;
+const key = (id: string, index = 0, owner = tenant) => canonicalJson([owner, `store-${index}`, id]);
+const cell = (name: string, args: Json) => `cell:${canonicalJson([name, args])}`;
+const root = (name: string, args: Json) => `root:${canonicalJson([name, args])}`;
+const row = (collection: string, raw: string) => `source:${canonicalJson([collection, raw])}`;
+type Kitchen = TestDatabase<typeof app>;
 
-// Exercise the actual bundled application against Flower's reactive engine.
-// Only the commit loop and trusted clock are simulated; failed evaluations
-// never install their staged writes, just as in the HTTP/Raft service.
-function kitchen(options: { tenants?: string[]; shops?: number; stockPerShop?: number; bakeMs?: number; leaseMs?: number } = {}) {
-  const sandbox = createContext(Object.create(null));
-  runInContext(bundle.javascript, sandbox, { timeout: 1_000 });
-  runInContext(engine, sandbox, { timeout: 1_000 });
-  const module = sandbox.__flowerBundle.default;
-  let data: Record<string, any> = {};
-  let sequence = 0;
-  let time = 1_000;
-  let evaluated: string[] = [];
-  function evaluateDerived(name: string, args: any, ctx: any) {
-    const definition = module.definitions[name];
-    if (!definition.aggregate) return definition.compute(ctx, args);
-    // Independent reference path: rebuild from a keyed scan every time instead
-    // of sharing the production Rust index/delta implementation under test.
-    const { collection, fields } = definition.aggregate;
-    const changes = ctx.scan({ kind: "collection", name: collection })
-      .filter(({ value }: any) => fields.every((field: string, position: number) =>
-        Object.hasOwn(value, field) && canonicalJson(value[field]) === canonicalJson(fields.length === 1 ? args : args[position])))
-      .map(({ key, value }: any) => ({ key, new: value }));
-    return definition.compute(undefined, { initialize: true, group: args, previous: null, changes });
-  }
-  function invoke(kind: "query" | "mutation", name: string, args: unknown) {
-    const before = JSON.stringify(data);
-    let output;
-    try {
-      output = plain(sandbox.flowerInvoke(data, { kind, name, args, requestId: `pizza-test-${sequence++}` },
-        (method: string, input: unknown, ctx: unknown) => module.definitions[method].compute(ctx, input),
-        evaluateDerived, time));
-    } finally {
-      assert.equal(JSON.stringify(data), before, "evaluation must preserve its input snapshot");
-    }
-    data = { ...data, ...output.puts };
-    for (const key of output.deletes) delete data[key];
-    evaluated = output.evaluated;
-    return output;
-  }
-  const db = {
-    get data() { return plain(data); },
-    get manifest() { return module; },
-    get evaluated() { return [...evaluated]; },
-    get time() { return time; },
-    set time(value: number) { time = value; },
-    call(alias: string, args: unknown = alias === "pizza.dashboard" ? { tenant } : null) {
-      const method = module.http[alias];
-      assert.ok(method, `No public method ${alias}`);
-      return invoke(method.kind, method.name, args).value;
-    },
-    maintenance() { return invoke("mutation", module.maintenance.name, null); },
-  };
-  db.call("pizza.setup", { tenants: options.tenants ?? [tenant], storesPerTenant: options.shops ?? 2, stockPerShop: options.stockPerShop ?? 100, bakeMs: options.bakeMs ?? 50, leaseMs: options.leaseMs ?? 100 });
+async function kitchen(options: { tenants?: string[]; shops?: number; stockPerShop?: number; bakeMs?: number; leaseMs?: number } = {}): Promise<Kitchen> {
+  const db = await testDatabase<typeof app>(entry, { now: T0 });
+  db.mutate("pizza.setup", {
+    tenants: options.tenants ?? [tenant], storesPerTenant: options.shops ?? 2, stockPerShop: options.stockPerShop ?? 100,
+    bakeMs: options.bakeMs ?? 50, leaseMs: options.leaseMs ?? 100,
+  });
   return db;
 }
 
-test("goblin ovens run at their deadline and deliveries update reactive accounting atomically", () => {
-  const db = kitchen();
-  const order = db.call("pizza.order", { id: "pepperoni", shop: shop(0), quantity: 3 });
-  assert.equal(order.status, "baking");
-  assert.equal(order.createdAt, 1_000);
-  assert.equal(order.dueAt, 1_050);
-  let world = db.call("pizza.world");
-  assert.equal(world.timers[0].dueAt, 1_050);
+function fails(action: () => unknown, code: string): FlowerError {
+  let caught: unknown;
+  assert.throws(action, (error) => { caught = error; return true; });
+  assert.ok(caught instanceof FlowerError, String(caught));
+  assert.equal(caught.failure?.code, code, caught.message);
+  return caught;
+}
+
+function claim(db: Kitchen, owner: string, forTenant = tenant) {
+  const job = db.mutate("pizza.claim", { tenant: forTenant, owner });
+  assert.ok(job, `${owner} found no delivery`);
+  return job;
+}
+
+const deliver = (db: Kitchen, job: { id: string; owner: string; token: number }, forTenant = tenant) =>
+  db.mutate("pizza.deliver", { tenant: forTenant, id: job.id, owner: job.owner, token: job.token });
+
+const pick = <T extends object, K extends keyof T>(value: T, ...keys: K[]) => Object.fromEntries(keys.map((name) => [name, value[name]]));
+const outcome = (db: Kitchen, id: string) => (db.data[id] as { outcome: { value: Json } }).outcome.value;
+const changed = (before: Record<string, Json>, after: Record<string, Json>) =>
+  [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((id) => canonicalJson(before[id] ?? null) !== canonicalJson(after[id] ?? null)).sort();
+
+async function next<T>(updates: AsyncGenerator<Update<T>>): Promise<T> {
+  const result = await updates.next();
+  assert.equal(result.done, false);
+  return (result.value as Update<T>).value;
+}
+
+test("ovens fire at their deadline and a delivery updates stock, revenue and summaries atomically", async () => {
+  const db = await kitchen();
+  const order = db.mutate("pizza.order", { id: "pepperoni", shop: shop(0), quantity: 3 });
+  assert.deepEqual([order.status, order.createdAt, order.dueAt], ["baking", T0, T0 + 50]);
+  let world = db.query("pizza.world");
+  assert.deepEqual(world.timers.map((timer) => [timer.id, timer.dueAt]), [[`bake:${key("pepperoni")}`, T0 + 50]]);
   assert.equal(world.jobs.length, 0);
-  assert.deepEqual({ stock: world.summaries[0].stock, baking: world.summaries[0].baking, quantity: world.summaries[0].orderedQuantity }, { stock: 97, baking: 1, quantity: 3 });
-  db.time = 1_049;
-  assert.equal(db.maintenance().value, null);
-  assert.equal(db.call("pizza.claim", { tenant, owner: "drone-1" }), null);
-  db.time = 1_050;
-  assert.deepEqual(db.maintenance().value, { id: `bake:${key("pepperoni")}`, $flower: { continue: false } });
-  const claim = db.call("pizza.claim", { tenant, owner: "drone-1" });
-  assert.deepEqual(claim.payload, { orderId: "pepperoni", shop: shop(0), quantity: 3 });
-  const delivered = db.call("pizza.deliver", { tenant, id: claim.id, owner: claim.owner, token: claim.token });
-  assert.equal(delivered.deliveredAt, 1_050);
-  assert.ok(delivered.readyAt >= delivered.dueAt);
-  world = db.call("pizza.world");
+  assert.deepEqual(pick(world.summaries[0], "stock", "baking", "orderedQuantity"), { stock: 97, baking: 1, orderedQuantity: 3 });
+
+  db.advance(49);
+  assert.equal(db.query("pizza.world").timers.length, 1);
+  assert.equal(db.mutate("pizza.claim", { tenant, owner: "drone-1" }), null);
+  assert.equal(db.advance(1), 1, "exactly the oven bell rings");
+  const job = claim(db, "drone-1");
+  assert.deepEqual(job.payload, { orderId: "pepperoni", shop: shop(0), quantity: 3 });
+  const delivered = deliver(db, job);
+  assert.deepEqual([delivered.status, delivered.readyAt, delivered.deliveredAt], ["delivered", T0 + 50, T0 + 50]);
+
+  world = db.query("pizza.world");
   assert.equal(world.timers.length, 0);
-  assert.equal(world.jobs[0].state, "completed");
-  assert.equal(world.jobs[0].result.deliveredAt, delivered.deliveredAt);
-  assert.equal(world.summaries[0].revenue, 21);
-  assert.equal(world.summaries[0].deliveredQuantity, 3);
-  assert.equal(world.summaries[0].ready, 0);
-  assert.equal(world.summaries[0].baking, 0);
+  assert.deepEqual([world.jobs[0].state, world.jobs[0].result], ["completed", { deliveredAt: T0 + 50 }]);
+  assert.deepEqual(pick(world.summaries[0], "stock", "revenue", "orders", "baking", "ready", "delivered", "deliveredQuantity"),
+    { stock: 97, revenue: 21, orders: 1, baking: 0, ready: 0, delivered: 1, deliveredQuantity: 3 });
   assert.deepEqual(world.leaderboards[tenant][0].id, shop(0));
-  const materialized = db.data[cell("pizza.shopSummary", shop(0))];
-  assert.deepEqual(materialized.outcome.value, world.summaries[0], "materialized summary tracks completed delivery");
+  assert.deepEqual(outcome(db, cell("pizza.shopSummary", shop(0))), world.summaries[0], "the materialized summary tracks the delivery");
 });
 
-test("invalid orders, duplicate IDs, and exhausted dough leave no partial stock or timers", () => {
-  const db = kitchen({ stockPerShop: 3 });
-  db.call("pizza.order", { id: "last-pizza", shop: shop(0), quantity: 3 });
-  for (const args of [
-    { id: "last-pizza", shop: shop(0), quantity: 1 },
-    { id: "too-many", shop: shop(0), quantity: 1 },
-    { id: "bad-count", shop: shop(1), quantity: 0 },
-    { id: "bad-count", shop: shop(1), quantity: 1.5 },
-    { id: "bad-count", shop: shop(1), quantity: 5 },
-    { id: "bad-shop", shop: shop(9), quantity: 1 },
-    { id: "has spaces", shop: shop(1), quantity: 1 },
-    { id: "extra", shop: shop(1), quantity: 1, discount: 100 },
-    null,
-  ]) {
+test("shop summaries are materialized per shop row without ctx.materialize and stay current on writes", async () => {
+  const db = await kitchen({ shops: 3 });
+  const roots = [0, 1, 2].map((index) => root("pizza.shopSummary", shop(index))).sort();
+  assert.deepEqual(Object.keys(db.data).filter((id) => id.startsWith("root:")).sort(), roots, "setup's shop rows created their summaries");
+  db.mutate("pizza.tip", { shop: shop(1), amount: 5 });
+  const stored = outcome(db, cell("pizza.shopSummary", shop(1))) as { tips: number };
+  assert.equal(stored.tips, 5, "a write refreshes the durable summary without anyone reading it");
+  assert.deepEqual(stored, db.query("pizza.shop", shop(1)));
+  db.maintain();
+  assert.deepEqual(Object.keys(db.data).filter((id) => id.startsWith("root:")).sort(), roots, "the backfill adds nothing more");
+});
+
+test("invalid orders, duplicate IDs and exhausted dough leave no stock, order or timer behind", async () => {
+  const db = await kitchen({ stockPerShop: 3 });
+  db.mutate("pizza.order", { id: "last-pizza", shop: shop(0), quantity: 3 });
+  for (const [args, code] of [
+    [{ id: "last-pizza", shop: shop(0), quantity: 1 }, "ORDER_EXISTS"],
+    [{ id: "too-many", shop: shop(0), quantity: 1 }, "OUT_OF_STOCK"],
+    [{ id: "bad-count", shop: shop(1), quantity: 0 }, "INVALID_ARGUMENT"],
+    [{ id: "bad-count", shop: shop(1), quantity: 1.5 }, "INVALID_ARGUMENT"],
+    [{ id: "bad-count", shop: shop(1), quantity: 5 }, "INVALID_ARGUMENT"],
+    [{ id: "bad-shop", shop: shop(9), quantity: 1 }, "SHOP_NOT_FOUND"],
+    [{ id: "has spaces", shop: shop(1), quantity: 1 }, "INVALID_ARGUMENT"],
+    [{ id: "extra", shop: shop(1), quantity: 1, discount: 100 }, "INVALID_ARGUMENT"],
+    [null, "INVALID_ARGUMENT"],
+  ] as const) {
     const before = db.data;
-    assert.throws(() => db.call("pizza.order", args));
+    fails(() => db.mutate("pizza.order", args as never), code);
     assert.deepEqual(db.data, before);
   }
-  const world = db.call("pizza.world");
+  const error = fails(() => db.mutate("pizza.order", { id: "bad-count", shop: shop(1), quantity: 5 }), "INVALID_ARGUMENT");
+  assert.deepEqual([error.status, error.code, error.failure?.message, error.failure?.details], [422, "EVALUATION_FAILED", "quantity: must be at most 4", { path: ["quantity"] }]);
+  const world = db.query("pizza.world");
   assert.equal(world.orders.length, 1);
   assert.equal(world.timers.length, 1);
-  assert.equal(world.shops[0].stock, 0);
-  assert.equal(world.shops[1].stock, 3);
+  assert.deepEqual(world.shops.map((each) => each.stock), [0, 3]);
 });
 
-test("abandoned drones lose their lease and fencing rejects stale and repeated deliveries", () => {
-  const db = kitchen({ bakeMs: 0, leaseMs: 20 });
-  db.call("pizza.order", { id: "mushroom", shop: shop(0), quantity: 2 });
-  db.maintenance();
-  const first = db.call("pizza.claim", { tenant, owner: "sleepy-drone" });
-  assert.equal(first.expiresAt, 1_020);
-  db.time = 1_019;
-  assert.equal(db.call("pizza.claim", { tenant, owner: "rescue-drone" }), null);
-  db.time = 1_020;
-  const second = db.call("pizza.claim", { tenant, owner: "rescue-drone" });
-  assert.equal(second.id, first.id);
-  assert.equal(second.attempt, 2);
+test("an abandoned drone's lease expires, and fencing rejects stale and repeated deliveries with LEASE_LOST", async () => {
+  const db = await kitchen({ bakeMs: 0, leaseMs: 20 });
+  db.mutate("pizza.order", { id: "mushroom", shop: shop(0), quantity: 2 });
+  db.maintain();
+  const first = claim(db, "sleepy-drone");
+  assert.equal(first.expiresAt, T0 + 20);
+  db.now = T0 + 19;
+  assert.equal(db.mutate("pizza.claim", { tenant, owner: "rescue-drone" }), null);
+  db.now = T0 + 20;
+  const second = claim(db, "rescue-drone");
+  assert.deepEqual([second.id, second.attempt], [first.id, 2]);
   assert.ok(second.token > first.token);
+
   let before = db.data;
-  assert.throws(() => db.call("pizza.deliver", { tenant, id: first.id, owner: first.owner, token: first.token }), (error: any) => error.code === "LEASE_LOST");
+  fails(() => deliver(db, first), "LEASE_LOST");
   assert.deepEqual(db.data, before);
-  const identity = { tenant, id: second.id, owner: second.owner, token: second.token };
-  db.call("pizza.deliver", identity);
+  deliver(db, second);
   before = db.data;
-  assert.throws(() => db.call("pizza.deliver", identity), (error: any) => error.code === "LEASE_LOST");
+  fails(() => deliver(db, second), "LEASE_LOST");
   assert.deepEqual(db.data, before);
-  const world = db.call("pizza.world");
+  const world = db.query("pizza.world");
   assert.equal(world.shops[0].revenue, 14);
   assert.equal(world.summaries[0].delivered, 1);
   assert.equal(world.jobs[0].attempts, 2);
 });
 
-test("tips and order transitions propagate through per-shop summaries into the leaderboard", () => {
-  const db = kitchen({ shops: 3, bakeMs: 0 });
+test("retries that reuse a request ID get the original receipt instead of applying twice", async () => {
+  const db = await kitchen({ bakeMs: 0 });
+  const args = { id: "retry", shop: shop(0), quantity: 2 };
+  const placed = await db.client.mutate("pizza.order", args, { requestId: "order-1" });
+  assert.equal(placed.duplicate, false);
+  assert.deepEqual(await db.client.mutate("pizza.order", args, { requestId: "order-1" }), { ...placed, duplicate: true });
+  assert.equal(db.query("pizza.shop", shop(0)).stock, 98);
+  await assert.rejects(db.client.mutate("pizza.order", { ...args, quantity: 1 }, { requestId: "order-1" }), { status: 409, code: "REQUEST_ID_REUSED" });
+  fails(() => db.mutate("pizza.order", args), "ORDER_EXISTS");
+
+  db.maintain();
+  const job = db.mutate("pizza.claim", { tenant, owner: "drone" }, { requestId: "claim-1" });
+  assert.ok(job);
+  assert.deepEqual(db.mutate("pizza.claim", { tenant, owner: "drone" }, { requestId: "claim-1" }), job, "a retried claim returns the same lease");
+  assert.equal(db.mutate("pizza.claim", { tenant, owner: "drone" }), null);
+  const identity = { tenant, id: job.id, owner: job.owner, token: job.token };
+  const delivered = db.mutate("pizza.deliver", identity, { requestId: "deliver-1" });
+  const revision = db.revision;
+  assert.deepEqual(db.mutate("pizza.deliver", identity, { requestId: "deliver-1" }), delivered);
+  assert.equal(db.revision, revision);
+  fails(() => db.mutate("pizza.deliver", identity), "LEASE_LOST");
+  assert.equal(db.query("pizza.shop", shop(0)).revenue, 14);
+});
+
+test("tips and deliveries propagate through per-shop summaries into the leaderboard", async () => {
+  const db = await kitchen({ shops: 3, bakeMs: 0 });
   for (let index = 0; index < 9; index++) {
-    db.call("pizza.order", { id: `pizza-${index}`, shop: shop(index % 3), quantity: index % 4 + 1 });
-    db.maintenance();
-    const claim = db.call("pizza.claim", { tenant, owner: `drone-${index}` });
-    db.call("pizza.deliver", { tenant, id: claim.id, owner: claim.owner, token: claim.token });
+    db.mutate("pizza.order", { id: `pizza-${index}`, shop: shop(index % 3), quantity: index % 4 + 1 });
+    db.maintain();
+    deliver(db, claim(db, `drone-${index}`));
   }
-  db.call("pizza.tip", { shop: shop(1), amount: 100 });
-  db.call("pizza.tip", { shop: shop(1), amount: 13 });
-  const world = db.call("pizza.world");
-  const expected = world.shops.map((shop: any) => {
-    const orders = world.orders.filter((order: any) => canonicalJson(order.shop) === canonicalJson(shop.id));
-    const quantity = orders.reduce((sum: number, order: any) => sum + order.quantity, 0);
-    assert.equal(shop.initialStock - shop.stock, quantity);
-    assert.equal(shop.revenue, quantity * world.config.unitPrice);
-    return { ...shop, orders: orders.length, baking: 0, ready: 0, delivered: orders.length, orderedQuantity: quantity, deliveredQuantity: quantity };
+  db.mutate("pizza.tip", { shop: shop(1), amount: 100 });
+  db.mutate("pizza.tip", { shop: shop(1), amount: 13 });
+  const world = db.query("pizza.world");
+  const expected = world.shops.map((each) => {
+    const orders = world.orders.filter((order) => canonicalJson(order.shop) === canonicalJson(each.id));
+    const quantity = orders.reduce((sum, order) => sum + order.quantity, 0);
+    assert.equal(each.initialStock - each.stock, quantity);
+    assert.equal(each.revenue, quantity * world.config.unitPrice);
+    return { ...each, orders: orders.length, baking: 0, ready: 0, delivered: orders.length, orderedQuantity: quantity, deliveredQuantity: quantity };
   });
   assert.deepEqual(world.summaries, expected);
-  expected.sort((a: any, b: any) => (b.revenue + b.tips) - (a.revenue + a.tips) || a.key.localeCompare(b.key));
+  expected.sort((a, b) => (b.revenue + b.tips) - (a.revenue + a.tips) || (a.key < b.key ? -1 : 1));
   assert.deepEqual(world.leaderboards[tenant], expected);
-  assert.deepEqual(world.leaderboards[tenant][0].id, shop(1));
-  assert.equal(world.leaderboards[tenant][0].tips, 113);
-  assert.deepEqual(db.call("pizza.shop", shop(2)), world.summaries[2]);
+  assert.deepEqual([world.leaderboards[tenant][0].id, world.leaderboards[tenant][0].tips], [shop(1), 113]);
+  assert.deepEqual(db.query("pizza.shop", shop(2)), world.summaries[2]);
 });
 
-test("tips reuse order statistics while order creation, baking, and delivery refresh them", () => {
-  const db = kitchen();
+test("a tip recomputes only its shop summary while order transitions refresh order statistics", async () => {
+  const db = await kitchen();
   const stats = cell("pizza.orderStats", shop(0));
-  assert.ok(db.evaluated.includes(stats), "setup retains the order-statistics dependency");
-  db.call("pizza.order", { id: "cached-mushroom", shop: shop(0), quantity: 2 });
-  assert.ok(db.evaluated.includes(stats), "new orders refresh order statistics");
-  const before = db.data[stats];
-  db.time += 1;
-  db.call("pizza.tip", { shop: shop(0), amount: 11 });
-  assert.deepEqual(db.evaluated.sort(), [
-    cell("pizza.shopSummary", shop(0)),
-  ], "a tip recomputes its accounting summary without rescanning orders or sorting rankings");
-  assert.deepEqual(db.data[stats], before);
-  assert.deepEqual(before.deps, ['collection:"pizza.orders"']);
-  assert.equal(db.call("pizza.shop", shop(0)).tips, 11);
+  db.mutate("pizza.order", { id: "cached-mushroom", shop: shop(0), quantity: 2 });
+  assert.deepEqual(outcome(db, stats), { orders: 1, baking: 1, ready: 0, delivered: 0, orderedQuantity: 2, deliveredQuantity: 0 });
+  let before = db.data;
+  db.mutate("pizza.tip", { shop: shop(0), amount: 11 });
+  assert.deepEqual(changed(before, db.data), [cell("pizza.shopSummary", shop(0)), row("pizza.shops", canonicalJson(shop(0)))],
+    "no order statistics, rankings or other shops are recomputed");
+  assert.equal(db.query("pizza.shop", shop(0)).tips, 11);
 
-  db.time = 1_050;
-  db.maintenance();
-  assert.ok(db.evaluated.includes(stats), "baking refreshes order status totals");
-  assert.equal(db.data[stats].outcome.value.ready, 1);
-  const claim = db.call("pizza.claim", { tenant, owner: "stats-drone" });
-  assert.ok(!db.evaluated.includes(stats), "leasing work leaves order statistics unchanged");
-  db.call("pizza.deliver", { tenant, id: claim.id, owner: claim.owner, token: claim.token });
-  assert.ok(db.evaluated.includes(stats), "delivery refreshes order statistics");
-  assert.deepEqual(db.data[stats].outcome.value, {
-    orders: 1, baking: 0, ready: 0, delivered: 1, orderedQuantity: 2, deliveredQuantity: 2,
-  });
-  const summary = db.call("pizza.shop", shop(0));
-  assert.equal(summary.revenue, 14);
-  assert.equal(summary.tips, 11);
+  db.advance(50);
+  assert.deepEqual(outcome(db, stats), { orders: 1, baking: 0, ready: 1, delivered: 0, orderedQuantity: 2, deliveredQuantity: 0 });
+  before = db.data;
+  const job = claim(db, "stats-drone");
+  assert.deepEqual(db.data[stats], before[stats], "leasing work leaves order statistics alone");
+  deliver(db, job);
+  assert.deepEqual(outcome(db, stats), { orders: 1, baking: 0, ready: 0, delivered: 1, orderedQuantity: 2, deliveredQuantity: 2 });
+  assert.deepEqual(pick(db.query("pizza.shop", shop(0)), "revenue", "tips"), { revenue: 14, tips: 11 });
 });
 
-test("rankings compute from current summaries on read without entering durable state", () => {
-  const db = kitchen({ shops: 3 });
-  const ranking = cell("pizza.leaderboard", tenant);
-  assert.equal(Object.hasOwn(db.data, ranking), false);
-  assert.equal(Object.hasOwn(db.data, ranking.replace(/^cell:/, "root:")), false);
-  let world = db.call("pizza.world");
-  assert.deepEqual(world.leaderboards[tenant].map((row: any) => row.id), [shop(0), shop(1), shop(2)]);
-  for (const [index, amount] of [[2, 9], [1, 15], [0, 21]]) {
-    db.call("pizza.tip", { shop: shop(index), amount });
-    assert.deepEqual(db.evaluated, [cell("pizza.shopSummary", shop(index))]);
+test("rankings are computed on read and never enter durable state", async () => {
+  const db = await kitchen({ shops: 3 });
+  assert.deepEqual(db.query("pizza.world").leaderboards[tenant].map((each) => each.id), [shop(0), shop(1), shop(2)]);
+  for (const [index, amount] of [[2, 9], [1, 15], [0, 21]] as const) {
+    db.mutate("pizza.tip", { shop: shop(index), amount });
     const before = db.data;
-    world = db.call("pizza.world");
-    assert.deepEqual(world.leaderboards[tenant][0].id, shop(index));
-    const board = db.call("pizza.dashboard");
+    assert.deepEqual(db.query("pizza.world").leaderboards[tenant][0].id, shop(index));
+    const board = db.query("pizza.dashboard", { tenant });
     assert.equal(board.leaderboard[0], canonicalJson(shop(index)));
     assert.equal(board.summaries[board.leaderboard[0]].tips, amount);
-    assert.deepEqual(db.data, before, "observing a ranking must not install a durable cell or root");
-    assert.equal(Object.hasOwn(db.data, ranking), false);
+    assert.deepEqual(db.data, before);
+    assert.ok(!Object.keys(db.data).some((id) => id.includes('"pizza.leaderboard"')));
   }
 });
 
-test("setup and lease policy are enforced, and only explicit business aliases are exposed", () => {
-  const db = kitchen({ leaseMs: 10 });
+test("setup and lease policy are enforced, and only the business aliases are public", async () => {
+  const db = await kitchen({ leaseMs: 10 });
   const before = db.data;
-  assert.throws(() => db.call("pizza.setup", { tenants: [tenant], storesPerTenant: 1, stockPerShop: 1, bakeMs: 0, leaseMs: 10 }), /already open/);
-  assert.throws(() => db.call("pizza.claim", { tenant, owner: "drone", leaseMs: 11 }), /Lease duration/);
-  assert.throws(() => db.call("pizza.claim", { tenant, owner: "drone", leaseMs: 0 }), /Lease duration/);
-  assert.throws(() => db.call("pizza.tip", { shop: shop(0), amount: -1 }), /Tip/);
-  assert.throws(() => db.call("pizza.world", {}), /takes null/);
+  fails(() => db.mutate("pizza.setup", { tenants: [tenant], storesPerTenant: 1, stockPerShop: 1, bakeMs: 0, leaseMs: 10 }), "ALREADY_INITIALIZED");
+  assert.match(fails(() => db.mutate("pizza.claim", { tenant, owner: "drone", leaseMs: 11 }), "INVALID_ARGUMENT").message, /at most 10 ms/);
+  assert.deepEqual(fails(() => db.mutate("pizza.claim", { tenant, owner: "drone", leaseMs: 0 }), "INVALID_ARGUMENT").failure?.details, { path: ["leaseMs"] });
+  assert.deepEqual(fails(() => db.mutate("pizza.tip", { shop: shop(0), amount: -1 }), "INVALID_ARGUMENT").failure?.details, { path: ["amount"] });
+  fails(() => db.query("pizza.world", {} as never), "INVALID_ARGUMENT");
   assert.deepEqual(db.data, before);
-  assert.deepEqual(Object.keys(db.manifest.http).sort(), ["pizza.claim", "pizza.dashboard", "pizza.deliver", "pizza.order", "pizza.setup", "pizza.shop", "pizza.shop.local", "pizza.tip", "pizza.world"]);
-  assert.equal(db.manifest.maintenance.name, "internal.scheduler.pizza.ovens.run");
-  assert.equal(Object.hasOwn(db.manifest.http, "internal.pizza.finishBaking"), false);
-  assert.equal(Object.hasOwn(db.manifest.http, "pizza.shopSummary"), false);
-  assert.equal(Object.hasOwn(db.manifest.http, "pizza.orderStats"), false);
+
+  assert.deepEqual(Object.keys(app.http).sort(), ["pizza.claim", "pizza.dashboard", "pizza.deliver", "pizza.order", "pizza.setup", "pizza.shop", "pizza.shop.local", "pizza.tip", "pizza.world"]);
+  assert.equal(app.maintenance?.name, "$flower.maintenance");
+  for (const hidden of ["internal.pizza.finishBaking", "internal.pizza.order", "pizza.shopSummary", "pizza.orderStats", "$flower.maintenance"]) {
+    assert.throws(() => (db as unknown as TestDatabase).call(hidden), { status: 404, code: "METHOD_NOT_FOUND" });
+  }
   for (const options of [{ shops: 0 }, { tenants: [] }, { tenants: [tenant, tenant] }, { stockPerShop: 0 }, { bakeMs: -1 }, { leaseMs: 60_001 }]) {
-    assert.throws(() => kitchen(options));
+    await assert.rejects(kitchen(options), (error: FlowerError) => error.failure?.code === "INVALID_ARGUMENT");
   }
 });
 
-test("only observational pizza methods opt into replica-local reads", () => {
-  const db = kitchen();
-  for (const alias of ["pizza.shop.local", "pizza.dashboard"]) {
-    const method = db.manifest.http[alias];
-    assert.equal(method.kind, "query");
-    assert.equal(method.consistency, "replica-local");
-    assert.equal(db.manifest.definitions[method.name].consistency, "replica-local");
+test("only observational methods opt into replica-local reads", async () => {
+  const db = await kitchen();
+  for (const alias of ["pizza.shop.local", "pizza.dashboard"] as const) {
+    assert.equal(app.http[alias].consistency, "replica-local");
+    assert.equal((app.definitions[app.http[alias].name] as { consistency?: string }).consistency, "replica-local");
   }
-  for (const alias of ["pizza.shop", "pizza.world", "pizza.setup", "pizza.order", "pizza.claim", "pizza.deliver", "pizza.tip"]) {
-    assert.equal(Object.hasOwn(db.manifest.http[alias], "consistency"), false);
+  for (const alias of ["pizza.shop", "pizza.world", "pizza.setup", "pizza.order", "pizza.claim", "pizza.deliver", "pizza.tip"] as const) {
+    assert.equal(Object.hasOwn(app.http[alias], "consistency"), false);
   }
-  assert.equal(db.manifest.definitions[db.manifest.http["pizza.shop.local"].name].compute,
-    db.manifest.definitions[db.manifest.http["pizza.shop"].name].compute);
-  db.call("pizza.tip", { shop: shop(0), amount: 17 });
-  assert.deepEqual(db.call("pizza.shop.local", shop(0)), db.call("pizza.shop", shop(0)),
-    "both policies compute the same value from the same snapshot");
-  const before = db.data;
-  assert.throws(() => db.call("pizza.shop.local", "bad shop"), /Shop ID/);
-  assert.throws(() => db.call("pizza.shop.local", shop(9)), /No goblin kitchen/);
-  assert.deepEqual(db.data, before);
+  db.mutate("pizza.tip", { shop: shop(0), amount: 17 });
+  assert.deepEqual(db.query("pizza.shop.local", shop(0)), db.query("pizza.shop", shop(0)), "both compute the same value from the same snapshot");
+  fails(() => db.query("pizza.shop.local", "bad shop" as never), "INVALID_ARGUMENT");
+  fails(() => db.query("pizza.shop.local", shop(9)), "SHOP_NOT_FOUND");
 });
 
-test("one dashboard value joins lifecycle records with stable keys and whole-world totals", () => {
-  const db = kitchen({ bakeMs: 0 });
-  db.call("pizza.order", { id: "dashboard-pizza", shop: shop(0), quantity: 2 });
-  let board = db.call("pizza.dashboard");
+test("the dashboard joins lifecycle records under stable keys with tenant totals, live over SSE", async () => {
+  const db = await kitchen({ bakeMs: 0 });
+  db.mutate("pizza.order", { id: "dashboard-pizza", shop: shop(0), quantity: 2 });
+  let board = db.query("pizza.dashboard", { tenant });
   assert.equal(board.orders[key("dashboard-pizza")].status, "baking");
   assert.equal(board.timers[`bake:${key("dashboard-pizza")}`].handler, "bake");
   assert.deepEqual(board.totals, { orders: 1, baking: 1, ready: 0, delivered: 0, pizzas: 0, revenue: 0, tips: 0 });
-  const before = db.data;
-  assert.throws(() => db.call("pizza.dashboard", { raw: true }), /unsupported property/);
-  assert.deepEqual(db.data, before);
-  db.maintenance();
-  const claim = db.call("pizza.claim", { tenant, owner: "dashboard-drone" });
-  board = db.call("pizza.dashboard");
-  assert.equal(board.jobs[claim.id].lease.token, claim.token);
-  assert.equal(board.jobs[claim.id].lease.owner, "dashboard-drone");
+  fails(() => db.query("pizza.dashboard", { tenant, raw: true } as never), "INVALID_ARGUMENT");
+
+  db.maintain();
+  const job = claim(db, "dashboard-drone");
+  board = db.query("pizza.dashboard", { tenant });
+  assert.deepEqual([board.jobs[job.id].lease?.owner, board.jobs[job.id].lease?.token], ["dashboard-drone", job.token]);
   assert.deepEqual(board.timers, {});
-  db.call("pizza.deliver", { tenant, id: claim.id, owner: claim.owner, token: claim.token });
-  db.call("pizza.tip", { shop: shop(0), amount: 3 });
-  board = db.call("pizza.dashboard");
-  assert.equal(board.orders[claim.id].status, "delivered");
-  assert.equal(board.jobs[claim.id].state, "completed");
-  assert.deepEqual(board.totals, { orders: 1, baking: 0, ready: 0, delivered: 1, pizzas: 2, revenue: 14, tips: 3 });
-  assert.deepEqual(board.summaries[canonicalJson(shop(0))], db.call("pizza.shop", shop(0)));
-  db.time += 1;
-  assert.deepEqual(db.call("pizza.dashboard"), board, "local countdowns do not force clock-only snapshots");
+
+  const live = db.client.subscribe("pizza.dashboard", { tenant });
+  try {
+    assert.deepEqual(await next(live), board);
+    deliver(db, job);
+    board = await next(live);
+    assert.deepEqual([board.orders[job.id].status, board.jobs[job.id].state], ["delivered", "completed"]);
+    db.mutate("pizza.tip", { shop: shop(0), amount: 3 });
+    board = await next(live);
+    assert.deepEqual(board.totals, { orders: 1, baking: 0, ready: 0, delivered: 1, pizzas: 2, revenue: 14, tips: 3 });
+  } finally { await live.return(undefined); }
+  assert.deepEqual(board.summaries[canonicalJson(shop(0))], db.query("pizza.shop", shop(0)));
+  db.now += 1;
+  assert.deepEqual(db.query("pizza.dashboard", { tenant }), board, "local countdowns do not force clock-only snapshots");
 });
 
-test("dashboard detail stays bounded while totals retain orders outside its recent window", () => {
-  const db = kitchen({ stockPerShop: 1000, bakeMs: 60_000 });
+test("the dashboard keeps the latest 120 orders while totals cover all of them", async () => {
+  const db = await kitchen({ stockPerShop: 1000, bakeMs: 60_000 });
   for (let index = 0; index < 121; index++) {
-    db.time++;
-    db.call("pizza.order", { id: `recent-${index}`, shop: shop(0), quantity: 1 });
+    db.now++;
+    db.mutate("pizza.order", { id: `recent-${index}`, shop: shop(0), quantity: 1 });
   }
-  const board = db.call("pizza.dashboard");
+  const board = db.query("pizza.dashboard", { tenant });
   assert.equal(Object.keys(board.orders).length, 120);
   assert.equal(Object.keys(board.timers).length, 120);
   assert.equal(Object.hasOwn(board.orders, key("recent-0")), false);
@@ -316,53 +310,48 @@ test("dashboard detail stays bounded while totals retain orders outside its rece
   assert.equal(board.summaries[canonicalJson(shop(0))].orders, 121);
 });
 
-test("tenants reuse store and order IDs while queues, timers, queries, and accounting remain isolated", () => {
+test("tenants reuse store and order IDs while queues, timers, dashboards and accounting stay isolated", async () => {
   const other = "tenant-1";
-  const db = kitchen({ tenants: [tenant, other], shops: 2, bakeMs: 0 });
-  const refs = [shop(0), shop(1), shop(0, other)];
-  const placed = refs.map((ref) => db.call("pizza.order", { id: "same-order", shop: ref, quantity: 2 }));
+  const db = await kitchen({ tenants: [tenant, other], shops: 2, bakeMs: 0 });
+  const placed = [shop(0), shop(1), shop(0, other)].map((ref) => db.mutate("pizza.order", { id: "same-order", shop: ref, quantity: 2 }));
   assert.equal(new Set(placed.map((order) => order.key)).size, 3);
-  let world = db.call("pizza.world");
+  let world = db.query("pizza.world");
   assert.equal(world.orders.length, 3);
-  assert.equal(new Set(world.timers.map((timer: any) => timer.id)).size, 3);
-  for (let index = 0; index < 3; index++) db.maintenance();
-  const first = db.call("pizza.claim", { tenant, owner: "same-worker" });
-  const isolated = db.call("pizza.claim", { tenant: other, owner: "same-worker" });
-  assert.equal(first.payload.shop[0], tenant);
-  assert.equal(isolated.payload.shop[0], other);
+  assert.equal(new Set(world.timers.map((timer) => timer.id)).size, 3);
+  db.maintain();
+
+  const first = claim(db, "same-worker");
+  const isolated = claim(db, "same-worker", other);
+  assert.deepEqual([first.payload.shop[0], isolated.payload.shop[0]], [tenant, other]);
   assert.notEqual(first.id, isolated.id);
+  assert.deepEqual([first.token, isolated.token], [1, 1], "fencing tokens count per tenant scope");
   const beforeWrongTenant = db.data;
-  assert.throws(() => db.call("pizza.deliver", { tenant, id: isolated.id, owner: isolated.owner, token: isolated.token }),
-    (error: any) => error.code === "LEASE_LOST");
+  fails(() => deliver(db, isolated, tenant), "LEASE_LOST");
   assert.deepEqual(db.data, beforeWrongTenant);
-  db.call("pizza.deliver", { tenant: other, id: isolated.id, owner: isolated.owner, token: isolated.token });
-  assert.equal(db.call("pizza.claim", { tenant: other, owner: "same-worker" }), null,
-    "a tenant with no work must not claim another tenant's pending order");
-  const another = db.call("pizza.claim", { tenant, owner: "another-worker" });
+  deliver(db, isolated, other);
+  assert.equal(db.mutate("pizza.claim", { tenant: other, owner: "same-worker" }), null, "a tenant without work cannot claim another tenant's order");
+  const another = claim(db, "another-worker");
   assert.equal(another.payload.shop[0], tenant);
   assert.notEqual(another.id, first.id);
-  db.call("pizza.tip", { shop: shop(0, other), amount: 19 });
-  assert.deepEqual(db.evaluated, [cell("pizza.shopSummary", shop(0, other))]);
-  assert.ok(!db.evaluated.includes(cell("pizza.leaderboard", tenant)), "tips do not fan out across tenant leaderboards");
-  const a = db.call("pizza.dashboard", { tenant });
-  const b = db.call("pizza.dashboard", { tenant: other });
-  assert.equal(a.totals.orders, 2);
-  assert.equal(a.totals.revenue, 0);
-  assert.equal(a.totals.tips, 0);
-  assert.equal(b.totals.orders, 1);
-  assert.equal(b.totals.revenue, 14);
-  assert.equal(b.totals.tips, 19);
+
+  const beforeTip = db.data;
+  db.mutate("pizza.tip", { shop: shop(0, other), amount: 19 });
+  assert.deepEqual(changed(beforeTip, db.data), [cell("pizza.shopSummary", shop(0, other)), row("pizza.shops", canonicalJson(shop(0, other)))],
+    "a tip does not fan out to other tenants");
+  const a = db.query("pizza.dashboard", { tenant });
+  const b = db.query("pizza.dashboard", { tenant: other });
+  assert.deepEqual(pick(a.totals, "orders", "revenue", "tips"), { orders: 2, revenue: 0, tips: 0 });
+  assert.deepEqual(pick(b.totals, "orders", "revenue", "tips"), { orders: 1, revenue: 14, tips: 19 });
   for (const [owner, board] of [[tenant, a], [other, b]] as const) {
-    assert.ok(Object.values(board.summaries).every((value: any) => value.id[0] === owner));
-    assert.ok(Object.values(board.orders).every((value: any) => value.shop[0] === owner));
-    assert.ok(Object.values(board.jobs).every((value: any) => value.payload.shop[0] === owner));
-    assert.ok(board.config.shopIds.every((ref: string[]) => ref[0] === owner));
+    assert.ok(Object.values(board.summaries).every((value) => value.id[0] === owner));
+    assert.ok(Object.values(board.orders).every((value) => value.shop[0] === owner));
+    assert.ok(Object.values(board.jobs).every((value) => value.payload.shop[0] === owner));
+    assert.ok(board.config.shopIds.every((ref) => ref[0] === owner));
   }
-  assert.deepEqual(db.call("pizza.shop.local", shop(0, other)), b.summaries[canonicalJson(shop(0, other))]);
-  assert.throws(() => db.call("pizza.dashboard", { tenant: "missing" }), (error: any) => error.code === "TENANT_NOT_FOUND");
-  assert.throws(() => db.call("pizza.claim", { tenant: "missing", owner: "worker" }), (error: any) => error.code === "TENANT_NOT_FOUND");
-  world = db.call("pizza.world");
+  assert.deepEqual(db.query("pizza.shop.local", shop(0, other)), b.summaries[canonicalJson(shop(0, other))]);
+  fails(() => db.query("pizza.dashboard", { tenant: "missing" }), "TENANT_NOT_FOUND");
+  fails(() => db.mutate("pizza.claim", { tenant: "missing", owner: "worker" }), "TENANT_NOT_FOUND");
+  world = db.query("pizza.world");
   assert.equal(world.shops.length, 4);
-  assert.equal(world.orders.length, 3);
   assert.deepEqual(Object.keys(world.leaderboards), [tenant, other]);
 });

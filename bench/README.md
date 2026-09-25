@@ -27,7 +27,7 @@ Publication renders self-contained reports and compact JSON under `docs/bench/`,
 
 ## Workload and accounting
 
-[The application](../examples/goblin-pizza.ts) uses composite `[tenant, store]` identities and store-local order IDs. Its durable equality index and incremental reducers update order statistics in proportion to changed orders. Rankings and delivery queues are tenant-scoped. Tenant assignment to groups is static; this workload exercises no migration, cross-group transaction, global leaderboard, or global atomic snapshot. Logical tenant separation in this unauthenticated demo is not authorization.
+[The application](../examples/goblin-pizza.ts) uses composite `[tenant, store]` identities and store-local order IDs. Its durable equality index and incremental reducers update order statistics in proportion to changed orders. Rankings and delivery queue scopes are per tenant. Tenant assignment to groups is static; this workload exercises no migration, cross-group transaction, global leaderboard, or global atomic snapshot. Logical tenant separation in this unauthenticated demo is not authorization.
 
 Initially customer choices are 30% orders, 40% reads, and 30% tips. After the order cap, order choices become reads: approximately **70% reads / 30% durable mutations**. Tenants are selected uniformly. By default 80% of store choices use one hot store, with the rest uniform across four stores, so that store receives approximately 85% of its tenant's calls.
 

@@ -15,6 +15,8 @@ while (bounds.at(-1) < MAX_BOUNDED_MS) {
 }
 bounds.push(Infinity);
 const BUCKET_BOUNDS = Float64Array.from(bounds);
+/** Upper bound of each histogram bucket, in milliseconds; the last is Infinity. */
+export const HISTOGRAM_BOUNDS = BUCKET_BOUNDS;
 
 export const HISTOGRAM_PROPERTIES = Object.freeze({
   unit: "milliseconds",

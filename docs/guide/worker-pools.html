@@ -4,52 +4,52 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#f8f5ec">
-<meta name="description" content="A complete, tested Flower job worker: run many copies, survive crashes and outages, and know when to add more.">
+<meta name="description" content="Run a pool of Flower job workers with runQueueWorker: many copies, crashes and outages survived, and when to add more.">
 <meta property="og:title" content="Worker pools · Flower">
-<meta property="og:description" content="A complete, tested Flower job worker: run many copies, survive crashes and outages, and know when to add more.">
+<meta property="og:description" content="Run a pool of Flower job workers with runQueueWorker: many copies, crashes and outages survived, and when to add more.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://flower.js.org/guide/worker-pools.html">
 <link rel="canonical" href="https://flower.js.org/guide/worker-pools.html">
 <title>Worker pools · Flower</title>
 <link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
 <link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
-<link rel="stylesheet" href="../site.css?v=eb05c8aa5c04">
+<link rel="stylesheet" href="../site.css?v=fd4ad318734f">
 <script src="../site.js?v=3184f0662fa5" defer></script>
 </head>
 <body class="doc-page">
 <a class="skip-link" href="#main">Skip to content</a>
 <div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/" aria-current="page">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/flower-js-org/runtime">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
 <div class="documentation">
-<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/methods.html"><span>04</span>Methods & retries</a></li><li><a href="../guide/reads.html"><span>05</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>06</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>07</span>Leases & expiry</a></li><li><a href="../guide/workers.html"><span>08</span>External workers</a></li><li class="current"><a href="#top" aria-current="page"><span>09</span>Worker pools</a><ol id="section-nav" aria-label="On this page"><li><a href="#how">How it works</a></li><li><a href="#runner">The worker</a></li><li><a href="#try">Try it: kill a worker</a></li><li><a href="#scale">Pick the numbers</a></li><li><a href="#failures">When things go wrong</a></li><li><a href="#backlog">Know when to add workers</a></li></ol></li><li><a href="../guide/crypto.html"><span>10</span>Crypto & tokens</a></li><li><a href="../guide/deployments.html"><span>11</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/definitions.html"><span>03</span>Contexts & definitions</a></li><li><a href="../reference/client.html"><span>04</span>Client & transports</a></li><li><a href="../reference/time.html"><span>05</span>Expiry, leases & timers</a></li><li><a href="../reference/crypto.html"><span>06</span>NaCl & JWT</a></li><li><a href="../reference/keys.html"><span>07</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>08</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>09</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>10</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>11</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>12</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
+<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/components.html"><span>04</span>Components & tasks</a></li><li><a href="../guide/methods.html"><span>05</span>Methods & retries</a></li><li><a href="../guide/access.html"><span>06</span>Access control</a></li><li><a href="../guide/reads.html"><span>07</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>08</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>09</span>Queues & expiry</a></li><li><a href="../guide/workers.html"><span>10</span>External workers</a></li><li class="current"><a href="#top" aria-current="page"><span>11</span>Worker pools</a><ol id="section-nav" aria-label="On this page"><li><a href="#how">How it works</a></li><li><a href="#runner">The worker</a></li><li><a href="#try">Try it: kill a worker</a></li><li><a href="#scale">Pick the numbers</a></li><li><a href="#failures">When things go wrong</a></li><li><a href="#backlog">Know when to add workers</a></li></ol></li><li><a href="../guide/crypto.html"><span>12</span>Crypto & tokens</a></li><li><a href="../guide/testing.html"><span>13</span>Testing</a></li><li><a href="../guide/deployments.html"><span>14</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/schemas.html"><span>03</span>Schemas & failures</a></li><li><a href="../reference/definitions.html"><span>04</span>Contexts & definitions</a></li><li><a href="../reference/components.html"><span>05</span>Components & tasks</a></li><li><a href="../reference/client.html"><span>06</span>Client & transports</a></li><li><a href="../reference/time.html"><span>07</span>Queues, expiry & timers</a></li><li><a href="../reference/workers.html"><span>08</span>External values & workers</a></li><li><a href="../reference/testing.html"><span>09</span>Testing</a></li><li><a href="../reference/crypto.html"><span>10</span>NaCl & JWT</a></li><li><a href="../reference/keys.html"><span>11</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>12</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>13</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>14</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>15</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>16</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
 <main id="main" tabindex="-1">
-<header class="page-intro" id="top"><p class="eyebrow">Guide · 09</p><h1>Run a pool of workers.</h1><p class="lead">A complete, tested job worker. Start as many copies as you like: they share one queue, and when one dies, another finishes its jobs.</p></header>
+<header class="page-intro" id="top"><p class="eyebrow">Guide · 11</p><h1>Run a pool of workers.</h1><p class="lead">A complete job worker in forty lines. Start as many copies as you like: they share one queue, and when one dies, another finishes its jobs.</p></header>
 <div class="page-content">
 <!-- content:start -->
 <p>It runs jobs from the queue in <a href="https://github.com/flower-js-org/runtime/blob/main/examples/workers.ts"><code>examples/workers.ts</code></a>, on as many machines as you like. Keeping a result current instead of running jobs? See <a href="workers.html#reconcile">External workers</a>.</p>
 <section id="how">
 <h2>How it works</h2>
-<div class="flow-diagram" role="img" aria-label="Each worker lane waits for work, claims a job, runs it, then reports the outcome"><div><span>01</span><strong>Wait</strong><small>watch jobs.ready</small></div><b aria-hidden="true">→</b><div><span>02</span><strong>Claim</strong><small>jobs.claim gives a lease</small></div><b aria-hidden="true">→</b><div><span>03</span><strong>Work</strong><small>your code, within the lease</small></div><b aria-hidden="true">→</b><div><span>04</span><strong>Report</strong><small>jobs.complete or jobs.fail</small></div></div>
+<div class="flow-diagram" role="img" aria-label="Each worker lane waits for work, claims a job, runs it while renewing the lease, then reports the outcome"><div><span>01</span><strong>Wait</strong><small>watch jobs.ready</small></div><b aria-hidden="true">→</b><div><span>02</span><strong>Claim</strong><small>jobs.claim gives a lease</small></div><b aria-hidden="true">→</b><div><span>03</span><strong>Work</strong><small>your code; jobs.renew keeps the lease</small></div><b aria-hidden="true">→</b><div><span>04</span><strong>Report</strong><small>jobs.complete or jobs.fail</small></div></div>
 <ul>
 <li>A claim gives one worker a job until its lease ends. Flower decides who gets which job, so there is no coordinator or leader to run.</li>
-<li>If a worker dies, its lease runs out and the next claim takes the job again, with <code>attempt</code> one higher.</li>
+<li>While your code runs, the worker renews the lease. If a worker dies, renewals stop, the lease runs out, and the next claim takes the job again with <code>attempt</code> one higher.</li>
 <li>A worker that reports after its lease ended gets <code>LEASE_LOST</code>, and its report is ignored.</li>
 <li>Each process runs several <em>lanes</em>. A lane handles one job at a time.</li>
 </ul>
 </section>
 <section id="runner">
 <h2>The worker</h2>
-<p>Replace <code>work()</code> with your job. Keep the rest: it handles retries, lost replies, outages and shutdown. <a href="../job-worker.ts" download>Download job-worker.ts</a>.</p>
-<div class="code-block"><div class="code-head"><span><span class="file">docs/job-worker.ts</span> · complete and tested</span><button class="copy-button" type="button" aria-label="Copy docs/job-worker.ts">Copy</button></div><pre tabindex="0"><code class="language-ts" data-src="../job-worker.ts"><span class="kw">import</span> { FlowerClient, FlowerError } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
+<p>Replace <code>work()</code> with your job. <code>runQueueWorker</code> does the rest: waiting, claiming, renewing, retrying lost replies, riding out outages, and shutting down cleanly. <a href="../job-worker.ts" download>Download job-worker.ts</a>.</p>
+<div class="code-block"><div class="code-head"><span>docs/job-worker.ts</span><button class="copy-button" type="button" aria-label="Copy docs/job-worker.ts">Copy</button></div><pre tabindex="0"><code class="language-ts" data-src="../job-worker.ts"><span class="kw">import</span> { FlowerClient } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
 <span class="kw">import</span> <span class="kw">type</span> { Json } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
 <span class="kw">import</span> <span class="kw">type</span> { Claim } <span class="kw">from</span> <span class="str">"@flower-js/sdk/temporal"</span>;
-<span class="kw">import</span> { randomUUID } <span class="kw">from</span> <span class="str">"node:crypto"</span>;
+<span class="kw">import</span> { runQueueWorker } <span class="kw">from</span> <span class="str">"@flower-js/sdk/worker"</span>;
 <span class="kw">import</span> { hostname } <span class="kw">from</span> <span class="str">"node:os"</span>;
 <span class="kw">import</span> { setTimeout <span class="kw">as</span> sleep } <span class="kw">from</span> <span class="str">"node:timers/promises"</span>;
 <span class="kw">import</span> { fileURLToPath } <span class="kw">from</span> <span class="str">"node:url"</span>;
 
-<span class="comment">// A worker for the job queue in examples/workers.ts. Start as many copies as</span>
-<span class="comment">// you like, on as many machines as you like: they share the queue, and when</span>
-<span class="comment">// one dies, the others finish its jobs once its leases run out.</span>
+<span class="comment">// A worker for the queue in examples/workers.ts. Start as many copies as you</span>
+<span class="comment">// like, on as many machines as you like: they share the queue, and when one</span>
+<span class="comment">// dies, the others finish its jobs once its leases run out.</span>
 
 <span class="comment">// Your job goes here. It can run more than once (a worker can die after doing</span>
 <span class="comment">// the work but before reporting it), so pass job.id to external services as an</span>
@@ -59,121 +59,8 @@
   <span class="kw">return</span> { handledBy: job.owner, attempt: job.attempt };
 }
 
-<span class="kw">export</span> <span class="kw">interface</span> WorkerOptions {
-  owner: <span class="kw">string</span>;   <span class="comment">// Unique per process; shown on each job it holds.</span>
-  lanes: <span class="kw">number</span>;   <span class="comment">// Jobs this process runs at the same time.</span>
-  leaseMs: <span class="kw">number</span>; <span class="comment">// Longer than your slowest job. Leases can't be extended.</span>
-  work: <span class="kw">typeof</span> work;
-  log?: (line: <span class="kw">string</span>) =&gt; <span class="kw">void</span>;
-}
-
-<span class="kw">type</span> Client = Pick&lt;FlowerClient, <span class="str">"mutate"</span> | <span class="str">"watch"</span>&gt;;
-<span class="kw">const</span> MARGIN_MS = <span class="num">1_000</span>;    <span class="comment">// Finish this long before the lease ends.</span>
-<span class="kw">const</span> REQUEST_MS = <span class="num">10_000</span>;  <span class="comment">// Timeout for each request to Flower.</span>
-
-<span class="comment">// Network errors, timeouts, 429 and 5xx are worth retrying; 4xx answers are final.</span>
-<span class="kw">const</span> transient = (error: <span class="kw">unknown</span>) =&gt; !(error <span class="kw">instanceof</span> FlowerError) ||
-  [<span class="num">408</span>, <span class="num">425</span>, <span class="num">429</span>].includes(error.status) || error.status &gt;= <span class="num">500</span>;
-<span class="kw">const</span> backoff = (attempt: <span class="kw">number</span>) =&gt; Math.min(<span class="num">30_000</span>, <span class="num">250</span> * <span class="num">2</span> ** Math.min(attempt, <span class="num">7</span>)) * (<span class="num">0.5</span> + Math.random() / <span class="num">2</span>);
-<span class="kw">const</span> reason = (error: <span class="kw">unknown</span>) =&gt; String((error <span class="kw">as</span> { cause?: { code?: <span class="kw">string</span> } })?.cause?.code ?? (error <span class="kw">as</span> Error)?.message ?? error);
-
-<span class="comment">// Runs until `stop` aborts, then finishes the jobs it holds and returns.</span>
-<span class="kw">export</span> <span class="kw">async</span> <span class="kw">function</span> runWorker(client: Client, options: WorkerOptions, stop: AbortSignal) {
-  <span class="kw">const</span> { owner, leaseMs, log = console.log } = options;
-
-  <span class="comment">// Retry one request with the SAME request ID, so a lost reply can't apply it twice.</span>
-  <span class="kw">async</span> <span class="kw">function</span> send&lt;T&gt;(name: <span class="kw">string</span>, args: object, until: <span class="kw">number</span>): Promise&lt;T&gt; {
-    <span class="kw">const</span> requestId = randomUUID();
-    <span class="kw">for</span> (<span class="kw">let</span> attempt = <span class="num">0</span>; ; attempt++) {
-      <span class="kw">try</span> {
-        <span class="kw">return</span> (<span class="kw">await</span> client.mutate&lt;object, T&gt;(name, args, { requestId, signal: AbortSignal.timeout(REQUEST_MS) })).value;
-      } <span class="kw">catch</span> (error) {
-        <span class="kw">if</span> (!transient(error) || Date.now() + backoff(attempt) &gt;= until) <span class="kw">throw</span> error;
-        <span class="kw">await</span> sleep(backoff(attempt));
-      }
-    }
-  }
-
-  <span class="comment">// Wait until jobs.ready is true. A fresh watch starts with a fresh snapshot,</span>
-  <span class="comment">// so work that arrived while this lane was busy is never missed.</span>
-  <span class="kw">async</span> <span class="kw">function</span> waitForWork(): Promise&lt;<span class="kw">void</span>&gt; {
-    <span class="kw">for</span> (<span class="kw">let</span> attempt = <span class="num">0</span>; !stop.aborted; attempt++) {
-      <span class="kw">try</span> {
-        <span class="kw">const</span> connection = AbortSignal.<span class="kw">any</span>([stop, AbortSignal.timeout(<span class="num">60_000</span>)]); <span class="comment">// Also repairs silent stalls.</span>
-        <span class="kw">for</span> <span class="kw">await</span> (<span class="kw">const</span> { value } <span class="kw">of</span> client.watch&lt;<span class="kw">null</span>, <span class="kw">boolean</span>&gt;(<span class="str">"jobs.ready"</span>, <span class="kw">null</span>, { signal: connection })) {
-          <span class="kw">if</span> (value) <span class="kw">return</span>; <span class="comment">// Leaving the loop closes the watch.</span>
-          attempt = <span class="num">0</span>;
-        }
-      } <span class="kw">catch</span> (error) {
-        <span class="kw">if</span> (stop.aborted) <span class="kw">return</span>;
-        <span class="kw">if</span> (!transient(error)) <span class="kw">throw</span> error;
-      }
-      <span class="kw">await</span> sleep(backoff(attempt), <span class="kw">undefined</span>, { signal: stop }).<span class="kw">catch</span>(() =&gt; {});
-    }
-  }
-
-  <span class="kw">async</span> <span class="kw">function</span> runJob(lane: <span class="kw">number</span>, job: Claim, deadline: <span class="kw">number</span>): Promise&lt;<span class="kw">void</span>&gt; {
-    <span class="kw">const</span> lease = { id: job.id, owner: job.owner, token: job.token, ...(job.history &amp;&amp; { history: job.history }) };
-    <span class="kw">const</span> timeLeft = deadline - Date.now();
-    <span class="kw">if</span> (timeLeft &lt;= <span class="num">0</span>) <span class="kw">return</span> log(<span class="str">`lane ${lane}: skipped ${job.id}, its lease ran out before it started`</span>);
-    log(<span class="str">`lane ${lane}: working on ${job.id} (attempt ${job.attempt})`</span>);
-    <span class="kw">const</span> timeout = AbortSignal.timeout(timeLeft);
-    <span class="kw">let</span> outcome: [<span class="kw">string</span>, object];
-    <span class="kw">try</span> {
-      outcome = [<span class="str">"jobs.complete"</span>, { ...lease, result: <span class="kw">await</span> options.work(job, timeout) }];
-    } <span class="kw">catch</span> (error) {
-      <span class="kw">const</span> message = timeout.aborted ? <span class="str">`Ran out of time after ${timeLeft} ms; raise the lease or split the job`</span> : reason(error);
-      outcome = [<span class="str">"jobs.fail"</span>, { ...lease, error: { message } }];
-    }
-    <span class="kw">try</span> {
-      <span class="kw">await</span> send(outcome[<span class="num">0</span>], outcome[<span class="num">1</span>], deadline + MARGIN_MS);
-      log(<span class="str">`lane ${lane}: ${outcome[0] === "jobs.complete" ? "completed" : "failed"} ${job.id}`</span>);
-    } <span class="kw">catch</span> (error) {
-      <span class="kw">if</span> (error <span class="kw">instanceof</span> FlowerError &amp;&amp; /LEASE_LOST/.test(error.message)) {
-        log(<span class="str">`lane ${lane}: lost ${job.id}, its lease ran out first; another worker will redo it`</span>);
-      } <span class="kw">else</span> {
-        log(<span class="str">`lane ${lane}: couldn't report ${job.id} (${reason(error)}); if it wasn't saved, it runs again after its lease`</span>);
-      }
-    }
-  }
-
-  <span class="kw">async</span> <span class="kw">function</span> lane(lane: <span class="kw">number</span>): Promise&lt;<span class="kw">void</span>&gt; {
-    <span class="kw">for</span> (<span class="kw">let</span> failures = <span class="num">0</span>; !stop.aborted;) {
-      <span class="kw">await</span> waitForWork();
-      <span class="comment">// Claim until the queue is empty, then go back to waiting.</span>
-      <span class="kw">while</span> (!stop.aborted) {
-        <span class="kw">const</span> sentAt = Date.now(); <span class="comment">// The lease can't have started before this.</span>
-        <span class="kw">let</span> job: Claim | <span class="kw">null</span>;
-        <span class="kw">try</span> {
-          job = <span class="kw">await</span> send&lt;Claim | <span class="kw">null</span>&gt;(<span class="str">"jobs.claim"</span>, { owner, leaseMs }, sentAt + leaseMs);
-          failures = <span class="num">0</span>;
-        } <span class="kw">catch</span> (error) {
-          <span class="kw">if</span> (!transient(error)) <span class="kw">throw</span> error; <span class="comment">// A bad setting or a missing method: fix it, don't spin.</span>
-          log(<span class="str">`lane ${lane}: claim failed (${reason(error)}); retrying soon`</span>);
-          <span class="kw">await</span> sleep(backoff(failures++), <span class="kw">undefined</span>, { signal: stop }).<span class="kw">catch</span>(() =&gt; {});
-          <span class="kw">break</span>;
-        }
-        <span class="kw">if</span> (job === <span class="kw">null</span>) <span class="kw">break</span>;
-        <span class="kw">await</span> runJob(lane, job, sentAt + leaseMs - MARGIN_MS); <span class="comment">// Finish what we claimed, even when stopping.</span>
-      }
-    }
-  }
-
-  <span class="kw">await</span> Promise.all(Array.<span class="kw">from</span>({ length: options.lanes }, (_, i) =&gt; lane(i + <span class="num">1</span>)));
-}
-
 <span class="kw">if</span> (process.argv[<span class="num">1</span>] === fileURLToPath(<span class="kw">import</span>.meta.url)) {
   <span class="kw">const</span> stop = <span class="kw">new</span> AbortController();
-  <span class="kw">const</span> options: WorkerOptions = {
-    owner: process.env.WORKER_ID ?? <span class="str">`${hostname()}-${process.pid}`</span>,
-    lanes: Number(process.env.WORKER_LANES ?? <span class="num">4</span>),
-    leaseMs: Number(process.env.WORKER_LEASE_MS ?? <span class="num">10_000</span>),
-    work,
-    log: (line) =&gt; console.log(<span class="str">`${new Date().toTimeString().slice(0, 8)} ${line}`</span>),
-  };
-  <span class="kw">if</span> (!(Number.isInteger(options.lanes) &amp;&amp; options.lanes &gt; <span class="num">0</span> &amp;&amp; Number.isInteger(options.leaseMs) &amp;&amp; options.leaseMs &gt; MARGIN_MS)) {
-    <span class="kw">throw</span> <span class="kw">new</span> Error(<span class="str">"WORKER_LANES must be a positive integer, and WORKER_LEASE_MS an integer above 1000"</span>);
-  }
   <span class="kw">for</span> (<span class="kw">const</span> name <span class="kw">of</span> [<span class="str">"SIGINT"</span>, <span class="str">"SIGTERM"</span>] <span class="kw">as</span> <span class="kw">const</span>) {
     process.on(name, () =&gt; {
       <span class="kw">if</span> (stop.signal.aborted) process.exit(<span class="num">130</span>); <span class="comment">// Second signal: quit now; leases expire and others take over.</span>
@@ -181,11 +68,18 @@
       stop.abort();
     });
   }
-  console.log(<span class="str">`Worker ${options.owner} (pid ${process.pid}) running ${options.lanes} lane${options.lanes === 1 ? "" : "s"}`</span>);
-  <span class="kw">const</span> client = <span class="kw">new</span> FlowerClient(process.env.FLOWER_URL ?? <span class="str">"http://127.0.0.1:7101"</span>);
-  <span class="kw">await</span> runWorker(client, options, stop.signal);
+  <span class="kw">const</span> time = () =&gt; <span class="kw">new</span> Date().toTimeString().slice(<span class="num">0</span>, <span class="num">8</span>);
+  <span class="kw">await</span> runQueueWorker(<span class="kw">new</span> FlowerClient(process.env.FLOWER_URL ?? <span class="str">"http://127.0.0.1:7101"</span>), {
+    queue: <span class="str">"jobs"</span>,
+    work,
+    signal: stop.signal,
+    owner: process.env.WORKER_ID ?? <span class="str">`${hostname()}-${process.pid}`</span>,
+    lanes: Number(process.env.WORKER_LANES ?? <span class="num">4</span>),
+    leaseMs: Number(process.env.WORKER_LEASE_MS ?? <span class="num">10_000</span>),
+    onEvent: (event) =&gt; console.log(time(), <span class="str">`lane ${event.lane}:`</span>, event.<span class="kw">type</span>, <span class="str">"job"</span> <span class="kw">in</span> event ? event.job.id : <span class="str">"id"</span> <span class="kw">in</span> event ? event.id : event.error),
+  });
 }</code></pre></div>
-<div class="table-wrap"><table><caption class="sr-only">Worker settings</caption><thead><tr><th>Environment variable</th><th>Default</th></tr></thead><tbody><tr><td><code>FLOWER_URL</code></td><td><code>http://127.0.0.1:7101</code>. Any member works; writes are forwarded to the leader.</td></tr><tr><td><code>WORKER_LANES</code></td><td>4 jobs at a time.</td></tr><tr><td><code>WORKER_LEASE_MS</code></td><td>10,000 ms. At most the queue’s <code>maxLeaseMs</code>, 30,000 in the example.</td></tr><tr><td><code>WORKER_ID</code></td><td>Host name and process ID. Must be unique per process.</td></tr></tbody></table></div>
+<div class="table-wrap"><table><caption class="sr-only">Worker settings</caption><thead><tr><th>Environment variable</th><th>Default</th></tr></thead><tbody><tr><td><code>FLOWER_URL</code></td><td><code>http://127.0.0.1:7101</code>. Any member works; writes are forwarded to the leader.</td></tr><tr><td><code>WORKER_LANES</code></td><td>4 jobs at a time.</td></tr><tr><td><code>WORKER_LEASE_MS</code></td><td>10,000 ms per claim and renewal. At most the queue’s <code>lease.maxMs</code>, 30,000 in the example.</td></tr><tr><td><code>WORKER_ID</code></td><td>Host name and process ID. Must be unique per process.</td></tr></tbody></table></div>
 <p>Ctrl+C or SIGTERM stops claiming and finishes held jobs. A second Ctrl+C quits at once; the jobs it held run again after their leases.</p>
 </section>
 <section id="try">
@@ -198,29 +92,28 @@
   <span class="kw">node</span> sdk/cli.ts call jobs.enqueue <span class="str">"{\"id\":\"job-$i\",\"payload\":{\"n\":$i}}"</span> \
     <span class="var">--request-id</span> <span class="str">"enqueue-job-$i"</span> &gt; /dev/null
 done</code></pre></div></li>
-<li>While they run, crash alpha: in terminal 1, run <code>kill -9</code> with the pid alpha printed when it started. Note the job it was working on. (Ctrl+C would let it finish that job first.)</li>
-<li>About ten seconds later, beta logs <code>working on job-… (attempt 2)</code> for that job. Check it:<div class="code-block"><div class="code-head"><span>Terminal 1</span><button class="copy-button" type="button" aria-label="Copy job lookup">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">node</span> sdk/cli.ts query jobs.get <span class="str">'"job-7"'</span>
+<li>While they run, crash alpha: press Ctrl+\ in its terminal. That kills it without the clean shutdown Ctrl+C would do. Note the job it last claimed.</li>
+<li>Within about ten seconds alpha's lease runs out and the job goes back in line, behind the jobs that were already waiting. Beta logs <code>claimed</code> for it when its turn comes. Check it:<div class="code-block"><div class="code-head"><span>Terminal 1</span><button class="copy-button" type="button" aria-label="Copy job lookup">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">node</span> sdk/cli.ts query jobs.get <span class="str">'{"id":"job-7"}'</span>
 <span class="comment"># "state": "completed", "result": { "attempt": 2, "handledBy": "beta" }</span></code></pre></div></li>
 </ol>
-<p>Run <code>node sdk/cli.ts watch jobs.backlog</code> alongside to see the wait time rise and fall.</p>
+<p>Run <code>node sdk/cli.ts watch jobs.stats</code> alongside to see the backlog rise and fall.</p>
 </section>
 <section id="scale">
 <h2>Pick the numbers</h2>
-<div class="table-wrap"><table><caption class="sr-only">Sizing a worker pool</caption><thead><tr><th>Setting</th><th>Start with</th></tr></thead><tbody><tr><td>Lease length</td><td>2–3× your slowest job. Leases can’t be extended, and a job still running when its lease ends is stopped and marked failed. A dead worker’s job also waits this long before another worker takes it.</td></tr><tr><td>Lanes per process</td><td>For jobs that mostly wait on other services: 4–32. For CPU-heavy jobs: one per core.</td></tr><tr><td>Processes</td><td>At least two, on different machines, so one crash or deploy doesn’t stop the work.</td></tr><tr><td>Worker ID</td><td>The default. It is stored on every job the worker holds, so you can see who has what.</td></tr></tbody></table></div>
+<div class="table-wrap"><table><caption class="sr-only">Sizing a worker pool</caption><thead><tr><th>Setting</th><th>Start with</th></tr></thead><tbody><tr><td>Lease length</td><td>10–30 s. Renewal lets jobs outlast it, so it only needs to cover a missed renewal or a leader election. A dead worker’s job waits up to this long before another worker takes it.</td></tr><tr><td>Lanes per process</td><td>For jobs that mostly wait on other services: 4–32. For CPU-heavy jobs: one per core.</td></tr><tr><td>Processes</td><td>At least two, on different machines, so one crash or deploy doesn’t stop the work.</td></tr><tr><td>Worker ID</td><td>The default. It is stored on every job the worker holds, so you can see who has what.</td></tr><tr><td>Retries</td><td>The queue’s <code>retry</code> policy: five attempts with backoff in the example. Keep the job’s own timeouts shorter than the lease.</td></tr></tbody></table></div>
 </section>
 <section id="failures">
 <h2>When things go wrong</h2>
-<div class="table-wrap"><table><caption class="sr-only">Failures and what the worker does</caption><thead><tr><th>What happens</th><th>What the worker does, and what you do</th></tr></thead><tbody><tr><td>A worker crashes mid-job</td><td>After the lease, another worker runs the job again. <strong>Make jobs safe to run twice:</strong> pass <code>job.id</code> to external services as an idempotency key.</td></tr><tr><td>A job runs past its lease</td><td>The worker aborts <code>work()</code>’s signal and marks the job failed with “Ran out of time”. Raise the lease or split the job.</td></tr><tr><td>A job throws</td><td>The worker marks it failed with the error message. Failed jobs never retry on their own: fix the cause, then call <code>jobs.retry</code>.</td></tr><tr><td>A reply from Flower is lost</td><td>The worker retries with the same request ID, and Flower applies it once. Nothing to do.</td></tr><tr><td>Flower is down or has lost its majority</td><td>The worker retries with backoff and reconnects its watch. A report that can’t land before the lease ends is dropped, and the job runs again later. Keep leases longer than a leader election, which takes a few seconds.</td></tr><tr><td>A paused worker wakes after its lease</td><td>Its report gets <code>LEASE_LOST</code> and is ignored. Anything it already did outside Flower stays done, which is why jobs must be safe to repeat.</td></tr></tbody></table></div>
+<div class="table-wrap"><table><caption class="sr-only">Failures and what the worker does</caption><thead><tr><th>What happens</th><th>What the worker does, and what you do</th></tr></thead><tbody><tr><td>A worker crashes mid-job</td><td>Once the lease runs out, another worker runs the job again. <strong>Make jobs safe to run twice:</strong> pass <code>job.id</code> to external services as an idempotency key.</td></tr><tr><td>A job throws</td><td>The worker fails the job with the error message, and the queue retries it with backoff. After the last attempt it stays failed: fix the cause, then call <code>jobs.retry</code>.</td></tr><tr><td>Renewals stop landing</td><td>Shortly before the lease ends, the worker aborts <code>work()</code>’s signal and fails the job, which is then retried.</td></tr><tr><td>A reply from Flower is lost</td><td>The worker retries with the same request ID, and Flower applies it once. Nothing to do.</td></tr><tr><td>Flower is down or has lost its majority</td><td>The worker retries with backoff and keeps waiting for work (<code>waiting</code> events). A report that can’t land before the lease ends is dropped (<code>unreported</code>), and the job runs again later.</td></tr><tr><td>A paused worker wakes after its lease</td><td>Its report gets <code>LEASE_LOST</code> and is ignored (<code>lost</code>). Anything it already did outside Flower stays done, which is why jobs must be safe to repeat.</td></tr></tbody></table></div>
 </section>
 <section id="backlog">
 <h2>Know when to add workers</h2>
-<p>Watch how long the oldest job has been waiting. The example app has a query for it:</p>
-<div class="code-block"><div class="code-head"><span>examples/workers.ts</span><button class="copy-button" type="button" aria-label="Copy backlog query">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="comment">// Add workers when the oldest waiting job keeps getting older.</span>
-<span class="kw">export</span> <span class="kw">const</span> jobsBacklog = query(<span class="str">"internal.jobs.backlog"</span>, (ctx) =&gt; {
-  <span class="kw">const</span> oldest = ctx.range(jobs.records.by(<span class="str">"pending"</span>).range({ prefix: [<span class="str">""</span>, <span class="str">"pending"</span>], limit: <span class="num">1</span> })).rows[<span class="num">0</span>];
-  <span class="kw">return</span> { oldestWaitingSeconds: oldest ? Math.floor((ctx.now() - oldest.value.createdAt) / <span class="num">1000</span>) : <span class="num">0</span> };
-});</code></pre></div>
-<p>If <code>oldestWaitingSeconds</code> keeps growing, add workers, as long as the services they call can take the extra load. If it stays near zero, you have enough.</p>
+<p>Watch how long the oldest ready job has been waiting. The queue's <code>stats</code> method reports it:</p>
+<div class="code-block"><div class="code-head"><span>Backlog check</span><button class="copy-button" type="button" aria-label="Copy backlog check">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">for</span> <span class="kw">await</span> (<span class="kw">const</span> { value } <span class="kw">of</span> client.subscribe(<span class="str">"jobs.stats"</span>, <span class="kw">null</span>)) {
+  <span class="kw">const</span> waitingMs = value.oldestReadyAt === <span class="kw">null</span> ? <span class="num">0</span> : Date.now() - value.oldestReadyAt;
+  console.log(<span class="str">`oldest ready job has waited ${Math.round(waitingMs / 1000)} s`</span>);
+}</code></pre></div>
+<p>If that wait keeps growing, add workers, as long as the services they call can take the extra load. If it stays near zero, you have enough. <code>nextAvailableAt</code> says when a delayed job or running lease next makes work available.</p>
 </section>
 <!-- content:end -->
 </div>

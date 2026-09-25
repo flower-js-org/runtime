@@ -38,6 +38,8 @@ use json::{
 pub struct EngineError {
     pub code: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
 }
 
 impl EngineError {
@@ -45,7 +47,17 @@ impl EngineError {
         Self {
             code: code.into(),
             message: message.into(),
+            details: None,
         }
+    }
+
+    /// The caller-visible failure: code, message and optional JSON details.
+    pub fn failure(&self) -> Value {
+        let mut failure = serde_json::json!({"code": self.code, "message": self.message});
+        if let Some(details) = &self.details {
+            failure["details"] = details.clone();
+        }
+        failure
     }
 }
 

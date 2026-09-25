@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
-import { FlowerClient } from "../sdk/client.ts";
+import { FlowerAdmin, FlowerClient } from "../sdk/client.ts";
 import { buildBundle } from "../sdk/bundle.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -43,7 +43,9 @@ function start(node) {
   const child = spawn(binary, ["--id", "1", "--listen", node.address, "--data", node.directory], {
     cwd: root, env: { ...process.env, FLOWER_ADMIN_TOKEN: token, FLOWER_GROUP: node.id,
       FLOWER_CATALOG_GROUP: "catalog", FLOWER_GROUPS: JSON.stringify(registry),
-      FLOWER_RPC_MAX_BYTES: "131072", FLOWER_TRANSACTION_MAX_BYTES: node.id === "🌻" ? "8192" : "65536", FLOWER_SNAPSHOT_CHUNK_BYTES: "8192",
+      // Group budgets admit the SDK bundle, while the frozen tenant image (five
+      // 32 KiB blobs plus that bundle) still exceeds one RPC and 🌻's commands.
+      FLOWER_RPC_MAX_BYTES: "196608", FLOWER_TRANSACTION_MAX_BYTES: node.id === "🌻" ? "8192" : "131072", FLOWER_SNAPSHOT_CHUNK_BYTES: "8192",
       FLOWER_SNAPSHOT_AFTER_LOGS: "8", FLOWER_SNAPSHOT_LAG_LOGS: "16", FLOWER_SNAPSHOT_KEEP_LOGS: "0",
       RUST_LOG: "flower=info,openraft=warn" }, stdio: ["ignore", "pipe", "pipe"],
   });
@@ -68,9 +70,9 @@ async function catalog(body) {
   assert.equal(result.response.status, 200, JSON.stringify(result.value));
   return result.value;
 }
-const cluster = (gateway = "catalog") => new FlowerClient(nodes.get(gateway).url, { adminToken: token });
+const cluster = (gateway = "catalog") => new FlowerAdmin(nodes.get(gateway).url, { adminToken: token });
 async function placement(partition) { return cluster().partitionStatus(partition); }
-const client = (partition, gateway = "catalog") => cluster(gateway).partition(partition);
+const client = (partition, gateway = "catalog") => new FlowerClient(nodes.get(gateway).url).partition(partition);
 async function mutate(partition, method, args, requestId = `request-${++sequence}`) {
   return client(partition).mutate(method, args, { requestId, signal: AbortSignal.timeout(15_000) });
 }
@@ -92,7 +94,8 @@ try {
   }
   await until("catalog leader", async () => { try { await catalog({ action: "list" }); return true; } catch { return false; } });
   assert.equal((await post(nodes.get("catalog"), "/admin/partitions/catalog", { action: "list" }, false)).response.status, 401);
-  for (const id of ["a", "🌻"]) await cluster().registerGroup({ id, addresses: registry[id] });
+  // A freshly initialized group may still be electing; registration retries until its leader serves.
+  for (const id of ["a", "🌻"]) await until(`${id} registers after election`, async () => { await cluster().registerGroup({ id, addresses: registry[id] }); return true; });
   await assert.rejects(cluster().createPartition("x".repeat(10_000), "🌻", { requestId: "too-large-for-owner" }));
   assert.equal((await cluster().layout()).partitions.length, 0);
   for (const partition of ["tenant-a", "tenant-b"]) {
@@ -104,10 +107,10 @@ try {
   await writeFile(entry, `
 import { aggregate, collection, define, derive, mutation, query, transaction } from ${JSON.stringify(join(root, "sdk/index.ts"))};
 import { scheduler } from ${JSON.stringify(join(root, "sdk/scheduler.ts"))};
-import { workQueue } from ${JSON.stringify(join(root, "sdk/temporal.ts"))};
+import { queue } from ${JSON.stringify(join(root, "sdk/temporal.ts"))};
 const rows=collection<{bucket:string,value:number}>("rows").index("bucket",["bucket"]);
 const blobs=collection<string>("blobs");
-const jobs=workQueue("jobs",{maxLeaseMs:60000});
+const jobs=queue("jobs",{lease:{maxMs:60000}});
 const total=aggregate("total",{source:rows,index:"bucket",initial:()=>0,add:(sum,row)=>sum+row.value,remove:(sum,row)=>sum-row.value});
 const summary=derive("summary",ctx=>({total:ctx.get(total,"g"),count:ctx.query(rows.by("bucket").eq("g")).length}));
 const fire=mutation("fire",ctx=>{ctx.set(rows,"timer",{bucket:"g",value:5});return null;});
@@ -116,15 +119,15 @@ const seed=mutation("seed",(ctx,value:number)=>{ctx.set(rows,"shared",{bucket:"g
 const blob=mutation("blob",(ctx,args:any)=>{ctx.set(blobs,args.key,args.value);return args.value.length;});
 const schedule=mutation("schedule",(ctx,ms:number)=>timers.after(ctx,"same-timer",ms,"fire",null));
 const add=mutation("add",(ctx,value:number)=>{const row=ctx.get(rows,"shared")!;ctx.set(rows,"shared",{...row,value:row.value+value});return ctx.get(summary);});
-const claim=mutation("claim",(ctx,owner:string)=>jobs.claim(ctx,owner,1000));
+const claim=mutation("claim",(ctx,owner:string)=>jobs.claim(ctx,owner,{leaseMs:1000}));
 const complete=mutation("complete",(ctx,args:any)=>jobs.complete(ctx,args,"done"));
 const read=query("read",ctx=>({summary:ctx.get(summary),job:jobs.get(ctx,"same-job"),timers:timers.scan(ctx),blobBytes:ctx.scan(blobs).reduce((n,row)=>n+row.value.length,0)}));
-const local=query("local",read.compute,{consistency:"replica-local"});
+const local=query("local",{consistency:"replica-local"},read.compute);
 const tx=transaction("tx",()=>({calls:[]}));
-export default define({collections:[rows],definitions:[total,summary],maintenance:timers.maintenance,http:{seed,blob,schedule,add,claim,complete,read,local,tx}});
+export default define({uses:[jobs,timers],collections:[rows],definitions:[total,summary],http:{seed,blob,schedule,add,claim,complete,read,local,tx}});
 `);
   const bundle = await buildBundle(entry, { initialization: "static" });
-  for (const partition of ["tenant-a", "tenant-b"]) await client(partition).deploy(bundle, { requestId: "same-deploy" });
+  for (const partition of ["tenant-a", "tenant-b"]) await cluster().partition(partition).deploy(bundle, { requestId: "same-deploy" });
   const seeded = await mutate("tenant-a", "seed", 10, "same-request");
   const other = await mutate("tenant-b", "seed", 100, "same-request");
   assert.deepEqual(seeded.value, { total: 10, count: 1 });
@@ -144,21 +147,24 @@ export default define({collections:[rows],definitions:[total,summary],maintenanc
   assert.equal((await placement("tenant-a")).status, "active");
   await cluster().movePartition("tenant-a", "🌻", { requestId: "move-a-to-b" });
   // Admission verifies both groups' budgets before the durable move decision.
-  // Pause the destination after admission, before its multi-command import.
+  // The move first streams a base image to the destination in chunks while the
+  // source keeps serving; pause the destination during that copy.
   nodes.get("🌻").runtime.child.kill("SIGSTOP");
-  await until("source frozen while destination paused", async () => (await placement("tenant-a")).movement?.phase === "importing");
-  await assert.rejects((async () => {
-    for await (const _ of oldWatch) { /* A buffered local value may precede the terminal ownership error. */ }
-  })(), error => ["PARTITION_MOVING", "UNAVAILABLE"].includes(error.code),
-  "an old owner watch must terminate after its ownership cache refresh");
-  await oldWatch.return(); watches.delete(oldWatch);
-  await assert.rejects(client("tenant-a").query("read", null, { signal: AbortSignal.timeout(3000) }));
+  await delay(1_500); // Longer than an unpaused base copy of this image takes.
+  assert.equal((await placement("tenant-a")).movement?.phase, "copying", "the base copy waits for the paused destination");
+  assert.deepEqual((await client("tenant-a").query("read", null, { signal: AbortSignal.timeout(3000) })).value.summary,
+    { total: 10, count: 1 }, "the source keeps serving until its brief final freeze");
   assert.deepEqual((await mutate("tenant-b", "add", 1)).value, { total: 101, count: 1 });
   // Losing the catalog coordinator must retain the move decision. Unrelated
   // tenant data remains independent; no source unfreeze/abort is permitted.
   await stop(nodes.get("catalog")); start(nodes.get("catalog"));
   await until("catalog restarted", async () => { try { return (await placement("tenant-a")).status === "moving"; } catch { return false; } });
   nodes.get("🌻").runtime.child.kill("SIGCONT");
+  await assert.rejects((async () => {
+    for await (const _ of oldWatch) { /* A buffered local value may precede the terminal ownership error. */ }
+  })(), error => ["PARTITION_MOVING", "UNAVAILABLE"].includes(error.code),
+  "an old owner watch must terminate after its ownership cache refresh");
+  await oldWatch.return(); watches.delete(oldWatch);
   const moved = await active("tenant-a", "🌻");
   assert.equal(moved.epoch, 2);
   // Do not invoke this tenant before its timer is due: destination maintenance
@@ -178,9 +184,12 @@ export default define({collections:[rows],definitions:[total,summary],maintenanc
   assert.equal(replay.duplicate, true); assert.equal(replay.revision, seeded.revision); assert.deepEqual(replay.value, seeded.value);
   const claim = (await mutate("tenant-a", "claim", "new-worker")).value;
   assert.ok(claim.token > oldClaim.token);
-  await assert.rejects(mutate("tenant-a", "complete", { id: oldClaim.id, owner: oldClaim.owner, token: oldClaim.token }));
+  await assert.rejects(mutate("tenant-a", "complete", { id: oldClaim.id, owner: oldClaim.owner, token: oldClaim.token }),
+    error => error.status === 422 && error.failure?.code === "LEASE_LOST", "the moved fencing token rejects the stale worker");
   await mutate("tenant-a", "complete", { id: claim.id, owner: claim.owner, token: claim.token });
-  await assert.rejects(client("tenant-a").call("tx", null, { requestId: "unsupported-partition-tx" }));
+  // Logical partitions coordinate transactions too (see e2e-partition-transactions); an empty plan commits.
+  const planned = await client("tenant-a").call("tx", null, { requestId: "empty-partition-tx" });
+  assert.deepEqual(planned.value.results, []);
   const outageWatch = client("tenant-b", "a").watch("local", null, {
     signal: AbortSignal.any([watchController.signal, AbortSignal.timeout(timeout)]),
   });

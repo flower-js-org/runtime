@@ -39,16 +39,13 @@ fn query_timeout(app: &App) -> Result<Duration, ApiError> {
 }
 
 fn failure(code: &'static str, message: &str) -> ApiError {
-    ApiError(StatusCode::SERVICE_UNAVAILABLE, code, message.into())
+    ApiError::new(StatusCode::SERVICE_UNAVAILABLE, code, message.into())
 }
 
 fn error_event(error: ApiError) -> Bytes {
-    Bytes::from(format!(
-        "event: error\ndata: {}\n\n",
-        json!({"error":{
-            "code":error.1,"message":error.2,"status":error.0.as_u16()
-        }})
-    ))
+    let mut body = error.body();
+    body["error"]["status"] = json!(error.status.as_u16());
+    Bytes::from(format!("event: error\ndata: {body}\n\n"))
 }
 
 fn ensure_running(metrics: &Metrics) -> Result<(), ApiError> {
@@ -221,7 +218,7 @@ async fn reserve(
     tokio::time::timeout(timeout, sender.reserve())
         .await
         .map_err(|_| {
-            ApiError(
+            ApiError::new(
                 StatusCode::REQUEST_TIMEOUT,
                 "WATCH_SLOW_CONSUMER",
                 format!(

@@ -68,7 +68,7 @@ pub(in crate::service) fn verify_identity(
         || text_header(headers, TARGET_ADDRESS) != address(metrics, metrics.id)
         || address(metrics, metrics.id).is_none()
     {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::CONFLICT,
             "FORWARD_IDENTITY_MISMATCH",
             "forwarded request reached a different node".into(),
@@ -77,7 +77,7 @@ pub(in crate::service) fn verify_identity(
     if text_header(headers, COMPATIBILITY)
         != Some(crate::consensus::compatibility().contract().as_str())
     {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::UPGRADE_REQUIRED,
             "FORWARD_INCOMPATIBLE",
             "forwarded request uses a different runtime contract".into(),
@@ -87,7 +87,7 @@ pub(in crate::service) fn verify_identity(
         address(metrics, id)
             .is_some_and(|expected| text_header(headers, SOURCE_ADDRESS) == Some(expected))
     }) {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "FORWARD_SOURCE_UNKNOWN",
             "forwarding source is not a member of this Raft group".into(),
@@ -102,7 +102,7 @@ async fn authorize(State(app): State<Arc<App>>, request: Request, next: Next) ->
         .and_then(|value| value.strip_prefix("Bearer "))
         == Some(app.consensus.peer_token());
     let mut response = if !authorized {
-        ApiError(
+        ApiError::new(
             StatusCode::UNAUTHORIZED,
             "UNAUTHORIZED",
             "peer bearer token required".into(),
@@ -290,7 +290,7 @@ async fn commit_kind(app: Arc<App>, input: Value, kind: &str) -> Result<Response
                 || text_header(response.headers(), COMPATIBILITY)
                     != Some(crate::consensus::compatibility().contract().as_str())
             {
-                return Err(ApiError(
+                return Err(ApiError::new(
                     StatusCode::BAD_GATEWAY,
                     "FORWARD_IDENTITY_MISMATCH",
                     "leader response identity or runtime contract mismatch".into(),
@@ -307,7 +307,7 @@ async fn commit_kind(app: Arc<App>, input: Value, kind: &str) -> Result<Response
                 .map_err(|error| unavailable(error.into()))?
             {
                 if output.len().saturating_add(chunk.len()) > max_bytes {
-                    return Err(ApiError(
+                    return Err(ApiError::new(
                         StatusCode::BAD_GATEWAY,
                         "FORWARD_RESPONSE_TOO_LARGE",
                         "leader response exceeds configured transport budget".into(),
@@ -331,10 +331,10 @@ async fn commit_kind(app: Arc<App>, input: Value, kind: &str) -> Result<Response
         match tokio::time::timeout_at(budget, attempt).await {
             Ok(Ok(response)) => return Ok(response),
             Ok(Err(error))
-                if error.0 == StatusCode::SERVICE_UNAVAILABLE
-                    && matches!(error.1, "UNAVAILABLE" | "PARTITION_MOVING") =>
+                if error.status == StatusCode::SERVICE_UNAVAILABLE
+                    && matches!(error.code, "UNAVAILABLE" | "PARTITION_MOVING") =>
             {
-                last = error.2
+                last = error.message
             }
             Ok(Err(error)) => return Err(error),
             Err(_) => break,
@@ -410,7 +410,7 @@ mod tests {
         .await
         .expect("overload must not enter forwarding retry loop");
         let error = result.expect_err("configured input budget rejects request");
-        assert_eq!(error.1, "ADMISSION_OVERLOADED");
+        assert_eq!(error.code, "ADMISSION_OVERLOADED");
         app.consensus.shutdown().await.unwrap();
     }
 }

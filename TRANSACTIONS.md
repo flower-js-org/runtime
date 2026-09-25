@@ -1,43 +1,79 @@
 # Transactions between logical databases
 
-A TypeScript transaction method coordinates exposed methods across root group databases or stable named partitions using durable two-phase commit. Logical targets may share a physical Raft group or live on different groups. Prepared barriers are scoped to the participating logical database; unrelated named tenants keep running.
+A TypeScript transaction method coordinates exposed methods across root group databases or stable named partitions using durable two-phase commit. Logical targets may share a physical Raft group or live on different groups. Prepared barriers are scoped to the participating logical database; unrelated named tenants keep running. This coordinator module, `transfer.ts`, moves money between two named partitions:
 
 ```ts
-import { define, transaction } from "@flower-js/sdk";
+import { define, participant, transaction, v } from "@flower-js/sdk";
+import type bank from "./bank.ts";
 
-const transfer = transaction("bank.transfer", (args: {
-  from: string; to: string; cents: number;
-}) => ({
+const west = participant<typeof bank>({ partition: "west" });
+const east = participant<typeof bank>({ partition: "east" });
+
+const transfer = transaction("bank.transfer", {
+  args: v.object({ from: v.string({ min: 1 }), to: v.string({ min: 1 }), cents: v.int({ min: 1 }) }),
+}, ({ from, to, cents }) => ({
   calls: [
-    { partition: "west", method: "debit", args: { account: args.from, cents: args.cents } },
-    { partition: "east", method: "credit", args: { account: args.to, cents: args.cents } },
+    west.call("debit", { account: from, cents }),
+    east.call("credit", { account: to, cents }),
   ],
-  value: { transferred: args.cents },
+  value: { transferred: cents },
 }));
 
 export default define({ http: { transfer } });
 ```
 
-Deploy `debit` and `credit` as ordinary exposed mutation methods in their named partitions. `{group:"name",method,args}` still targets a configured physical group’s root database; specify exactly one of `partition` or `group`. Named targets require `FLOWER_CATALOG_GROUP`, and the runtime resolves and durably pins their placement epoch and bootstrap addresses before contacting participants. Validate balances and amounts inside those methods. A thrown error aborts the whole transaction, including earlier successful calls. Participants may also call exposed queries; a later call in the same logical target observes earlier staged writes.
-
-A planner receives only its arguments. It cannot read database state, access a context, perform I/O, or call another transaction. The returned plan is fixed before execution; one participant's result cannot dynamically choose another participant's calls. Internal definition names are not callable unless explicitly exposed as HTTP aliases.
+Each participant partition deploys ordinary exposed mutations, here as `bank.ts`:
 
 ```ts
-import { FlowerClient } from "@flower-js/sdk/client";
+import { collection, define, fail, mutation, v } from "@flower-js/sdk";
 
-const client = new FlowerClient("http://coordinator-member:7101");
+const accounts = collection("accounts", v.object({ cents: v.int({ min: 0 }) }));
+const movement = v.object({ account: v.string({ min: 1 }), cents: v.int({ min: 1 }) });
+
+const debit = mutation("debit", { args: movement }, (ctx, { account, cents }) => {
+  const balance = ctx.get(accounts, account)?.cents ?? 0;
+  if (balance < cents) fail("INSUFFICIENT_FUNDS", `Account ${account} holds ${balance} cents`, { account, balance });
+  ctx.set(accounts, account, { cents: balance - cents });
+  return { account, cents: balance - cents };
+});
+const credit = mutation("credit", { args: movement }, (ctx, { account, cents }) => {
+  const balance = ctx.get(accounts, account)?.cents ?? 0;
+  ctx.set(accounts, account, { cents: balance + cents });
+  return { account, cents: balance + cents };
+});
+
+export default define({ http: { debit, credit } });
+```
+
+`participant<typeof bank>({ partition: "west" }).call(alias, args)` builds a `{partition, method, args}` call whose alias and arguments are typed by the participant's module; transaction aliases are excluded. `participant({ group: "name" })` targets a configured physical group’s root database instead, and plain `{partition|group, method, args}` objects remain valid; specify exactly one of `partition` or `group`. Named targets require `FLOWER_CATALOG_GROUP`, and the runtime resolves and durably pins their placement epoch and bootstrap addresses before contacting participants. Validate balances and amounts inside the participant methods. A failed call aborts the whole transaction, including earlier successful calls. Participants may also call exposed queries; a later call in the same logical target observes earlier staged writes.
+
+A planner receives only its arguments, after its `args` schema validates them. It cannot read database state, access a context, perform I/O, or call another transaction. The returned plan is fixed before execution; one participant's result cannot dynamically choose another participant's calls. A planner failure, including `INVALID_ARGUMENT`, returns `422 EVALUATION_FAILED` with its `failure` before any participant is contacted. Internal definition names are not callable unless explicitly exposed as HTTP aliases.
+
+```ts
+import { FlowerClient, FlowerError } from "@flower-js/sdk";
+import type coordinator from "./transfer.ts";
+
+const client = new FlowerClient<typeof coordinator>("http://coordinator-member:7101");
 const requestId = crypto.randomUUID(); // Save this before sending.
-const receipt = await client.call("transfer", {
-  from: "alice", to: "bob", cents: 500,
-}, { requestId });
-
-// receipt.value = {
-//   results: [debitResult, creditResult],
-//   value: { transferred: 500 },
-// }
+try {
+  const receipt = await client.call("transfer", {
+    from: "alice", to: "bob", cents: 500,
+  }, { requestId, retry: true });
+  // receipt.value = {
+  //   results: [debitResult, creditResult],
+  //   value: { transferred: 500 },
+  // }
+} catch (error) {
+  if (error instanceof FlowerError && error.code === "TRANSACTION_ABORTED") {
+    // error.failure: { code: "INSUFFICIENT_FUNDS", message: "...", details: { account: "alice", balance: 300 } }
+  }
+  throw error;
+}
 ```
 
 `results` follows the original call order. `value` is the optional value returned by the planner, including an explicit `null`. The receipt's revision belongs to the coordinator logical database; it is not shared across participants. `expectedRevision`, when supplied, checks the coordinator revision when a new plan begins.
+
+When a participant method fails, the caller receives `422 TRANSACTION_ABORTED` whose `failure` is that method's `{code, message, details?}`, and the error message repeats `CODE: message`. The durable coordinator record keeps the failure, so a retry with the same request ID returns the same abort and failure. Aborts caused by conflicts, unavailable or uncertain participants, or coordinator recovery carry a message and no `failure`. With a typed client, transactions go through `call`, since `mutate` accepts only mutation aliases.
 
 ## Configure and operate
 
@@ -68,12 +104,12 @@ For fresh reads, these barriers prevent a new read from exposing an uncommitted 
 ## Failure and retry
 
 - After a timeout or lost response, retry the same arguments with the **same request ID**. A completed commit returns its original receipt with `duplicate: true`; changed content returns `REQUEST_ID_REUSED`.
-- `TRANSACTION_ABORTED` is durable for that request ID. Retrying it keeps the abort. After correcting the cause, start a new attempt with a new ID.
-- `TRANSACTION_PREPARED` means a participant is waiting for its coordinator's durable outcome. Restore the coordinator's quorum/connectivity and retry. There is no timeout that discards a prepared transaction.
+- `TRANSACTION_ABORTED` is durable for that request ID. Retrying it keeps the abort and its `failure`. After correcting the cause, start a new attempt with a new ID. The SDK's `retry` option never retries it.
+- `TRANSACTION_PREPARED` means a participant is waiting for its coordinator's durable outcome. Restore the coordinator's quorum/connectivity and retry; the SDK's `retry` option treats this `503` as transient. There is no timeout that discards a prepared transaction.
 - A coordinator recovering an unfinished preparation durably aborts it. A committed decision is never rolled back. Recovery repeatedly finishes decided transactions, including after leadership changes or process restarts.
 - An uncertain prepare causes a durable abort that is sent to every planned participant. A participant captures its Raft leader term, then checks the coordinator decision while holding its writer lock before preparing. The replicated state machine rejects a preparation submitted in another term, including after a former leader returns. If an abort finds no prepared work, it can acknowledge without a write: delayed prepares must observe the immutable abort. Participants that did prepare atomically retain a completion tombstone when clearing their lock.
 
-Coordinator records, completion receipts, and participant tombstones are retained durably. Operator-driven close/collect now reclaims detail behind durable history floors; deleting metadata manually still breaks retry and delayed-message fencing. Each coordinator assigns a random history and monotonic sequence. Close persists a completed-prefix intent, obtains durable rejection-floor acknowledgements from all participants, then advances the coordinator floor. Delayed prepare/finish messages are rejected after collection. Committed public receipts remain available under their retry contract; an aborted decision cannot close until its original request ID is inadmissible. Use FlowerClient.transactionClosureStatus() and controlTransactionClosure({operation:"close"|"collect",maxBytes?}); close also accepts through. Repeated calls make bounded, monotonic progress, reported through pending/blockedReason/deletedRecords. Collection runs per coordinator/participant database. See [RETENTION.md](RETENTION.md#4-collect-transaction-history-through-a-separate-closure-protocol). Prepared state and decisions travel with normal Raft snapshots and backups. Tenant cutover waits for prepared work and incomplete coordinators to close; status and completion messages remain allowed during movement so recovery can release those barriers. Completed decisions and receipts move with the tenant, preserving replay and abort identity. Restoring only one group from an older, unrelated backup is not a cross-group restore protocol.
+Coordinator records, completion receipts, and participant tombstones are retained durably. Operator-driven close/collect now reclaims detail behind durable history floors; deleting metadata manually still breaks retry and delayed-message fencing. Each coordinator assigns a random history and monotonic sequence. Close persists a completed-prefix intent, obtains durable rejection-floor acknowledgements from all participants, then advances the coordinator floor. Delayed prepare/finish messages are rejected after collection. Committed public receipts remain available under their retry contract; an aborted decision cannot close until its original request ID is inadmissible. Use `FlowerAdmin.transactionClosureStatus()` and `controlTransactionClosure({operation:"close"|"collect",maxBytes?})`; close also accepts `through`. Repeated calls make bounded, monotonic progress, reported through pending/blockedReason/deletedRecords. Collection runs per coordinator/participant database. See [RETENTION.md](RETENTION.md#4-collect-transaction-history-through-a-separate-closure-protocol). Prepared state and decisions travel with normal Raft snapshots and backups. Tenant cutover waits for prepared work and incomplete coordinators to close; status and completion messages remain allowed during movement so recovery can release those barriers. Completed decisions and receipts move with the tenant, preserving replay and abort identity. Restoring only one group from an older, unrelated backup is not a cross-group restore protocol.
 
 ## Validation
 
@@ -86,4 +122,4 @@ node tests/e2e-partition-transactions.mjs
 
 The focused tests cover private staging, abort fencing, idempotent decisions, unavailable coordinators, recovery after lost prepare acknowledgements and durable commit decisions, authentication/compatibility, JSON depth, and revision reservations. The process test uses two independent three-node groups and exercises atomic commit/abort, result ordering, fresh replica reads, coordinator death while the first participant is prepared and the second is unavailable, receipt replay after leader failure, and a complete cluster restart.
 
-Application authorization runs before external transaction receipt replay and planning. The durable coordinator stores the resulting principal, excluding raw credentials. Each participant’s current hook sees the public alias and a server-supplied delegation `{coordinator,principal}` and decides whether to accept it; named participants must return their own tenant scope. Refreshing credentials for the same subject/tenant preserves the original intent, while revoked authorization blocks replay. A planner still receives only arguments, never a context or participant results.
+Application authorization runs before external transaction receipt replay and planning. The durable coordinator stores the resulting principal, excluding raw credentials. Each participant’s current hook sees the public alias and a server-supplied delegation `{coordinator,principal}` and decides whether to accept it; named participants must return their own tenant scope. In a `define({ auth })` hook, `auth.delegation(ctx, coordinator, principal)` makes that decision (by default every cluster peer is trusted), the accepted principal acts with the participant partition as its tenant, and the method's `access` policy still applies to it. Refreshing credentials for the same subject/tenant preserves the original intent, while revoked authorization blocks replay. A planner still receives only arguments, never a context or participant results.

@@ -369,9 +369,9 @@ pub(super) async fn apply(runtime: &Runtime, request: CatalogRequest) -> anyhow:
     let _guard = runtime.catalog_writer.lock().await;
     let (state, term) = runtime.consensus.read_for_writer_with_term().await?;
     super::super::transactions::ensure_unlocked(&state)
-        .map_err(|error| anyhow::anyhow!(error.2))?;
+        .map_err(|error| anyhow::anyhow!(error.message))?;
     super::super::transactions::ensure_write_capacity(&state)
-        .map_err(|error| anyhow::anyhow!(error.2))?;
+        .map_err(|error| anyhow::anyhow!(error.message))?;
     let mut puts = BTreeMap::new();
     let mut deletes = Vec::new();
     let value = match request {

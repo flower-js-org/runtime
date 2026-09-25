@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { Histogram } from "./metrics.mjs";
 import { renderReport } from "./report.mjs";
 
+function recorded(values) {
+  const histogram = new Histogram();
+  for (const value of values) histogram.record(value);
+  return histogram.snapshot();
+}
+
 function fixture() {
-  const histogram = { samples: 12, invalidSamples: 0, overflowSamples: 0, approximate: true, min: 1, p50: 5, p95: 20, p99: 30, max: 40 };
+  const histogram = recorded([1, 2, 3, 4, 5, 5, 5, 8, 12, 20, 30, 40]);
   const counters = { attempts: 13, successes: 12, failures: 1, retries: 1, duplicates: 2, throughputPerSecond: 6, latencyMs: histogram, errors: { HTTP_503: 1 } };
   const logical = { count: 12, completed: 12, failed: 0, duplicates: 2, throughputPerSecond: 6, latencyMs: histogram };
   return {
@@ -35,10 +42,14 @@ test("renders recorded metrics, charts, audit, topology, and measurement caveats
   assert.match(html, /Example CPU/);
   assert.match(html, /abc123/);
   assert.match(html, /one Raft group, not independent shards/);
-  assert.match(html, /nearest-rank upper bounds/);
+  assert.match(html, /nearest-rank bucket upper bounds/);
   assert.match(html, /within 1%/);
   assert.match(html, /not estimate open-loop latency/);
-  assert.match(html, /not present in this report/);
+  assert.match(html, /aria-label="All-call latency: 12 calls; p50 5 ms, p99 40 ms, max 40 ms\./);
+  assert.match(html, /aria-label="Oven lateness: 12 samples; p50 /);
+  assert.match(html, /aria-label="pizza\.order HTTP attempts: 12 calls; /);
+  assert.match(html, /<small>p99 40 ms<\/small>/);
+  assert.doesNotMatch(html, /<th scope="col">p95<\/th>/);
   assert.ok((html.match(/<svg /g) ?? []).length >= 5);
   assert.ok((html.match(/role="img"/g) ?? []).length >= 5);
   assert.ok((html.match(/<caption>/g) ?? []).length >= 5);
@@ -141,7 +152,7 @@ test("baseline comparisons report changes and disclose mismatched conditions", (
   const baseline = fixture();
   const current = fixture();
   current.phases.load.operations.throughputPerSecond = 12;
-  current.phases.load.operations.latencyMs = { ...current.phases.load.operations.latencyMs, p99: 15 };
+  current.phases.load.operations.latencyMs = { ...current.phases.load.operations.latencyMs, p99: 20 };
   let html = renderReport(current, { baseline });
   assert.match(html, /\+100\.0%/);
   assert.match(html, /-50\.0%/);

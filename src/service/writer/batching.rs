@@ -399,9 +399,19 @@ mod tests {
     fn weighted_preparation_still_adapts_to_a_sustained_change_in_method_cost() {
         let mut controller = adaptive();
         controller.maximum = Duration::from_millis(200);
-        controller.observe(200, Duration::from_millis(100), Duration::from_millis(40), true);
+        controller.observe(
+            200,
+            Duration::from_millis(100),
+            Duration::from_millis(40),
+            true,
+        );
         for _ in 0..24 {
-            controller.observe(200, Duration::from_millis(400), Duration::from_millis(40), true);
+            controller.observe(
+                200,
+                Duration::from_millis(400),
+                Duration::from_millis(40),
+                true,
+            );
         }
         assert!(controller.preparation_per_call().unwrap() > 0.0019);
         assert!(controller.decide(300).count <= 105);
@@ -516,8 +526,7 @@ mod tests {
         let saturated = controller.decide_aged(usize::MAX, overdue, window);
         assert_eq!(saturated.budget, controller.maximum);
         assert_eq!(saturated.count, 200);
-        let maintenance =
-            controller.decide_aged(100, overdue, Duration::from_millis(30));
+        let maintenance = controller.decide_aged(100, overdue, Duration::from_millis(30));
         assert_eq!(maintenance.budget, Duration::from_millis(30));
         assert_eq!(maintenance.count, 30);
         assert_eq!(maintenance.reason, "maintenance_deadline");

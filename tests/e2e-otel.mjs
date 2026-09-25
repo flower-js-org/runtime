@@ -6,7 +6,7 @@ import { writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { LocalCluster } from "../bench/cluster.mjs";
 import { buildBundle } from "../sdk/bundle.ts";
-import { FlowerClient } from "../sdk/index.ts";
+import { FlowerAdmin, FlowerClient } from "../sdk/index.ts";
 
 const binary = resolve(process.env.E2E_FLOWER_BIN ?? "target/debug/flower");
 const payloads = [];
@@ -51,12 +51,13 @@ try {
 const rows=collection<any>("otel.records");
 export default define({http:{
   "test.write": mutation("write", (ctx,args:any)=>{ctx.set(rows,"one",args);return args;}),
-  "test.read": query("read",ctx=>ctx.get(rows,"one"),{consistency:"replica-local"}),
+  "test.read": query("read",{consistency:"replica-local"},ctx=>ctx.get(rows,"one")),
   "test.fail": mutation("fail",(_ctx,args:any)=>{throw new Error(args.secret);}),
   "test.queryfail": query("queryfail",(_ctx,args:any)=>{throw new Error(args.secret);})
 }});`);
-  const client = new FlowerClient(cluster.url, { adminToken: cluster.adminToken });
-  await client.deploy(await buildBundle(fixture, { initialization: "static" }), { requestId: "otel-deploy" });
+  const client = new FlowerClient(cluster.url);
+  await new FlowerAdmin(cluster.url, { adminToken: cluster.adminToken })
+    .deploy(await buildBundle(fixture, { initialization: "static" }), { requestId: "otel-deploy" });
   const traceId = "4bf92f3577b34da6a3ce929d0e0e4736", parentId = "00f067aa0ba902b7";
   const follower = cluster.members.find(node => node !== cluster.leader);
   const response = await fetch(follower.url + "/v1/mutate", {
@@ -84,8 +85,11 @@ export default define({http:{
   });
   assert.equal(malformed.status, 400);
   await malformed.arrayBuffer();
-  await assert.rejects(client.mutate("test.fail", { secret }, { requestId: "otel-fail" }));
-  await assert.rejects(client.query("test.queryfail", { secret }));
+  // Callers receive the method's failure text; the privacy check below proves OTLP never does.
+  await assert.rejects(client.mutate("test.fail", { secret }, { requestId: "otel-fail" }),
+    error => error.code === "EVALUATION_FAILED" && error.failure?.code === "COMPUTE_ERROR" && error.failure.message === secret);
+  await assert.rejects(client.query("test.queryfail", { secret }),
+    error => error.code === "EVALUATION_FAILED" && error.failure?.code === "COMPUTE_ERROR" && error.failure.message === secret);
   await fetch(cluster.url + `/unknown-${secret}?q=${secret}`, { signal: AbortSignal.timeout(2000) });
   await cluster.close(); cluster = null;
 

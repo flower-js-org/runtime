@@ -43,10 +43,16 @@ test("CLI rejects malformed or misplaced watch allowances before network work", 
   }
 });
 
-test("CLI help describes watch allowances and replica reconnection", async () => {
+test("CLI help describes watch allowances, replica reconnection and the static initialization default", async () => {
   const { stdout, stderr } = await promisify(execFile)(process.execPath, ["sdk/cli.ts", "--help"], { cwd: new URL("..", import.meta.url), timeout: 5000 });
   assert.equal(stderr, "");
   for (const flag of flags) assert.match(stdout, new RegExp(`--${flag} N\\s+watch only`));
   assert.match(stdout, /positive safe integers.*never sent to the server/);
   assert.match(stdout, /reachable replica/);
+  assert.match(stdout, /--initialization MODE\s+build\/deploy \.ts: static \(default\) or per-invocation/);
+});
+
+test("CLI validates the initialization mode and where it applies", async () => {
+  await assert.rejects(main(["build", "app.ts", "--initialization", "lazy"]), /--initialization must be per-invocation or static/);
+  await assert.rejects(main(["query", "read", "--initialization", "static"]), /--initialization applies only to build\/deploy/);
 });

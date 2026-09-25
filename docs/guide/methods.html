@@ -4,83 +4,92 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#f8f5ec">
-<meta name="description" content="Call Flower methods over HTTP or the SDK, authorize callers, retry safely, and span several groups in one transaction.">
+<meta name="description" content="Call Flower methods with the typed client or HTTP, handle structured failures, retry safely, and span several partitions in one transaction.">
 <meta property="og:title" content="Methods &amp; retries · Flower">
-<meta property="og:description" content="Call Flower methods over HTTP or the SDK, authorize callers, retry safely, and span several groups in one transaction.">
+<meta property="og:description" content="Call Flower methods with the typed client or HTTP, handle structured failures, retry safely, and span several partitions in one transaction.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://flower.js.org/guide/methods.html">
 <link rel="canonical" href="https://flower.js.org/guide/methods.html">
 <title>Methods &amp; retries · Flower</title>
 <link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
 <link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
-<link rel="stylesheet" href="../site.css?v=eb05c8aa5c04">
+<link rel="stylesheet" href="../site.css?v=fd4ad318734f">
 <script src="../site.js?v=3184f0662fa5" defer></script>
 </head>
 <body class="doc-page">
 <a class="skip-link" href="#main">Skip to content</a>
 <div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/" aria-current="page">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/flower-js-org/runtime">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
 <div class="documentation">
-<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li class="current"><a href="#top" aria-current="page"><span>04</span>Methods & retries</a><ol id="section-nav" aria-label="On this page"><li><a href="#call">Call a method</a></li><li><a href="#retry-one-operation-with-one">Retry safely</a></li><li><a href="#authorization">Authorize callers</a></li><li><a href="#retry-retention">Limit how long retry results are kept</a></li><li><a href="#one-transaction-several-groups">Transactions across groups</a></li></ol></li><li><a href="../guide/reads.html"><span>05</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>06</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>07</span>Leases & expiry</a></li><li><a href="../guide/workers.html"><span>08</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>09</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>10</span>Crypto & tokens</a></li><li><a href="../guide/deployments.html"><span>11</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/definitions.html"><span>03</span>Contexts & definitions</a></li><li><a href="../reference/client.html"><span>04</span>Client & transports</a></li><li><a href="../reference/time.html"><span>05</span>Expiry, leases & timers</a></li><li><a href="../reference/crypto.html"><span>06</span>NaCl & JWT</a></li><li><a href="../reference/keys.html"><span>07</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>08</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>09</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>10</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>11</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>12</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
+<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/components.html"><span>04</span>Components & tasks</a></li><li class="current"><a href="#top" aria-current="page"><span>05</span>Methods & retries</a><ol id="section-nav" aria-label="On this page"><li><a href="#call">Call a method</a></li><li><a href="#retry-one-operation-with-one">Retry safely</a></li><li><a href="#failures">Handle failures</a></li><li><a href="#authorization">Authorize callers</a></li><li><a href="#retry-retention">Limit how long retry results are kept</a></li><li><a href="#one-transaction-several-groups">Transactions</a></li></ol></li><li><a href="../guide/access.html"><span>06</span>Access control</a></li><li><a href="../guide/reads.html"><span>07</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>08</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>09</span>Queues & expiry</a></li><li><a href="../guide/workers.html"><span>10</span>External workers</a></li><li><a href="../guide/worker-pools.html"><span>11</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>12</span>Crypto & tokens</a></li><li><a href="../guide/testing.html"><span>13</span>Testing</a></li><li><a href="../guide/deployments.html"><span>14</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/schemas.html"><span>03</span>Schemas & failures</a></li><li><a href="../reference/definitions.html"><span>04</span>Contexts & definitions</a></li><li><a href="../reference/components.html"><span>05</span>Components & tasks</a></li><li><a href="../reference/client.html"><span>06</span>Client & transports</a></li><li><a href="../reference/time.html"><span>07</span>Queues, expiry & timers</a></li><li><a href="../reference/workers.html"><span>08</span>External values & workers</a></li><li><a href="../reference/testing.html"><span>09</span>Testing</a></li><li><a href="../reference/crypto.html"><span>10</span>NaCl & JWT</a></li><li><a href="../reference/keys.html"><span>11</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>12</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>13</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>14</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>15</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>16</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
 <main id="main" tabindex="-1">
-<header class="page-intro" id="top"><p class="eyebrow">Guide · 04</p><h1>Call methods safely.</h1><p class="lead">Call queries and mutations from TypeScript, the CLI or plain HTTP. A request ID makes retries safe.</p></header>
+<header class="page-intro" id="top"><p class="eyebrow">Guide · 05</p><h1>Call methods safely.</h1><p class="lead">Call queries and mutations from typed TypeScript, the CLI or plain HTTP. A request ID makes retries safe.</p></header>
 <div class="page-content">
 <!-- content:start -->
 <section id="call">
 <h2>Call a method</h2>
-<p>Point the client at any node. Nodes forward writes to the leader for you.</p>
+<p>Point the client at any node; nodes forward writes to the leader. Give it your module's type and every alias, argument and result is checked.</p>
 <div class="code-block"><div class="code-head"><span>client.ts</span><button type="button" class="copy-button" aria-label="Copy client.ts">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { FlowerClient } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
+<span class="kw">import</span> <span class="kw">type</span> counter <span class="kw">from</span> <span class="str">"./counter.ts"</span>;
 
-<span class="kw">const</span> client = <span class="kw">new</span> FlowerClient(<span class="str">"http://127.0.0.1:7101"</span>);
-<span class="kw">const</span> result = <span class="kw">await</span> client.call(<span class="str">"counter.increment"</span>, <span class="str">"visits"</span>, {
-  requestId: <span class="str">"visit-002"</span>,
-});
-<span class="comment">// { revision, value, duplicate }</span>
+<span class="kw">const</span> client = <span class="kw">new</span> FlowerClient&lt;<span class="kw">typeof</span> counter&gt;(<span class="str">"http://127.0.0.1:7101"</span>);
+<span class="kw">const</span> { value, revision, duplicate } = <span class="kw">await</span> client.mutate(<span class="str">"counter.increment"</span>,
+  { id: <span class="str">"visits"</span>, by: <span class="num">1</span> }, { requestId: <span class="str">"visit-002"</span> });
 
-console.log(result);
-console.log(<span class="kw">await</span> client.call(<span class="str">"counter.get"</span>, <span class="str">"visits"</span>));</code></pre></div>
+<span class="kw">const</span> { value: now } = <span class="kw">await</span> client.query(<span class="str">"counter.get"</span>, <span class="str">"visits"</span>);
+console.log(value, revision, duplicate, now.count, now.doubled);</code></pre></div>
 <div class="code-block"><div class="code-head"><span>The same mutation over HTTP</span><button type="button" class="copy-button" aria-label="Copy The same mutation over HTTP">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">curl</span> <span class="var">-fsS</span> http://<span class="num">127</span>.<span class="num">0</span>.<span class="num">0</span>.<span class="num">1</span>:<span class="num">7101</span>/v<span class="num">1</span>/call \
   <span class="var">-H</span> <span class="str">'Content-Type: application/json'</span> \
-  <span class="var">-d</span> <span class="str">'{"name":"counter.increment","args":"visits","requestId":"visit-003"}'</span></code></pre></div>
+  <span class="var">-d</span> <span class="str">'{"name":"counter.increment","args":{"id":"visits","by":1},"requestId":"visit-003"}'</span></code></pre></div>
 <div class="table-wrap"><table><caption class="sr-only">HTTP method routes</caption><thead><tr><th>Endpoint</th><th>Body</th></tr></thead><tbody><tr><td><code>POST /v1/call</code></td><td><code>{name, args?, requestId?, expectedRevision?, credentials?}</code>. Works for any exposed method.</td></tr><tr><td><code>POST /v1/query</code></td><td><code>{name, args?, credentials?}</code>. Queries only.</td></tr><tr><td><code>POST /v1/mutate</code></td><td><code>{name, args?, requestId, expectedRevision?, credentials?}</code>. Mutations and transactions only.</td></tr></tbody></table></div>
 <ul>
-<li>All three return <code>{revision, value, duplicate}</code>.</li>
+<li><code>import type</code> adds nothing to your bundle. Leave out the type parameter and calls are untyped.</li>
+<li>All three routes return <code>{revision, value, duplicate}</code>.</li>
 <li>Over HTTP, mutations need a <code>requestId</code>. The SDK makes one up if you omit it.</li>
 </ul>
 </section>
 <section id="retry-one-operation-with-one">
 <h2>Retry safely</h2>
-<p>After a timeout, dropped connection, election or <code>503 UNAVAILABLE</code>, retry with the <strong>same request ID and the same arguments</strong>, on any node.</p>
+<p>After a timeout, a dropped connection, an election or <code>503 UNAVAILABLE</code>, send the <strong>same request ID with the same arguments</strong>, to any node. The client can do it for you:</p>
+<div class="code-block"><div class="code-head"><span>Automatic retries</span><button type="button" class="copy-button" aria-label="Copy Automatic retries">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">const</span> client = <span class="kw">new</span> FlowerClient&lt;<span class="kw">typeof</span> counter&gt;(<span class="str">"http://127.0.0.1:7101"</span>, { retry: <span class="kw">true</span> });
+<span class="kw">await</span> client.mutate(<span class="str">"counter.increment"</span>, { id: <span class="str">"visits"</span>, by: <span class="num">1</span> }, {
+  requestId: <span class="str">"visit-004"</span>, <span class="comment">// Save it first if the process itself might restart.</span>
+  retry: { attempts: <span class="num">5</span>, until: Date.now() + <span class="num">30_000</span> },
+});</code></pre></div>
 <ul>
 <li>If the first attempt committed, you get its original result with <code>duplicate: true</code>.</li>
+<li><code>retry: true</code> retries network errors, timeouts, 408, 425, 429 and 5xx: eight attempts, 250 ms doubling with jitter up to 30 s, 10 s per attempt. A method's own failure is never retried.</li>
+<li>Every attempt reuses one request ID, so a lost reply can't apply twice. Use a new ID only for a new operation.</li>
 <li>A timed-out mutation may still have committed. Never retry it under a new ID.</li>
-<li>Use a new ID only for a new operation. The CLI makes a new ID unless you pass <code>--request-id</code>.</li>
-<li>For compare-and-set, pass <code>expectedRevision</code>.</li>
+<li>For compare-and-set, pass <code>expectedRevision</code>. For your own loops, <code>isTransient(error)</code> and <code>backoff(attempt)</code> make the same decisions.</li>
 </ul>
+</section>
+<section id="failures">
+<h2>Handle failures</h2>
+<p>Every HTTP failure becomes a <code>FlowerError</code> with <code>status</code> and <code>code</code>. When your code, the access check or a transaction participant rejected the call, <code>failure</code> holds its <code>{ code, message, details? }</code>.</p>
+<div class="table-wrap"><table><caption class="sr-only">Common errors</caption><thead><tr><th>Response</th><th>What to do</th></tr></thead><tbody>
+<tr><td><code>422 EVALUATION_FAILED</code></td><td>Your code failed; nothing committed. Read <code>failure.code</code>: yours, or <code>INVALID_ARGUMENT</code>, <code>INVALID_RECORD</code>, <code>COMPUTE_ERROR</code>…</td></tr>
+<tr><td><code>403 FORBIDDEN</code></td><td>Access was denied. <code>failure.code</code> is <code>UNAUTHENTICATED</code>, <code>FORBIDDEN</code> or your own.</td></tr>
+<tr><td><code>422 TRANSACTION_ABORTED</code></td><td>A participant failed; <code>failure</code> is its failure. Final for that request ID.</td></tr>
+<tr><td><code>404 METHOD_NOT_FOUND</code></td><td>Use a name the current deployment exposes. Removing a name also rejects old retries through it.</td></tr>
+<tr><td><code>409 REQUEST_ID_REUSED</code></td><td>That ID was already used with different arguments.</td></tr>
+<tr><td><code>409 REVISION_CONFLICT</code></td><td>Read the current state, then decide whether to send a new operation.</td></tr>
+<tr><td><code>503 UNAVAILABLE</code></td><td>Wait for the leader or queue to recover, then retry with the same request ID.</td></tr>
+</tbody></table></div>
+<p>Network errors and aborts throw ordinary errors, so don't assume every failure is a <code>FlowerError</code>.</p>
 </section>
 <section id="authorization">
 <h2>Authorize callers</h2>
-<p>Pass an <code>authorize</code> query to <code>define</code>. It runs before every call, retry and watch refresh, and returns the caller's identity.</p>
-<div class="code-block"><div class="code-head"><span>Application authorization</span></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { define, query, key, jwt } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
-<span class="kw">const</span> sessions = key(<span class="str">"sessions"</span>, { algorithm: <span class="str">"Ed25519"</span>, usages: [<span class="str">"verify"</span>] });
-<span class="kw">const</span> authorize = query(<span class="str">"admission"</span>, (_ctx, request) =&gt; {
-  <span class="kw">const</span> { claims } = jwt.verify(request.credentials, sessions);
-  <span class="kw">if</span> (<span class="kw">typeof</span> claims.sub !== <span class="str">"string"</span> || <span class="kw">typeof</span> claims.tenant !== <span class="str">"string"</span>) <span class="kw">return</span> <span class="kw">null</span>;
-  <span class="kw">return</span> { subject: claims.sub, tenant: claims.tenant };
-});
-<span class="kw">export</span> <span class="kw">default</span> define({ keys: [sessions], authorize, http: { <span class="comment">/* business methods */</span> } });</code></pre></div>
-<ul>
-<li>Return <code>null</code> or throw to deny. Methods read the identity with <code>ctx.principal()</code>.</li>
-<li>Send tokens in <code>credentials</code>, not in arguments, so a refreshed token doesn't break retries.</li>
-<li>Put checks that depend on changing state in the mutation itself.</li>
-<li>Protected reads are always fresh, even if the query is replica-local.</li>
-</ul>
-<p>More in the <a href="../reference/access.html#authorization">authorization reference</a>, including tenant partitions.</p>
+<p>Send tokens in <code>credentials</code>, never in arguments, so a refreshed token doesn't break a retry. The app decides what they mean:</p>
+<div class="code-block"><div class="code-head"><span>Credentials on every call</span><button type="button" class="copy-button" aria-label="Copy Credentials on every call">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">const</span> client = <span class="kw">new</span> FlowerClient&lt;<span class="kw">typeof</span> counter&gt;(<span class="str">"https://flower.example"</span>, {
+  credentials: <span class="kw">async</span> () =&gt; <span class="str">`Bearer ${await session.token()}`</span>,
+});</code></pre></div>
+<p><a href="access.html">Access control</a> shows how an app authenticates callers and sets access per method.</p>
 </section>
 <section id="retry-retention">
 <h2>Limit how long retry results are kept</h2>
 <p>Flower keeps results so retries can be answered. To bound that, operators use retry windows (epochs) and retire old ones.</p>
 <ol class="steps">
-<li>Initialize the history with <code>controlRetention</code>.</li>
+<li>Initialize the history with <code>admin.controlRetention</code>.</li>
 <li>Create the client with <code>boundedRetries: true</code>.</li>
 <li>Save <code>await client.newRequestId()</code> durably before sending.</li>
 <li>Retire an epoch only after the retry window you promised has passed.</li>
@@ -91,22 +100,51 @@ console.log(<span class="kw">await</span> client.call(<span class="str">"counter
 </ul>
 <details><summary>Long-running clients, work queues and restores</summary><div class="details-body">
 <p>Long-running clients can use <code>openRetrySession</code>, and call <code>acknowledgeRetrySession</code> only after durably handling results up to that point. Acknowledged sequences never run again.</p>
-<p><code>workQueue</code> claims then carry a history identity; pass it back unchanged. After a restore, old claims are rejected. External systems must check an increasing fencing token too; lease expiry can't stop a paused worker.</p>
+<p>Queue claims then carry a history identity; pass it back unchanged. After a restore, old claims are rejected. External systems must check an increasing fencing token too; lease expiry can't stop a paused worker.</p>
 </div></details>
 <p>See the <a href="../reference/access.html#retention">retention reference</a> for budgets and restores.</p>
 </section>
-<section id="one-transaction-several-groups">
-<h2>Transactions across groups</h2>
-<p><code>transaction(name, args =&gt; ({ calls: [...] }))</code> runs method calls in several partitions or Raft groups. All commit or none do.</p>
+<section id="one-transaction-several-groups" data-toc="Transactions">
+<h2>Transactions across partitions</h2>
+<p>A transaction calls exposed methods in several partitions or Raft groups. All of them commit, or none do. <code>participant</code> types each call against the methods it targets.</p>
+<div class="code-block"><div class="code-head"><span>bank.ts</span><button type="button" class="copy-button" aria-label="Copy bank.ts">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">import</span> { collection, define, fail, mutation, participant, transaction, v } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
+
+<span class="kw">const</span> balances = collection(<span class="str">"balances"</span>, v.int({ min: <span class="num">0</span> }));
+<span class="kw">const</span> entry = v.object({ id: v.<span class="kw">string</span>({ min: <span class="num">1</span> }), cents: v.int({ min: <span class="num">1</span> }) });
+<span class="kw">const</span> debit = mutation(<span class="str">"debit"</span>, { args: entry }, (ctx, { id, cents }) =&gt; {
+  <span class="kw">const</span> balance = ctx.get(balances, id) ?? <span class="num">0</span>;
+  <span class="kw">if</span> (balance &lt; cents) fail(<span class="str">"INSUFFICIENT_FUNDS"</span>, <span class="str">`${id} has ${balance}`</span>, { balance });
+  ctx.set(balances, id, balance - cents);
+  <span class="kw">return</span> balance - cents;
+});
+<span class="kw">const</span> credit = mutation(<span class="str">"credit"</span>, { args: entry }, (ctx, { id, cents }) =&gt; {
+  ctx.set(balances, id, (ctx.get(balances, id) ?? <span class="num">0</span>) + cents);
+  <span class="kw">return</span> ctx.get(balances, id);
+});
+<span class="kw">const</span> accounts = { debit, credit };
+
+<span class="kw">const</span> transfer = transaction(<span class="str">"transfer"</span>, {
+  args: v.object({ <span class="kw">from</span>: v.<span class="kw">string</span>(), to: v.<span class="kw">string</span>(), cents: v.int({ min: <span class="num">1</span> }) }),
+}, ({ <span class="kw">from</span>, to, cents }) =&gt; ({
+  calls: [
+    participant&lt;<span class="kw">typeof</span> accounts&gt;({ partition: <span class="str">"west"</span> }).call(<span class="str">"debit"</span>, { id: <span class="kw">from</span>, cents }),
+    participant&lt;<span class="kw">typeof</span> accounts&gt;({ partition: <span class="str">"east"</span> }).call(<span class="str">"credit"</span>, { id: to, cents }),
+  ],
+  value: { cents },
+}));
+
+<span class="kw">const</span> app = define({ http: { ...accounts, transfer } });
+<span class="kw">export</span> <span class="kw">default</span> app;</code></pre></div>
 <ul>
-<li>Until it resolves, each partition involved blocks fresh reads and writes. Others stay available.</li>
-<li>Opt-in replica-local reads can still see the older state.</li>
+<li>The plan sees only its arguments; business checks belong in the participant methods. A call returns <code>{ results, value }</code>, with results in plan order.</li>
+<li>If any participant fails, nothing commits and the caller gets <code>422 TRANSACTION_ABORTED</code> with that participant's <code>failure</code>, here <code>INSUFFICIENT_FUNDS</code>.</li>
+<li>Until it resolves, each partition involved blocks fresh reads and writes. Others stay available. Opt-in replica-local reads can still see the older state.</li>
 </ul>
-<p>See the <a href="https://github.com/flower-js-org/runtime/blob/main/TRANSACTIONS.md">transaction guide</a> for setup and recovery.</p>
+<p>See the <a href="../reference/partitions.html#transactions">transaction reference</a> and the <a href="https://github.com/flower-js-org/runtime/blob/main/TRANSACTIONS.md">transaction guide</a> for setup and recovery.</p>
 </section>
 <!-- content:end -->
 </div>
-<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../guide/reactivity.html"><small>Previous · Guide</small>Reactive values</a><a rel="next" href="../guide/reads.html"><small>Next · Guide</small>Reads & live queries</a></nav>
+<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../guide/components.html"><small>Previous · Guide</small>Components & tasks</a><a rel="next" href="../guide/access.html"><small>Next · Guide</small>Access control</a></nav>
 </main>
 </div>
 <div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/flower-js-org/runtime">Source ↗</a></div></div></div>

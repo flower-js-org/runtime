@@ -124,7 +124,7 @@ async fn initial_errors_are_json() {
         let error = watch(State(app.clone()), Json(json!({"name":name})))
             .await
             .unwrap_err();
-        assert_eq!((error.0, error.1), (status, code));
+        assert_eq!((error.status, error.code), (status, code));
     }
     app.consensus.shutdown().await.unwrap();
 }
@@ -254,7 +254,7 @@ async fn slow_consumer_has_a_bounded_terminal_lane_after_the_initial_snapshot() 
         .await
         .err()
         .unwrap();
-    assert_eq!(error.1, "WATCH_SLOW_CONSUMER");
+    assert_eq!(error.code, "WATCH_SLOW_CONSUMER");
     terminal.send(error_event(error)).unwrap();
     drop(sender);
     let body = events(receiver, terminal_receiver);
@@ -286,7 +286,7 @@ fn sequence_exhaustion_is_a_terminal_error_instead_of_an_unsafe_json_number() {
         let error = prepare_sync(Some(&previous), query_result(json!(1), 2))
             .err()
             .unwrap();
-        assert_eq!(error.1, "WATCH_SEQUENCE_EXHAUSTED");
+        assert_eq!(error.code, "WATCH_SEQUENCE_EXHAUSTED");
     }
 }
 
@@ -515,7 +515,7 @@ async fn backpressured_subscriber_rechecks_access_before_sending() {
         .unwrap()
         .unwrap()
         .unwrap_err();
-    assert_eq!(error.1, "METHOD_NOT_FOUND");
+    assert_eq!(error.code, "METHOD_NOT_FOUND");
     assert!(
         receiver.recv().await.is_none(),
         "no stale update after revocation"

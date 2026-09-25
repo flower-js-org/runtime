@@ -16,7 +16,7 @@ pub(super) fn required(state: &Snapshot) -> bool {
 }
 
 fn denied(message: impl Into<String>) -> ApiError {
-    ApiError(StatusCode::FORBIDDEN, "FORBIDDEN", message.into())
+    ApiError::new(StatusCode::FORBIDDEN, "FORBIDDEN", message.into())
 }
 
 pub(super) async fn authorize_admitted(
@@ -82,7 +82,10 @@ async fn authorize_inner(
     })
     .await
     .map_err(|error| unavailable(error.into()))?
-    .map_err(|_| denied("Authorization denied"))?;
+    .map_err(|error| match engine_failure(&error) {
+        Some(failure) => denied("Authorization denied").with_failure(failure),
+        None => denied("Authorization denied"),
+    })?;
     let principal = result.value;
     let Some(object) = principal.as_object() else {
         return Err(denied("Authorization denied"));

@@ -13,64 +13,106 @@
 <title>External workers · Flower</title>
 <link rel="icon" href="../assets/flower.svg" type="image/svg+xml">
 <link rel="stylesheet" href="../chrome.css?v=f7d91dd4a411">
-<link rel="stylesheet" href="../site.css?v=eb05c8aa5c04">
+<link rel="stylesheet" href="../site.css?v=fd4ad318734f">
 <script src="../site.js?v=3184f0662fa5" defer></script>
 </head>
 <body class="doc-page">
 <a class="skip-link" href="#main">Skip to content</a>
 <div class="site-header" role="banner"><div class="site-header-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="31" height="31" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><div class="site-links" role="navigation" aria-label="Main"><a href="../guide/" aria-current="page">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a class="site-repository" href="https://github.com/flower-js-org/runtime">GitHub ↗</a></div><button class="site-menu" type="button" aria-expanded="false" aria-controls="site-nav">Contents <span aria-hidden="true">＋</span></button></div></div>
 <div class="documentation">
-<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/methods.html"><span>04</span>Methods & retries</a></li><li><a href="../guide/reads.html"><span>05</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>06</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>07</span>Leases & expiry</a></li><li class="current"><a href="#top" aria-current="page"><span>08</span>External workers</a><ol id="section-nav" aria-label="On this page"><li><a href="#choose">Pick a pattern</a></li><li><a href="#reconcile">Keep a result current</a></li><li><a href="#try-reconciler">Try it: keep a digest current</a></li><li><a href="#queue">Complete every action</a></li></ol></li><li><a href="../guide/worker-pools.html"><span>09</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>10</span>Crypto & tokens</a></li><li><a href="../guide/deployments.html"><span>11</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/definitions.html"><span>03</span>Contexts & definitions</a></li><li><a href="../reference/client.html"><span>04</span>Client & transports</a></li><li><a href="../reference/time.html"><span>05</span>Expiry, leases & timers</a></li><li><a href="../reference/crypto.html"><span>06</span>NaCl & JWT</a></li><li><a href="../reference/keys.html"><span>07</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>08</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>09</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>10</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>11</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>12</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
+<aside class="sidebar"><nav id="site-nav" aria-label="Documentation"><div class="nav-group"><p class="toc-label">Guide</p><ol><li><a href="../guide/"><span>01</span>Get started</a></li><li><a href="../guide/applications.html"><span>02</span>Applications</a></li><li><a href="../guide/reactivity.html"><span>03</span>Reactive values</a></li><li><a href="../guide/components.html"><span>04</span>Components & tasks</a></li><li><a href="../guide/methods.html"><span>05</span>Methods & retries</a></li><li><a href="../guide/access.html"><span>06</span>Access control</a></li><li><a href="../guide/reads.html"><span>07</span>Reads & live queries</a></li><li><a href="../guide/timers.html"><span>08</span>Scheduled logic</a></li><li><a href="../guide/leases.html"><span>09</span>Queues & expiry</a></li><li class="current"><a href="#top" aria-current="page"><span>10</span>External workers</a><ol id="section-nav" aria-label="On this page"><li><a href="#choose">Pick a pattern</a></li><li><a href="#reconcile">Keep a result current</a></li><li><a href="#try-reconciler">Try it: keep a digest current</a></li><li><a href="#queue">Complete every action</a></li></ol></li><li><a href="../guide/worker-pools.html"><span>11</span>Worker pools</a></li><li><a href="../guide/crypto.html"><span>12</span>Crypto & tokens</a></li><li><a href="../guide/testing.html"><span>13</span>Testing</a></li><li><a href="../guide/deployments.html"><span>14</span>Deploy changes</a></li></ol></div><div class="nav-group"><p class="toc-label">Operate</p><ol><li><a href="../operate/"><span>01</span>Run a cluster</a></li><li><a href="../operate/capacity.html"><span>02</span>Capacity & budgets</a></li><li><a href="../operate/benchmarks.html"><span>03</span>Benchmarks</a></li><li><a href="../operate/boundaries.html"><span>04</span>Current boundaries</a></li></ol></div><div class="nav-group"><p class="toc-label">Reference</p><ol><li><a href="../reference/"><span>01</span>Packages</a></li><li><a href="../reference/data.html"><span>02</span>Values & collections</a></li><li><a href="../reference/schemas.html"><span>03</span>Schemas & failures</a></li><li><a href="../reference/definitions.html"><span>04</span>Contexts & definitions</a></li><li><a href="../reference/components.html"><span>05</span>Components & tasks</a></li><li><a href="../reference/client.html"><span>06</span>Client & transports</a></li><li><a href="../reference/time.html"><span>07</span>Queues, expiry & timers</a></li><li><a href="../reference/workers.html"><span>08</span>External values & workers</a></li><li><a href="../reference/testing.html"><span>09</span>Testing</a></li><li><a href="../reference/crypto.html"><span>10</span>NaCl & JWT</a></li><li><a href="../reference/keys.html"><span>11</span>Managed keys</a></li><li><a href="../reference/partitions.html"><span>12</span>Partitions & transactions</a></li><li><a href="../reference/deployments.html"><span>13</span>Staged deployment</a></li><li><a href="../reference/cli.html"><span>14</span>Bundles & CLI</a></li><li><a href="../reference/access.html"><span>15</span>Authorization & retention</a></li><li><a href="../reference/limits.html"><span>16</span>Operational limits</a></li></ol></div></nav><div class="sidebar-note"><img src="../assets/flower.svg" width="30" height="30" alt="" aria-hidden="true"><p>Small API.<br>Ordinary TypeScript.<br>Durable decisions.</p></div></aside>
 <main id="main" tabindex="-1">
-<header class="page-intro" id="top"><p class="eyebrow">Guide · 08</p><h1>Do slow work outside the database.</h1><p class="lead">Workers are ordinary processes. They watch for work, do it, and report back through a mutation.</p></header>
+<header class="page-intro" id="top"><p class="eyebrow">Guide · 10</p><h1>Do slow work outside the database.</h1><p class="lead">Workers are ordinary processes. They watch for work, do it, and report back through a mutation.</p></header>
 <div class="page-content">
 <!-- content:start -->
 <section id="choose">
 <h2>Pick a pattern</h2>
 <p class="section-intro">A worker is your own process that does slow or external work. A live query tells it what to do; a mutation decides whether to accept the result. Nothing new runs inside the database.</p>
-<div class="table-wrap"><table><caption class="sr-only">Two external worker contracts</caption><thead><tr><th>Keep a result current</th><th>Complete every action</th></tr></thead><tbody><tr><td>Previews, embeddings, search documents, enrichment.</td><td>Receipts, deliveries, webhooks, exports.</td></tr><tr><td>Derive the desired input. Store each result tagged with its input.</td><td>Enqueue a job in the mutation that creates the obligation.</td></tr><tr><td>New inputs replace old work. In-between versions may be skipped.</td><td>Every job stays pending, leased, completed or failed until you resolve it.</td></tr><tr><td>Publish only if the input is still current.</td><td>Complete only with the current, unexpired lease.</td></tr></tbody></table></div>
-<p>Results land in ordinary collections. To run and scale workers, see <a href="worker-pools.html">Worker pools</a>.</p>
+<div class="table-wrap"><table><caption class="sr-only">Two external worker contracts</caption><thead><tr><th>Keep a result current</th><th>Complete every action</th></tr></thead><tbody><tr><td>Previews, embeddings, search documents, enrichment.</td><td>Receipts, deliveries, webhooks, exports.</td></tr><tr><td><code>external()</code> derives the input; workers publish results tagged with it.</td><td><code>queue()</code> takes a job in the mutation that creates the obligation.</td></tr><tr><td>New inputs replace old work. In-between versions may be skipped.</td><td>Every job stays pending, leased, completed or failed until you resolve it.</td></tr><tr><td>A result is kept only if its input is still current.</td><td>A result is kept only from the current, unexpired lease.</td></tr><tr><td><code>reconcile()</code> runs the worker loop.</td><td><code>runQueueWorker()</code> runs the worker loop.</td></tr></tbody></table></div>
+<p>Both loops come from <code>@flower-js/sdk/worker</code> and run in Node or a browser. Results land in ordinary collections. To run and scale queue workers, see <a href="worker-pools.html">Worker pools</a>.</p>
 </section>
 <section id="reconcile">
 <h2>Keep a result current</h2>
-<p class="section-intro">Store each result with the exact input that produced it. When the source changes, the old result stops counting immediately.</p>
-<p>The <a href="../reactive-worker.ts">complete example</a> keeps a document’s SHA-256 digest current.</p>
-<div class="code-block"><div class="code-head"><span>Inside the application · desired input</span><button class="copy-button" type="button" aria-label="Copy Inside the application · desired input">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">const</span> desired = derive(<span class="str">"worker.desired"</span>, (ctx, id: <span class="kw">string</span>) =&gt; {
-  <span class="kw">const</span> document = ctx.get(documents, id);
-  <span class="kw">if</span> (!document) <span class="kw">return</span> <span class="kw">null</span>;
-  <span class="kw">const</span> input = { recipe: <span class="str">"sha256-v1"</span>, text: document.text };
-  <span class="kw">return</span> { key: canonicalJson([id, input]), input };
+<p class="section-intro">An external value stores each result with the exact input that produced it. When the input changes, the old result stops counting immediately.</p>
+<p>This app keeps a SHA-256 digest of every document. <a href="../reactive-worker.ts" download>Download reactive-worker.ts</a>.</p>
+<div class="code-block"><div class="code-head"><span>docs/reactive-worker.ts</span><button class="copy-button" type="button" aria-label="Copy docs/reactive-worker.ts">Copy</button></div><pre tabindex="0"><code class="language-ts" data-src="../reactive-worker.ts"><span class="kw">import</span> { collection, define, external, mutation, query, v } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
+
+<span class="kw">const</span> documentId = v.<span class="kw">string</span>({ min: <span class="num">1</span>, max: <span class="num">256</span> });
+<span class="kw">const</span> documents = collection(<span class="str">"documents"</span>, v.object({ text: v.<span class="kw">string</span>({ max: <span class="num">100_000</span> }) }));
+
+<span class="comment">// Everything that affects the digest is in its input. Workers publish results</span>
+<span class="comment">// tagged with that input; a changed document makes its old digest stale at once.</span>
+<span class="kw">const</span> digest = external(<span class="str">"digest"</span>, {
+  input: (ctx, id: <span class="kw">string</span>) =&gt; {
+    <span class="kw">const</span> document = ctx.get(documents, id);
+    <span class="kw">return</span> document &amp;&amp; { recipe: <span class="str">"sha256-v1"</span>, text: document.text };
+  },
+  result: v.<span class="kw">string</span>({ pattern: /^[<span class="num">0</span>-<span class="num">9</span>a-f]{<span class="num">64</span>}$/ }),
+  each: documents,
 });
 
-<span class="kw">const</span> pending = query(<span class="str">"worker.pending"</span>, (ctx, id: <span class="kw">string</span>) =&gt; {
-  <span class="kw">const</span> task = ctx.get(desired, id);
-  <span class="kw">return</span> task &amp;&amp; ctx.get(results, id)?.key !== task.key ? task : <span class="kw">null</span>;
-});</code></pre></div>
+<span class="kw">const</span> put = mutation(<span class="str">"document.put"</span>, { args: v.object({ id: documentId, text: v.<span class="kw">string</span>({ max: <span class="num">100_000</span> }) }) }, (ctx, input) =&gt; {
+  ctx.set(documents, input.id, { text: input.text });
+  <span class="kw">return</span> <span class="kw">null</span>;
+});
+
+<span class="kw">const</span> remove = mutation(<span class="str">"document.delete"</span>, { args: documentId }, (ctx, id) =&gt; {
+  ctx.<span class="kw">delete</span>(documents, id);
+  <span class="kw">return</span> <span class="kw">null</span>;
+});
+
+<span class="kw">const</span> get = query(<span class="str">"document.get"</span>, { args: documentId }, (ctx, id) =&gt; {
+  <span class="kw">const</span> document = ctx.get(documents, id);
+  <span class="kw">return</span> document &amp;&amp; { text: document.text, digest: ctx.get(digest, id) };
+});
+
+<span class="kw">const</span> app = define({
+  uses: [digest],
+  http: { <span class="str">"document.put"</span>: put, <span class="str">"document.delete"</span>: remove, <span class="str">"document.get"</span>: get, ...digest.http(<span class="str">"digest"</span>) },
+});
+<span class="kw">export</span> <span class="kw">default</span> app;</code></pre></div>
 <ul>
-<li>Put everything that affects the result in the input: source values, recipe, model and prompt versions, locale, config, tenant. Don’t use a global database revision.</li>
-<li>Key it with canonical JSON, or a hash for large inputs.</li>
-<li>The input must not depend on its own result. Store outside facts as versioned records; Flower can’t react to changes it never sees.</li>
+<li><code>input(ctx, args)</code> returns everything that affects the result: source values, recipe, model and prompt versions, locale, configuration. <code>null</code> means there is nothing to compute. Don't use a global database revision.</li>
+<li><code>ctx.get(digest, id)</code> is <code>{ status: "pending" }</code>, <code>{ status: "ready", value }</code>, or <code>null</code> when there is no input. Read it like any derived value; it stays current.</li>
+<li><code>digest.http("digest")</code> exposes <code>digest.pending</code> (the work for one key, or <code>null</code>) and <code>digest.publish</code>. With <code>each</code>, it adds <code>digest.next</code>, which lists stale keys oldest first for worker pools.</li>
+<li><code>publish</code> stores a result only if its key still names the current input, and returns <code>{ accepted }</code>. Among racing workers, the first result wins. A <code>result</code> schema checks every value.</li>
+<li>The input must not depend on its own result. If it goes A → B → A, the stored A result counts again.</li>
 </ul>
-<h3>Check freshness when publishing</h3>
-<div class="code-block"><div class="code-head"><span>Publication core · validation is in the downloadable example</span><button class="copy-button" type="button" aria-label="Copy Publication core · validation is in the downloadable example">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">const</span> publish = mutation(<span class="str">"worker.publish"</span>, (ctx, args: {
-  id: <span class="kw">string</span>; key: <span class="kw">string</span>; result: <span class="kw">string</span>;
-}) =&gt; {
-  <span class="kw">const</span> task = ctx.get(desired, args.id);
-  <span class="kw">if</span> (!task || task.key !== args.key) <span class="kw">return</span> { accepted: <span class="kw">false</span> };
-  <span class="kw">if</span> (ctx.get(results, args.id)?.key !== task.key) {
-    ctx.set(results, args.id, { key: task.key, result: args.result });
-  }
-  <span class="kw">return</span> { accepted: <span class="kw">true</span> };
-});</code></pre></div>
-<p>The check and write commit together: a stale result gets <code>accepted: false</code>, and among racing workers the first wins. Downstream code must read the guarded result, not the raw record:</p>
-<div class="code-block"><div class="code-head"><span>Reading a current result</span><button class="copy-button" type="button" aria-label="Copy Reading a current result">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">const</span> currentResult = derive(<span class="str">"document.currentResult"</span>, (ctx, id: <span class="kw">string</span>) =&gt; {
-  <span class="kw">const</span> task = ctx.get(desired, id);
-  <span class="kw">const</span> stored = ctx.get(results, id);
-  <span class="kw">return</span> task &amp;&amp; stored?.key === task.key ? stored.result : <span class="kw">null</span>;
-});</code></pre></div>
+<h3>Run the worker</h3>
+<div class="code-block"><div class="code-head"><span>docs/reactive-worker-client.ts</span><button class="copy-button" type="button" aria-label="Copy docs/reactive-worker-client.ts">Copy</button></div><pre tabindex="0"><code class="language-ts" data-src="../reactive-worker-client.ts"><span class="kw">import</span> { FlowerClient } <span class="kw">from</span> <span class="str">"@flower-js/sdk"</span>;
+<span class="kw">import</span> { reconcile } <span class="kw">from</span> <span class="str">"@flower-js/sdk/worker"</span>;
+<span class="kw">import</span> { webcrypto } <span class="kw">from</span> <span class="str">"node:crypto"</span>;
+<span class="kw">import</span> { fileURLToPath } <span class="kw">from</span> <span class="str">"node:url"</span>;
+<span class="kw">import</span> <span class="kw">type</span> app <span class="kw">from</span> <span class="str">"./reactive-worker.ts"</span>;
+
+<span class="kw">type</span> Input = { recipe: <span class="kw">string</span>; text: <span class="kw">string</span> };
+
+<span class="comment">// Keep every document's digest current, or only one when id is given. Several</span>
+<span class="comment">// processes may run at once: publication keeps the first result for an input.</span>
+<span class="kw">export</span> <span class="kw">async</span> <span class="kw">function</span> runWorker(client: FlowerClient&lt;<span class="kw">typeof</span> app&gt;, signal: AbortSignal, id?: <span class="kw">string</span>) {
+  <span class="kw">await</span> reconcile&lt;<span class="kw">string</span>, Input, <span class="kw">string</span>&gt;(client, {
+    external: <span class="str">"digest"</span>,
+    ...(id === <span class="kw">undefined</span> ? {} : { args: id }),
+    signal,
+    <span class="kw">async</span> compute(input) {
+      <span class="kw">if</span> (input.recipe !== <span class="str">"sha256-v1"</span>) <span class="kw">throw</span> <span class="kw">new</span> Error(<span class="str">"Unsupported worker recipe"</span>);
+      <span class="kw">const</span> digest = <span class="kw">await</span> webcrypto.subtle.digest(<span class="str">"SHA-256"</span>, <span class="kw">new</span> TextEncoder().encode(input.text));
+      <span class="kw">return</span> Buffer.<span class="kw">from</span>(digest).toString(<span class="str">"hex"</span>);
+    },
+    onEvent: (event) =&gt; console.log(event.<span class="kw">type</span>, <span class="str">"key"</span> <span class="kw">in</span> event ? event.key : event.error),
+  });
+}
+
+<span class="kw">if</span> (process.argv[<span class="num">1</span>] === fileURLToPath(<span class="kw">import</span>.meta.url)) {
+  <span class="kw">const</span> shutdown = <span class="kw">new</span> AbortController();
+  process.once(<span class="str">"SIGINT"</span>, () =&gt; shutdown.abort());
+  process.once(<span class="str">"SIGTERM"</span>, () =&gt; shutdown.abort());
+  <span class="kw">await</span> runWorker(<span class="kw">new</span> FlowerClient(process.env.FLOWER_URL ?? <span class="str">"http://127.0.0.1:7101"</span>), shutdown.signal, process.argv[<span class="num">2</span>]);
+}</code></pre></div>
 <ul>
-<li><code>null</code> means “not ready” here. If a result can be null, use <code>{status: "ready", value: null}</code>.</li>
-<li>If the input goes A → B → A, the stored A result counts again. Add a generation number to force fresh work.</li>
+<li>With <code>args</code>, <code>reconcile</code> keeps one key current by watching <code>digest.pending</code>. Without, it drains every stale key through <code>digest.next</code>. <code>shard: [index, count]</code> splits keys between processes by hash; <code>concurrency</code> runs several computations at once.</li>
+<li><code>compute</code> may run more than once for the same input. Failures back off per key, and publications retry with one request ID.</li>
+<li><strong><code>next</code> notices a key only when its row in the <code>each</code> collection is written.</strong> If the input also reads other records, a change there makes the value pending, and <code>digest.pending</code> reports it, but <code>next</code> won't list it until that row changes. Keep pool inputs to the row itself, or run a per-key worker.</li>
 </ul>
 </section>
 <section id="try-reconciler">
@@ -79,47 +121,27 @@
 <p><a href="./">Start a local node</a>, then run from the checkout:</p>
 <div class="code-block"><div class="code-head"><span>Terminal 1 · deploy and write a document</span><button class="copy-button" type="button" aria-label="Copy Terminal 1 · deploy and write a document">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">npm</span> run build
 <span class="kw">node</span> sdk/cli.ts deploy docs/reactive<span class="var">-worker</span>.ts
-<span class="kw">node</span> sdk/cli.ts call document.put <span class="str">'{"id":"notes","text":"Hello, garden."}'</span>   <span class="var">--request-id</span> notes<span class="var">-v1</span>
-<span class="kw">node</span> sdk/cli.ts watch document.get <span class="str">'"notes"'</span> </code></pre></div><div class="code-block"><div class="code-head"><span>Terminal 2 · start a worker</span><button class="copy-button" type="button" aria-label="Copy Terminal 2 · start a worker">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">node</span> docs/reactive<span class="var">-worker-client</span>.ts notes
-<span class="comment"># FLOWER_URL defaults to http://127.0.0.1:7101.</span>
-<span class="comment"># Start the same command in another terminal to exercise competing workers.</span></code></pre></div><div class="code-block"><div class="code-head"><span>Terminal 3 · change the input</span><button class="copy-button" type="button" aria-label="Copy Terminal 3 · change the input">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">node</span> sdk/cli.ts call document.put <span class="str">'{"id":"notes","text":"The garden has changed."}'</span>   <span class="var">--request-id</span> notes<span class="var">-v2</span></code></pre></div>
-<p>The view shows a digest only for the current text. Stop all workers, edit, and restart one: it catches up from its first snapshot. Download the <a href="../reactive-worker.ts" download>application</a> and <a href="../reactive-worker-client.ts" download>client</a>.</p>
+<span class="kw">node</span> sdk/cli.ts call document.put <span class="str">'{"id":"notes","text":"Hello, garden."}'</span> <span class="var">--request-id</span> notes<span class="var">-v1</span>
+<span class="kw">node</span> sdk/cli.ts watch document.get <span class="str">'"notes"'</span></code></pre></div><div class="code-block"><div class="code-head"><span>Terminal 2 · start a worker</span><button class="copy-button" type="button" aria-label="Copy Terminal 2 · start a worker">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">node</span> docs/reactive<span class="var">-worker-client</span>.ts
+<span class="comment"># FLOWER_URL defaults to http://127.0.0.1:7101. Pass a document ID to follow just one.</span>
+<span class="comment"># Start the same command in another terminal to exercise competing workers.</span></code></pre></div><div class="code-block"><div class="code-head"><span>Terminal 3 · change the input</span><button class="copy-button" type="button" aria-label="Copy Terminal 3 · change the input">Copy</button></div><pre tabindex="0"><code class="language-sh"><span class="kw">node</span> sdk/cli.ts call document.put <span class="str">'{"id":"notes","text":"The garden has changed."}'</span> <span class="var">--request-id</span> notes<span class="var">-v2</span></code></pre></div>
+<p>The view shows a digest only for the current text. Stop all workers, edit, and restart one: it catches up on its own. Download the <a href="../reactive-worker.ts" download>application</a> and <a href="../reactive-worker-client.ts" download>client</a>.</p>
 <p>To run a pool of queue workers instead, see <a href="worker-pools.html#try">Worker pools</a>.</p>
 </section>
 <section id="queue">
 <h2>Complete every action</h2>
 <p class="section-intro">When every action matters, create a job in the same mutation as the business change. Workers lease jobs, do the work, and record the outcome.</p>
-<p>For example, the mutation that finalizes an invoice also calls <code>jobs.enqueue(ctx, operationId, payload)</code>, so a committed invoice always has its receipt job. Put the full payload in the job.</p>
-<p><a href="https://github.com/flower-js-org/runtime/blob/main/examples/workers.ts"><code>examples/workers.ts</code></a> exposes <code>jobs.enqueue</code>, <code>jobs.ready</code>, <code>jobs.claim</code>, <code>jobs.complete</code>, <code>jobs.fail</code>, <code>jobs.retry</code> and <code>jobs.backlog</code>. Its readiness query checks for pending jobs and expired leases:</p>
-<div class="code-block"><div class="code-head"><span>Readiness core · default queue scope</span><button class="copy-button" type="button" aria-label="Copy Readiness core · default queue scope">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">const</span> ready = query(<span class="str">"internal.jobs.ready"</span>, (ctx) =&gt; {
-  <span class="kw">const</span> pending = ctx.range(jobs.records.by(<span class="str">"pending"</span>).range({
-    prefix: [<span class="str">""</span>, <span class="str">"pending"</span>], limit: <span class="num">1</span>,
-  }));
-  <span class="kw">const</span> expired = ctx.range(jobs.records.by(<span class="str">"leased"</span>).range({
-    prefix: [<span class="str">""</span>, <span class="str">"leased"</span>], lte: ctx.now(), limit: <span class="num">1</span>,
-  }));
-  <span class="kw">return</span> pending.rows.length &gt; <span class="num">0</span> || expired.rows.length &gt; <span class="num">0</span>;
-});</code></pre></div>
-<p>Add <code>jobs.records</code> to <code>define({collections})</code>. The watch refreshes as time passes, so a crashed worker’s job wakes another worker with no new writes.</p>
-<ol class="steps"><li><strong>Wake and claim.</strong> When the watch reports ready, call <code>jobs.claim</code>. Claim only what you can start now; readiness reserves nothing.</li><li><strong>Do the work.</strong> Check the lease deadline first. Send a stable business ID as the idempotency key.</li><li><strong>Finish through Flower.</strong> Complete or fail with the lease exactly as returned. The same mutation can update business records.</li><li><strong>Drain and re-arm.</strong> Keep claiming until a claim returns null, then open a new readiness watch.</li></ol>
-<div class="code-block"><div class="code-head"><span>One completion · after the external action</span><button class="copy-button" type="button" aria-label="Copy One completion · after the external action">Copy</button></div><pre tabindex="0"><code class="language-ts"><span class="kw">const</span> identity = {
-  id: lease.id, owner: lease.owner, token: lease.token,
-  ...(lease.history ? { history: lease.history } : {}),
-};
-<span class="comment">// Keep the same arguments and request ID on uncertain replies.</span>
-<span class="kw">await</span> client.mutate(<span class="str">"jobs.complete"</span>, {
-  ...identity, result: { delivered: <span class="kw">true</span> },
-}, { requestId: completionId });</code></pre></div>
+<p>For example, the mutation that marks an invoice paid also calls <code>receipts.enqueue(ctx, id, payload)</code>, so a paid invoice always has its receipt job. Put everything the worker needs in the payload. <a href="leases.html">Queues &amp; expiry</a> has the full example.</p>
+<ol class="steps"><li><strong>Wait and claim.</strong> <code>runQueueWorker</code> watches the queue's <code>ready</code> query and claims only when a lane is free.</li><li><strong>Do the work.</strong> Your <code>work(job, signal)</code> runs while the lease is renewed; the signal aborts shortly before the lease would end.</li><li><strong>Report through Flower.</strong> The worker completes or fails the job with the lease exactly as claimed, retrying lost replies under one request ID.</li><li><strong>Drain, then wait again.</strong> A lane claims until the queue is empty, then goes back to watching.</li></ol>
 <ul>
-<li><strong>Request IDs:</strong> each new claim needs a new request ID, even after a null. When a reply is uncertain, retry with the same ID and arguments. The returned lease may already be expired.</li>
-<li><strong>Idempotency:</strong> use the business operation’s ID across retries and leases. A lease token identifies one attempt, not the operation. Lease expiry cannot stop a paused process, so the receiving service must deduplicate or fence. If it fences, keep enforcing after a <a href="../reference/access.html#retention">disaster restore</a>.</li>
-<li><strong>Lease length:</strong> leases can’t be renewed. Keep tasks shorter, or split them.</li>
-<li><strong>Retries:</strong> backoff and retry limits are up to you; a <a href="timers.html">timer</a> can call <code>jobs.retry</code>. Look up an unknown outcome by business ID before calling it failed.</li>
+<li><strong>Idempotency:</strong> use the business operation's ID across retries and leases; the job ID is a good one. A lease token identifies one attempt, not the operation. Lease expiry can't stop a paused process, so the receiving service must deduplicate or fence. If it fences, keep enforcing after a <a href="../reference/access.html#retention">disaster restore</a>.</li>
+<li><strong>Retries:</strong> the queue's <code>retry</code> policy requeues failed jobs with backoff. Look up an unknown outcome by business ID before calling it failed.</li>
+<li><strong>The same mutation can update business records</strong> when you complete jobs yourself with <code>jobs.complete(ctx, lease, result)</code>.</li>
 </ul>
 </section>
 <!-- content:end -->
 </div>
-<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../guide/leases.html"><small>Previous · Guide</small>Leases & expiry</a><a rel="next" href="../guide/worker-pools.html"><small>Next · Guide</small>Worker pools</a></nav>
+<nav class="pager" aria-label="Previous and next page"><a rel="prev" href="../guide/leases.html"><small>Previous · Guide</small>Queues & expiry</a><a rel="next" href="../guide/worker-pools.html"><small>Next · Guide</small>Worker pools</a></nav>
 </main>
 </div>
 <div class="site-footer" role="contentinfo"><div class="site-footer-inner"><a class="site-brand" href="../" aria-label="Flower home"><img src="../assets/flower.svg" width="25" height="25" alt=""><span>flower<span class="site-brand-dot">.</span></span></a><p>Small seeds. Durable roots.</p><div class="site-footer-links" role="navigation" aria-label="Footer"><a href="../guide/">Guide</a><a href="../operate/">Operate</a><a href="../reference/">Reference</a><a href="../operate/benchmarks.html">Benchmarks</a><a href="https://github.com/flower-js-org/runtime">Source ↗</a></div></div></div>

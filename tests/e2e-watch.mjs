@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LocalCluster } from "../bench/cluster.mjs";
 import { buildBundle } from "../sdk/bundle.ts";
-import { FlowerClient, FlowerError } from "../sdk/index.ts";
+import { FlowerAdmin, FlowerClient, FlowerError } from "../sdk/index.ts";
 import { createHttp2Transport } from "../sdk/http2.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -147,7 +147,7 @@ function assertPatch(event, sequence, path, value, op = "replace") {
 }
 
 function source(expose = true) {
-  return `import { collection, define, mutation, query } from ${JSON.stringify(join(root, "sdk/index.ts"))};
+  return `import { collection, define, fail, mutation, query } from ${JSON.stringify(join(root, "sdk/index.ts"))};
 const records = collection<any>("watch.records");
 const setup = mutation("internal.watch.setup", ctx => {
   const fields: Record<string,string> = Object.create(null);
@@ -160,6 +160,7 @@ const setup = mutation("internal.watch.setup", ctx => {
 const change = mutation("internal.watch.change", (ctx, args: any) => {
   if (args.kind === "unrelated") { ctx.set(records, "unrelated", args.value); return null; }
   if (args.kind === "small") { ctx.set(records, "small", args.value); return null; }
+  if (args.kind === "guard") { ctx.set(records, "guard", args.value); return null; }
   const record = ctx.get(records, "watched");
   if (args.kind === "append") record.items.push(args.value);
   else record.fields[args.key] = args.value;
@@ -169,9 +170,14 @@ const change = mutation("internal.watch.change", (ctx, args: any) => {
 const read = query("internal.watch.read", ctx => ctx.get(records, "watched"));
 const small = query("internal.watch.small", ctx => ctx.get(records, "small"));
 const time = query("internal.watch.time", ctx => ctx.now());
+const guard = query("internal.watch.guard", ctx => {
+  const value = ctx.get(records, "guard");
+  if (value?.locked) fail("WATCH_GUARD", "The guarded record is locked", { reason: value.reason, since: value.since });
+  return value;
+});
 const secret = query("internal.watch.secret", () => "must stay private");
 export default define({ definitions: [secret], http: {
-  "public.setup": setup, "public.change": change, "public.small": small, "public.time": time,
+  "public.setup": setup, "public.change": change, "public.small": small, "public.time": time, "public.guard": guard,
   ${expose ? '"public.watch": read,' : ""}
 }});`;
 }
@@ -189,8 +195,9 @@ try {
   const fixture = join(cluster.directory, "watch-app.ts");
   await writeFile(fixture, source());
   const bundle = await buildBundle(fixture);
-  let client = new FlowerClient(cluster.url, { adminToken: cluster.adminToken });
-  await client.deploy(bundle, { requestId: "watch-deploy" });
+  let client = new FlowerClient(cluster.url);
+  const admin = new FlowerAdmin(cluster.url, { adminToken: cluster.adminToken });
+  await admin.deploy(bundle, { requestId: "watch-deploy" });
   await client.mutate("public.setup", null, { requestId: "watch-setup" });
 
   for (const [name, status, code] of [
@@ -236,6 +243,43 @@ try {
   assertSnapshot(fallback, 1);
   assert.equal(fallback.data.value, 1, "small changes should use a cheaper replacement snapshot");
   await small.close();
+
+  // A watched query that starts failing ends its stream with the method's own
+  // structured failure, on the wire and through every SDK stream API.
+  const guardFailure = { code: "WATCH_GUARD", message: "The guarded record is locked", details: { reason: "maintenance window", since: 7 } };
+  const isGuardFailure = (error) => error instanceof FlowerError && error.status === 422 && error.code === "EVALUATION_FAILED" &&
+    error.message === "WATCH_GUARD: The guarded record is locked" && JSON.stringify(error.failure) === JSON.stringify(guardFailure);
+  const guarded = await watchRaw("public.guard");
+  assertSnapshot(await guarded.next());
+  const guardedSdk = iterator(client.watch("public.guard"));
+  assert.equal((await next(guardedSdk)).value, null);
+  const guardedSubscription = iterator(client.subscribe("public.guard", null, { reconnect: { initialDelayMs: 10, maxDelayMs: 20 } }));
+  assert.equal((await next(guardedSubscription)).reset, true);
+  await mutate(client, { kind: "guard", value: { locked: true, reason: "maintenance window", since: 7 } });
+  const guardError = await guarded.next();
+  assert.equal(guardError.event, "error");
+  assert.deepEqual(guardError.data, { error: {
+    code: "EVALUATION_FAILED", message: "WATCH_GUARD: The guarded record is locked", status: 422, failure: guardFailure,
+  } });
+  await within(guarded.done, "server closes the failed watch stream");
+  await guarded.close();
+  await assert.rejects(within(guardedSdk.next(), "SDK watch receives the failure"), isGuardFailure);
+  await stop(guardedSdk);
+  // A method's failure is not transient: subscribe surfaces it instead of reconnecting.
+  await assert.rejects(within(guardedSubscription.next(), "subscription surfaces the failure"), isGuardFailure);
+  await stop(guardedSubscription);
+  // Opening a watch on a failing query fails before streaming, with the same failure.
+  const refused = await fetch(cluster.url + "/v1/watch", {
+    method: "POST", headers: { "content-type": "application/json", accept: "text/event-stream" },
+    body: JSON.stringify({ name: "public.guard", args: null }), signal: AbortSignal.timeout(10_000),
+  });
+  assert.equal(refused.status, 422);
+  assert.deepEqual((await refused.json()).error.failure, guardFailure);
+  const refusedSdk = iterator(client.watchDeltas("public.guard"));
+  await assert.rejects(within(refusedSdk.next(), "SDK watch refused before streaming"), isGuardFailure);
+  await stop(refusedSdk);
+  await mutate(client, { kind: "guard", value: { locked: false } });
+  assert.deepEqual((await client.query("public.guard")).value, { locked: false });
 
   const timed = await watchRaw("public.time");
   const beforeTime = await timed.next();
@@ -300,7 +344,7 @@ try {
   const revokedSdk = iterator(client.watchDeltas("public.watch"));
   await next(revokedSdk);
   await writeFile(fixture, source(false));
-  await client.deploy(await buildBundle(fixture), { requestId: "watch-revoke" });
+  await admin.deploy(await buildBundle(fixture), { requestId: "watch-revoke" });
   const removed = await revokedRaw.next();
   assert.equal(removed.event, "error");
   assert.equal(removed.data.error.code, "METHOD_NOT_FOUND");
@@ -309,7 +353,7 @@ try {
   await revokedRaw.close();
   await assert.rejects(within(revokedSdk.next(), "SDK receives revoked alias"), (error) => error instanceof FlowerError && error.code === "METHOD_NOT_FOUND" && error.status === 404);
   await stop(revokedSdk);
-  await client.deploy(bundle, { requestId: "watch-restore" });
+  await admin.deploy(bundle, { requestId: "watch-restore" });
 
   const oldLeader = iterator(client.watchDeltas("public.watch"));
   await next(oldLeader);
@@ -319,7 +363,7 @@ try {
   const ended = await within(loss, "old leader stream terminates");
   assert.ok(ended.error || ended.value?.done, "connection loss must end the old watch instead of silently inventing continuity");
   await stop(oldLeader);
-  client = new FlowerClient(cluster.url, { adminToken: cluster.adminToken });
+  client = new FlowerClient(cluster.url);
   const afterElection = iterator(client.watchDeltas("public.watch"));
   const fresh = await next(afterElection);
   assert.equal(fresh.type, "snapshot");
@@ -332,7 +376,7 @@ try {
   assert.equal(electedPatch.sequence, 1);
   assert.deepEqual(electedPatch.patch, [{ op: "replace", path: "/fields/key-040", value: "after election" }]);
   await stop(afterElection);
-  console.log("PASS: SSE snapshots, sparse/escaped JSON patches, array append, unchanged-value suppression, clock refresh, SDK reconstruction/cancellation, h2 multiplexing, allowlist revocation and fresh reconnect after leader loss");
+  console.log("PASS: SSE snapshots, sparse/escaped JSON patches, array append, unchanged-value suppression, structured watch failures, clock refresh, SDK reconstruction/cancellation, h2 multiplexing, allowlist revocation and fresh reconnect after leader loss");
 } catch (error) {
   console.error(error);
   console.error(cluster.logTails());

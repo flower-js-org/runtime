@@ -198,18 +198,19 @@ There is no fixed watch-count ceiling. Each watch retains byte-accounted event s
 
 The writer starts an idle request immediately. It prepares at most one successor while one group commits, accepting late arrivals only during that existing durability wait. In adaptive mode, the learned count and time targets bound a successor only after its predecessor completes; until then it keeps preparing arrivals, up to the queue capacity and any explicit batch-size cap, then stops at the next call boundary. Stopping earlier would leave later arrivals waiting an extra durability round. Fixed mode keeps its exact thresholds. Preparation estimates divide separately smoothed total preparation time and request count (25% new sample), so a tiny delayed group cannot dominate the per-request cost. Commit time retains a per-group exponentially weighted average. Preparation time excludes waiting for late arrivals and waiting after preparation for a predecessor; admission and scheduling time remain included. Deployments and failed commits do not train the controller. DEBUG `mutation group timing` events include mode, decision/stop reasons, target count/time, queued calls, local unapplied and voting-quorum unmatched log counts, actual count/bytes, and preparation/commit timings. Cache entry/byte caps evict or bypass retention; they do not reject otherwise-valid queries. The JSON patch algorithm bounds traversal/operation/path work and falls back to a complete snapshot, so those constants do not cap watched values. The old independent patch-size threshold is gone: a patch is used only when smaller than the snapshot.
 
-The TypeScript scheduler no longer caps handler counts, identifier lengths or truncates error fields. Retry attempts/backoff remain application options, and safe-integer arithmetic protects JS time/attempt representation. Benchmark workload sizes, run deadlines, trace retention and historical experiment controls describe finite experiments; they are not runtime database capacity limits.
+The TypeScript scheduler no longer caps handler counts, identifier lengths or truncates error fields. Retry attempts/backoff remain application options, and safe-integer arithmetic protects JS time/attempt representation. The SDK's composite maintenance handler backs off a failing task that has no `onError` from 1 s, doubling to 60 s; that schedule is fixed in the SDK, while scheduler and queue retries are options. Benchmark workload sizes, run deadlines, trace retention and historical experiment controls describe finite experiments; they are not runtime database capacity limits.
 
 ## SDK transport and watch allowances
 
 Client allowances are optional arguments, independent of server policy. Raising
 server result/request budgets does not silently increase a client's memory
-allowance. `FlowerClient.watch()` and `watchDeltas()` accept:
+allowance. `FlowerClient.watch()`, `watchDeltas()`, `subscribe()` and
+`waitUntil()` accept:
 
 | Option | Default | Scope |
 | --- | ---: | --- |
 | `maxEventBytes` | 17825792 (17 MiB) | One streaming SSE event, including comments/field framing; also the bounded HTTP error body before an SSE stream opens. |
-| `maxValueBytes` | 16777216 (16 MiB) | UTF-8 serialization of each snapshot and of each complete value reconstructed by `watch()`. `watchDeltas()` exposes raw patches without maintaining reconstructed state. |
+| `maxValueBytes` | 16777216 (16 MiB) | UTF-8 serialization of each snapshot and of each complete value reconstructed by `watch()` or `subscribe()`. `watchDeltas()` exposes raw patches without maintaining reconstructed state. |
 | `maxPatchOperations` | 256 | Operations in one received JSON Patch. |
 
 The CLI exposes the same options on `watch` as `--max-event-bytes`,
@@ -228,6 +229,13 @@ state itself is responsible for its own reconstructed-value allowance.
 `watchPoll()` accepts an integer `intervalMs` from 1 to 2147483647, default 250.
 The upper bound is the runtime timer representation; overflowing values are
 rejected before a request instead of becoming one-millisecond polling loops.
+
+`subscribe()` and `waitUntil()` treat `stallMs` (default 45000) without any
+received bytes, heartbeats included, as a disconnect and reconnect with
+jittered backoff from 250 ms to 30 s, adjustable through `reconnect`. A
+`retry` policy on calls defaults to 8 attempts, a 10000 ms per-attempt timeout,
+and jittered backoff from 250 ms to 30 s. These are client-side allowances and
+are never sent to the server.
 
 The optional Node HTTP/2 adapter `createHttp2Transport()` accepts:
 

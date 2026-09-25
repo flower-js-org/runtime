@@ -1,5 +1,5 @@
 import { canonicalJson } from "./json.ts";
-import type { Json } from "./index.ts";
+import type { Json } from "./json.ts";
 import { isManaged, isSharedKey, sharedKey } from "./keys.ts";
 import type { ManagedKey, ManagedKeyVersion, SharedKey } from "./keys.ts";
 export { key } from "./keys.ts";

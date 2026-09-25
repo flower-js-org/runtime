@@ -1,10 +1,11 @@
 import { FlowerClient } from "@flower-js/sdk";
+import type pizza from "./pizza.ts";
 
-const pizza = new FlowerClient("http://127.0.0.1:7101");
-await pizza.mutate("pizza.order", {
-  id: "first-pizza", topping: "mushroom",
-}, { requestId: "first-pizza" }); // Keep this ID when retrying.
+const client = new FlowerClient<typeof pizza>("http://127.0.0.1:7101");
+await client.mutate("pizza.order", { id: "first-pizza", topping: "mushroom" }, {
+  requestId: "first-pizza", retry: true, // Lost replies retry with the same ID.
+});
 
-for await (const { value } of pizza.watch("pizza.board")) {
+for await (const { value } of client.subscribe("pizza.board")) {
   console.log(value); // { orders: 1, mushroom: 1 }
 }

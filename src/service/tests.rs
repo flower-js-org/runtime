@@ -34,11 +34,11 @@ fn http_registry_borrowed_entries_preserve_validation_and_resolution() {
     assert_eq!(
         http_method(&state, "write", Some(MethodKind::Query))
             .unwrap_err()
-            .1,
+            .code,
         "METHOD_KIND_MISMATCH"
     );
     assert_eq!(
-        http_method(&state, "missing", None).unwrap_err().1,
+        http_method(&state, "missing", None).unwrap_err().code,
         "METHOD_NOT_FOUND"
     );
     for alias in [
@@ -49,8 +49,8 @@ fn http_registry_borrowed_entries_preserve_validation_and_resolution() {
         "bad_kind",
     ] {
         let error = http_method(&state, alias, None).unwrap_err();
-        assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR, "{alias}");
-        assert_eq!(error.1, "INVALID_METHOD_REGISTRY", "{alias}");
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR, "{alias}");
+        assert_eq!(error.code, "INVALID_METHOD_REGISTRY", "{alias}");
     }
     assert_eq!(state.data, before);
 }
@@ -197,7 +197,7 @@ async fn maintenance_failure_rolls_back_sources_previews_and_roots_before_recove
     let recovery = &after.data["source:[\"records\",\"recovered\"]"];
     assert_eq!(after.data["clock"], recovery["now"]);
     assert!(recovery["now"].as_u64().unwrap() > 1000);
-    assert_eq!(recovery["args"]["error"]["code"], "MAINTENANCE_FAILED");
+    assert_eq!(recovery["args"]["error"]["code"], "COMPUTE_ERROR");
     assert!(
         recovery["args"]["error"]["message"]
             .as_str()
@@ -227,7 +227,7 @@ async fn failure_in_recovery_rolls_back_everything_and_allows_redeployment() {
         true,
     )
     .await
-    .unwrap_or_else(|error| panic!("{}: {}", error.1, error.2));
+    .unwrap_or_else(|error| panic!("{}: {}", error.code, error.message));
     maintain(&app).await.unwrap();
     let after = app.consensus.read().await.unwrap();
     assert_eq!(after.data["source:[\"records\",\"fixed\"]"], true);
@@ -276,7 +276,7 @@ async fn exhausted_callback_has_fresh_recovery_budget_and_original_time() {
     assert!(!after.data.contains_key("source:[\"records\",\"partial\"]"));
     let recovery = &after.data["source:[\"records\",\"recovered\"]"];
     assert_eq!(recovery["partial"], Value::Null);
-    assert_eq!(recovery["args"]["error"]["code"], "MAINTENANCE_FAILED");
+    assert_eq!(recovery["args"]["error"]["code"], "EVALUATION_BUDGET");
     assert!(
         recovery["args"]["failedAt"].as_u64().unwrap() >= recovery["now"].as_u64().unwrap() + 4000
     );
@@ -452,7 +452,7 @@ async fn query_certificates_require_quorum_admission_and_clock_independence() {
     );
     app.consensus.shutdown().await.unwrap();
     assert_eq!(
-        query(State(app), Json(plain)).await.unwrap_err().0,
+        query(State(app), Json(plain)).await.unwrap_err().status,
         StatusCode::SERVICE_UNAVAILABLE
     );
 }
@@ -627,7 +627,7 @@ async fn coalesced_query_waiters_release_workers_and_reauthorize_fresh_state() {
             .unwrap()
             .unwrap();
         if index < 2 {
-            assert_eq!(result.err().unwrap().1, "FORBIDDEN");
+            assert_eq!(result.err().unwrap().code, "FORBIDDEN");
         } else {
             let result = result.unwrap();
             assert_eq!(result.revision, 2);

@@ -40,8 +40,11 @@ try {
     { opened: [7, 8, 9], shared: true, precomputed: true, openAfter: [7, 8, 9], signed: [7, 8, 9], hashLength: 64, scalar: true });
   const denied = await fetch(follower + "/v1/query", { method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ name: "crypto.randomQuery", args: null }), signal: AbortSignal.timeout(20_000) });
-  assert.notEqual(denied.status, 200);
-  assert.match(JSON.stringify(await denied.json()), /only in mutations/);
+  // Native crypto refusals reach callers as the method's structured failure.
+  const deniedError = (await denied.json()).error;
+  assert.equal(denied.status, 422);
+  assert.equal(deniedError.code, "EVALUATION_FAILED");
+  assert.match(deniedError.failure?.message ?? "", /CRYPTO_RANDOM_FORBIDDEN: system randomness is available only in mutations/);
   const short = await call(follower, "/v1/mutate", { ...request, args: { guest: "short", lifetimeSeconds: 1 }, requestId: "crypto-short" });
   const checkShort = () => fetch(follower + "/v1/query", { method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ name: "ticket.check", args: { signed: short.value.signed, encrypted: short.value.encrypted } }), signal: AbortSignal.timeout(20_000) });
@@ -49,7 +52,9 @@ try {
   await new Promise(resolve => setTimeout(resolve, 1100));
   const expired = await checkShort();
   assert.notEqual(expired.status, 200, "query cache cannot preserve expired token validation");
-  assert.match(JSON.stringify(await expired.json()), /JWT expired/);
+  const expiredError = (await expired.json()).error;
+  assert.equal(expiredError.code, "EVALUATION_FAILED");
+  assert.match(expiredError.failure?.message ?? "", /JWT expired/);
   console.log("crypto E2E passed: native SDK surface, replicated random receipts, follower reads, time-aware validation");
 } finally {
   await cluster.close();

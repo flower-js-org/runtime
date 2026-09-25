@@ -7,7 +7,7 @@ import type { Socket } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import type { TestContext } from "node:test";
-import { FlowerClient } from "./client.ts";
+import { FlowerAdmin, FlowerClient } from "./client.ts";
 import { createHttp2Transport } from "./http2.ts";
 import type { Http2TransportOptions } from "./http2.ts";
 
@@ -27,13 +27,14 @@ async function fixture(t: TestContext, handler: (request: Http2ServerRequest, re
   assert.ok(address && typeof address === "object");
   const url = `http://127.0.0.1:${address.port}`;
   const transport = createHttp2Transport({ requestTimeoutMs: 1_000, ...options });
-  const client = new FlowerClient(url, { fetch: transport.fetch, adminToken: "test-token" });
+  const client = new FlowerClient(url, { fetch: transport.fetch });
+  const admin = new FlowerAdmin(url, { fetch: transport.fetch, adminToken: "test-token" });
   t.after(async () => {
     await transport.close();
     for (const session of sessions) session.destroy();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
-  return { transport, client, url, server, connections: () => connections };
+  return { transport, client, admin, url, server, connections: () => connections };
 }
 
 async function body(request: Http2ServerRequest): Promise<any> {
@@ -134,7 +135,7 @@ test("SDK HTTP/2 calls multiplex on one session and preserve methods, headers, a
   let concurrent = 0;
   let peak = 0;
   const received: any[] = [];
-  const { client, connections } = await fixture(t, (request, response) => {
+  const { client, admin, connections } = await fixture(t, (request, response) => {
     void (async () => {
       assert.equal(request.httpVersionMajor, 2);
       assert.equal(request.method, "POST");
@@ -153,12 +154,14 @@ test("SDK HTTP/2 calls multiplex on one session and preserve methods, headers, a
   assert.deepEqual(received.map(({ data }) => data.requestId).sort(), Array.from({ length: 12 }, (_, index) => `same-${index}`).sort());
   await client.query("read", null);
   await client.mutate("write", null, { requestId: "stable", expectedRevision: 1 });
-  await client.deploy({ hash: "hash", javascript: "source" }, { requestId: "deploy" });
-  await client.initialize({ "1": "127.0.0.1:1" });
+  await admin.deploy({ hash: "hash", javascript: "source" }, { requestId: "deploy" });
+  await admin.initialize({ "1": "127.0.0.1:1" });
   assert.equal(connections(), 1, "sequential requests reuse the session too");
   assert.deepEqual(received.slice(12).map(({ path }) => path), ["/v1/query", "/v1/mutate", "/admin/deploy", "/raft/initialize"]);
   assert.equal(received.at(-1).token, "Bearer test-token");
+  assert.equal(received.at(-2).data.requestId, "deploy");
   assert.equal(received.at(-3).data.expectedRevision, 1);
+  assert.ok(received.slice(0, -2).every(({ token }) => token === undefined), "method calls never carry the operator token");
 });
 
 test("a caller deadline cancels a stalled body without cancelling other streams", async (t) => {

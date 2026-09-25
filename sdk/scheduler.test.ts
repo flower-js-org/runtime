@@ -1,318 +1,275 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { runInNewContext } from "node:vm";
-import { canonicalJson, collection, define, derive, mutation, query } from "./index.ts";
-import type { Collection, Derived, MaintenanceHandlers, MutationContext, Query, RangeQuery, RangePage } from "./index.ts";
+import { collection, define, derive, fail, FlowerError, mutation, query, v } from "./index.ts";
+import type { Json, MutationContext } from "./index.ts";
 import { scheduler } from "./scheduler.ts";
-import { buildBundle } from "./bundle.ts";
+import { testDatabase } from "./testing.ts";
 
-import { memoryRange } from "./range-fixture.test.ts";
+const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value));
+const output = collection<Json[]>("output");
+const record = (ctx: MutationContext, entry: Json) => ctx.set(output, "log", [...(ctx.get(output, "log") ?? []), entry]);
+const log = query("log", (ctx) => ctx.get(output, "log") ?? []);
 
-class MemoryContext implements MutationContext {
-  principal() { return null; }
-  history() { return null; }
-  range<T>(query: RangeQuery<T>): RangePage<T> {
-    return memoryRange(query, Array.from(this.data.get(query.collection)?.entries() ?? [], ([key,value]) => ({key,value:structuredClone(value) as T})));
-  }
-  time: number;
-  data = new Map<string, Map<string, unknown>>();
-  constructor(time = 1_000) { this.time = time; }
-  now(): number { return this.time; }
-  fork(): MemoryContext {
-    const next = new MemoryContext(this.time);
-    next.data = structuredClone(this.data);
-    return next;
-  }
-  get<T>(ref: Collection<T>, key: string): T | null;
-  get<A, V>(ref: Derived<A, V>, args: A): V;
-  get(ref: any, key: any): any {
-    if (ref.kind === "derived") return ref.compute(this, key);
-    const rows = this.data.get(ref.name);
-    return rows?.has(key) ? structuredClone(rows.get(key)) : null;
-  }
-  set<T>(ref: Collection<T>, key: string, value: T): void {
-    const copy = JSON.parse(canonicalJson(value));
-    if (!this.data.has(ref.name)) this.data.set(ref.name, new Map());
-    this.data.get(ref.name)!.set(key, copy);
-  }
-  delete<T>(ref: Collection<T>, key: string): void { this.data.get(ref.name)?.delete(key); }
-  scan<T>(ref: Collection<T>): { key: string; value: T }[] {
-    return Array.from(this.data.get(ref.name)?.entries() ?? []).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
-      .map(([key, value]) => ({ key, value: structuredClone(value) as T }));
-  }
-  query<T>(_query: Query<T>): T[] { throw new Error("Index queries are not needed by these tests"); }
-  materialize<A, V>(_ref: Derived<A, V>, _args: A): void {}
-  unmaterialize<A, V>(_ref: Derived<A, V>, _args: A): void {}
+const publish = mutation("private.publish", { args: v.object({ value: v.int() }) }, (ctx, args) => { record(ctx, args.value); return null; });
+const flaky = mutation("private.flaky", { args: v.object({ until: v.int() }) }, (ctx, args) => {
+  record(ctx, "discarded");
+  if (ctx.now() < args.until) fail("FLAKY", "not yet", { now: ctx.now() });
+  record(ctx, "flaky");
+  return null;
+});
+const noop = mutation("private.noop", () => null);
+const timers = scheduler("timers", { publish, flaky, noop }, { maxAttempts: 3, retryDelayMs: 10, maxRetryDelayMs: 15 });
+
+const after = mutation("after", { args: v.object({ id: v.string(), delayMs: v.int(), value: v.int() }) }, (ctx, input) =>
+  timers.after(ctx, input.id, input.delayMs, "publish", { value: input.value }));
+const at = mutation("at", { args: v.object({ id: v.string(), dueAt: v.int(), value: v.int() }) }, (ctx, input) =>
+  timers.at(ctx, input.id, input.dueAt, "publish", { value: input.value }));
+const flakyAfter = mutation("flakyAfter", { args: v.object({ id: v.string(), until: v.int() }) }, (ctx, input) =>
+  timers.after(ctx, input.id, 0, "flaky", { until: input.until }));
+const unchecked = mutation("unchecked", { args: v.object({ id: v.string(), args: v.json() }) }, (ctx, input) =>
+  timers.at(ctx, input.id, 0, "publish", input.args as never));
+const cancel = mutation("cancel", { args: v.string() }, (ctx, id) => timers.cancel(ctx, id));
+const retry = mutation("retry", { args: v.object({ id: v.string(), delayMs: v.optional(v.int()) }) }, (ctx, input) => timers.retry(ctx, input.id, input.delayMs));
+const get = query("get", { args: v.string() }, (ctx, id) => timers.get(ctx, id));
+const scan = query("scan", { args: v.nullable(v.enum(["pending", "failed"])) }, (ctx, state) => timers.scan(ctx, state === null ? {} : { state }));
+const app = define({ uses: [timers], http: { after, at, flakyAfter, unchecked, cancel, retry, get, scan, log } });
+
+function rejected(run: () => unknown): FlowerError {
+  try { run(); } catch (error) { if (error instanceof FlowerError) return error; throw error; }
+  assert.fail("expected a FlowerError");
 }
 
-// This small harness supplies the host's documented original-snapshot fallback
-// contract. Real rollback and Raft behavior are covered by the HTTP integration suite.
-function maintenance(ctx: MemoryContext, handlers: MaintenanceHandlers, failedAt = ctx.time): unknown {
-  const staged = ctx.fork();
-  try {
-    const value = handlers.run.compute(staged, null);
-    ctx.data = staged.data;
-    return value;
-  } catch (error: any) {
-    return handlers.onError.compute(ctx, {
-      error: { code: error.code ?? "CALLBACK_FAILED", message: error.message ?? String(error) }, failedAt,
-    });
+test("a scheduler is a component: timers fire at or after their deadline through composite maintenance", async () => {
+  assert.equal(timers.kind, "component");
+  assert.deepEqual(plain(app.maintenance), { name: "$flower.maintenance", kind: "mutation", onError: { name: "$flower.maintenance.error", kind: "mutation" } });
+  assert.deepEqual(plain(app.collections), [{ name: "timers", indexes: { due: ["state", "dueAt"] } }]);
+  assert.equal(Object.values(app.http).some((method) => method.name.startsWith("private.") || method.name.startsWith("$flower.")), false);
+  const db = await testDatabase(app);
+  const timer = db.mutate("after", { id: "one", delayMs: 100, value: 42 });
+  assert.deepEqual(timer, {
+    id: "one", state: "pending", handler: "publish", args: { value: 42 }, dueAt: 1_000_100, attempts: 0, error: null, createdAt: 1_000_000, updatedAt: 1_000_000,
+  });
+  assert.deepEqual(db.query("get", "one"), timer);
+  assert.equal(db.advance(99), 0);
+  assert.deepEqual(db.query("log"), []);
+  assert.equal(db.advance(1), 1);
+  assert.deepEqual(db.query("log"), [42]);
+  assert.equal(db.query("get", "one"), null);
+  assert.deepEqual(db.query("scan", null), []);
+  assert.equal(db.maintain(), 0);
+});
+
+test("at() takes absolute deadlines and timers run one per commit in deadline, then ID, order", async () => {
+  const db = await testDatabase(app);
+  for (const [id, dueAt, value] of [["b", 1_000_010, 2], ["a", 1_000_010, 1], ["early", 1_000_005, 0], ["late", 1_000_050, 3]] as const) {
+    db.mutate("at", { id, dueAt, value });
   }
-}
-
-test("timers execute at or after their deadlines, commit business writes, and leave no success history", () => {
-  const ctx = new MemoryContext();
-  const output = collection<number>("output");
-  const publish = mutation("private.publish", (ctx, args: { value: number }) => { ctx.set(output, "result", args.value); return null; });
-  const timers = scheduler("timers", { publish });
-  assert.equal(timers.after(ctx, "one", 100, "publish", { value: 42 }).dueAt, 1_100);
-  ctx.time = 1_099;
-  assert.equal(maintenance(ctx, timers.maintenance), null);
-  assert.equal(ctx.get(output, "result"), null);
-  ctx.time = 1_100;
-  assert.deepEqual(maintenance(ctx, timers.maintenance), { id: "one", $flower: { continue: false } });
-  assert.equal(ctx.get(output, "result"), 42);
-  assert.equal(timers.get(ctx, "one"), null);
-  assert.deepEqual(timers.scan(ctx), []);
-  assert.equal(maintenance(ctx, timers.maintenance), null);
-  const module = define({ maintenance: timers.maintenance });
-  assert.deepEqual(Object.keys(module.definitions).sort(), ["internal.scheduler.timers.onError", "internal.scheduler.timers.run"]);
-  assert.deepEqual(Object.keys(module.http), []);
+  assert.deepEqual(db.query("scan", null).map((each) => each.id), ["early", "a", "b", "late"]);
+  assert.equal(db.advance(10), 3);
+  assert.deepEqual(db.query("log"), [0, 1, 2]);
+  assert.deepEqual(db.query("scan", "pending").map((each) => each.id), ["late"]);
+  db.mutate("at", { id: "past", dueAt: 0, value: 9 });
+  assert.equal(db.maintain(), 1);
+  assert.deepEqual(db.query("log"), [0, 1, 2, 9]);
 });
 
-test("one timer runs per invocation with deterministic deadline and ID ordering", () => {
-  const ctx = new MemoryContext();
-  const timers = scheduler("timers", { run: mutation("run", () => null) });
-  timers.at(ctx, "b", 1_000, "run", null);
-  timers.at(ctx, "a", 1_000, "run", null);
-  timers.at(ctx, "earlier", 999, "run", null);
-  assert.deepEqual(timers.scan(ctx).map((timer) => timer.id), ["earlier", "a", "b"]);
-  assert.deepEqual(maintenance(ctx, timers.maintenance), { id: "earlier", $flower: { continue: true } });
-  assert.deepEqual(maintenance(ctx, timers.maintenance), { id: "a", $flower: { continue: true } });
-  assert.deepEqual(maintenance(ctx, timers.maintenance), { id: "b", $flower: { continue: false } });
+test("reusing an ID debounces the earlier timer and cancel() removes pending work", async () => {
+  const db = await testDatabase(app);
+  db.mutate("after", { id: "debounce", delayMs: 50, value: 1 });
+  db.now += 25;
+  const replaced = db.mutate("after", { id: "debounce", delayMs: 50, value: 2 });
+  assert.deepEqual([replaced.createdAt, replaced.updatedAt, replaced.dueAt, replaced.args], [1_000_000, 1_000_025, 1_000_075, { value: 2 }]);
+  assert.equal(db.advance(25), 0);
+  assert.equal(db.advance(25), 1);
+  assert.deepEqual(db.query("log"), [2]);
+  db.mutate("after", { id: "cancelled", delayMs: 10, value: 3 });
+  assert.equal(db.mutate("cancel", "cancelled"), true);
+  assert.equal(db.mutate("cancel", "cancelled"), false);
+  assert.equal(db.query("get", "cancelled"), null);
+  assert.equal(db.advance(10), 0);
 });
 
-test("same-ID replacement debounces updates and cancellation removes pending work", () => {
-  const ctx = new MemoryContext();
-  const output = collection<number>("output");
-  const timers = scheduler("timers", { run: mutation("run", (ctx, args: { version: number }) => { ctx.set(output, "version", args.version); return null; }) });
-  timers.after(ctx, "publish", 50, "run", { version: 1 });
-  ctx.time = 1_025;
-  const replacement = timers.after(ctx, "publish", 50, "run", { version: 2 });
-  assert.equal(replacement.createdAt, 1_000);
-  assert.equal(replacement.updatedAt, 1_025);
-  assert.equal(replacement.dueAt, 1_075);
-  ctx.time = 1_050;
-  assert.equal(maintenance(ctx, timers.maintenance), null);
-  ctx.time = 1_075;
-  maintenance(ctx, timers.maintenance);
-  assert.equal(ctx.get(output, "version"), 2);
-  timers.after(ctx, "cancelled", 10, "run", { version: 3 });
-  assert.equal(timers.cancel(ctx, "cancelled"), true);
-  assert.equal(timers.cancel(ctx, "cancelled"), false);
-  assert.equal(timers.get(ctx, "cancelled"), null);
-});
-
-test("deleting before dispatch preserves callbacks that reschedule their own ID", () => {
-  const ctx = new MemoryContext();
-  let again: (ctx: MutationContext, remaining: number) => void;
-  const repeat = mutation("repeat", (ctx, args: { remaining: number }) => {
+test("handlers may reschedule their own ID", async () => {
+  let again: (ctx: MutationContext, remaining: number) => void = () => {};
+  const repeat = mutation("private.repeat", { args: v.object({ remaining: v.int() }) }, (ctx, args) => {
+    record(ctx, args.remaining);
     if (args.remaining > 0) again(ctx, args.remaining - 1);
     return null;
   });
-  const timers = scheduler("timers", { repeat });
-  again = (ctx, remaining) => { timers.after(ctx, "repeat", 1, "repeat", { remaining }); };
-  timers.after(ctx, "repeat", 0, "repeat", { remaining: 2 });
-  maintenance(ctx, timers.maintenance);
-  assert.deepEqual(timers.get(ctx, "repeat")!.args, { remaining: 1 });
-  assert.equal(timers.get(ctx, "repeat")!.dueAt, 1_001);
-  ctx.time++;
-  maintenance(ctx, timers.maintenance);
-  assert.deepEqual(timers.get(ctx, "repeat")!.args, { remaining: 0 });
-  ctx.time++;
-  maintenance(ctx, timers.maintenance);
-  assert.equal(timers.get(ctx, "repeat"), null);
+  const loops = scheduler("loops", { repeat });
+  again = (ctx, remaining) => { loops.after(ctx, "repeat", 1, "repeat", { remaining }); };
+  const start = mutation("start", (ctx) => loops.after(ctx, "repeat", 0, "repeat", { remaining: 2 }));
+  const peek = query("peek", (ctx) => loops.get(ctx, "repeat"));
+  const db = await testDatabase(define({ uses: [loops], http: { start, peek, log } }));
+  db.mutate("start");
+  assert.equal(db.maintain(), 1);
+  assert.deepEqual([db.query("peek")!.args, db.query("peek")!.dueAt], [{ remaining: 1 }, 1_000_001]);
+  assert.equal(db.advance(1), 1);
+  assert.equal(db.advance(1), 1);
+  assert.deepEqual(db.query("log"), [2, 1, 0]);
+  assert.equal(db.query("peek"), null);
 });
 
-test("failure fallback counts attempts, applies capped backoff, and allows healthy work to progress", () => {
-  const ctx = new MemoryContext();
-  const output = collection<string>("output");
-  const timers = scheduler("timers", {
-    fail: mutation("fail", (ctx) => { ctx.set(output, "bad", "discard me"); throw new Error("failed"); }),
-    healthy: mutation("healthy", (ctx) => { ctx.set(output, "good", "committed"); return null; }),
-  }, { maxAttempts: 3, retryDelayMs: 10, maxRetryDelayMs: 15 });
-  timers.after(ctx, "a-fails", 0, "fail", null);
-  timers.after(ctx, "b-healthy", 0, "healthy", null);
-  assert.equal((maintenance(ctx, timers.maintenance) as any).$flower.continue, true);
-  assert.equal(ctx.get(output, "bad"), null);
-  assert.equal(timers.get(ctx, "a-fails")!.attempts, 1);
-  assert.equal(timers.get(ctx, "a-fails")!.dueAt, 1_010);
-  maintenance(ctx, timers.maintenance);
-  assert.equal(ctx.get(output, "good"), "committed");
-  ctx.time = 1_010;
-  maintenance(ctx, timers.maintenance, 1_012);
-  assert.equal(timers.get(ctx, "a-fails")!.dueAt, 1_027);
-  ctx.time = 1_027;
-  maintenance(ctx, timers.maintenance);
-  const failed = timers.get(ctx, "a-fails")!;
-  assert.equal(failed.state, "failed");
-  assert.equal(failed.attempts, 3);
-  assert.equal(failed.error!.message, "failed");
-  assert.equal(maintenance(ctx, timers.maintenance), null);
-  assert.deepEqual(timers.scan(ctx, "failed").map((timer) => timer.id), ["a-fails"]);
-  const retried = timers.retry(ctx, "a-fails", 5);
-  assert.equal(retried.state, "pending");
-  assert.equal(retried.attempts, 0);
-  assert.equal(retried.error, null);
-  assert.equal(retried.dueAt, 1_032);
-  assert.throws(() => timers.retry(ctx, "a-fails"), /Only failed/);
+test("failed handlers retry with capped exponential backoff through the scheduler's onError, then stay failed", async () => {
+  const db = await testDatabase(app);
+  db.mutate("flakyAfter", { id: "f", until: 2_000_000 });
+  db.mutate("after", { id: "healthy", delayMs: 0, value: 7 });
+  assert.equal(db.maintain(), 2);
+  const state = () => { const { state, attempts, dueAt, updatedAt, error } = db.query("get", "f")!; return { state, attempts, dueAt, updatedAt, error }; };
+  assert.deepEqual(state(), { state: "pending", attempts: 1, dueAt: 1_000_010, updatedAt: 1_000_000, error: { code: "FLAKY", message: "not yet", details: { now: 1_000_000 } } });
+  assert.deepEqual(db.query("log"), [7], "a failed handler's writes are discarded while healthy timers proceed");
+  assert.equal(db.data['source:["$flower.tasks","state"]'], undefined, "the scheduler owns its retry state");
+  assert.equal(db.advance(9), 0);
+  assert.equal(db.advance(1), 1);
+  assert.deepEqual([state().attempts, state().dueAt], [2, 1_000_025], "the doubled delay is capped by maxRetryDelayMs");
+  assert.equal(db.advance(15), 1);
+  assert.deepEqual(state(), { state: "failed", attempts: 3, dueAt: 1_000_025, updatedAt: 1_000_025, error: { code: "FLAKY", message: "not yet", details: { now: 1_000_025 } } });
+  assert.equal(db.advance(1_000), 0);
+  assert.deepEqual(db.query("scan", "failed").map((each) => each.id), ["f"]);
+  assert.deepEqual(db.query("scan", "pending"), []);
+  const retried = db.mutate("retry", { id: "f", delayMs: 5 });
+  assert.deepEqual([retried.state, retried.attempts, retried.error, retried.dueAt, retried.createdAt], ["pending", 0, null, db.now + 5, 1_000_000]);
+  assert.deepEqual(rejected(() => db.mutate("retry", { id: "f" })).failure, { code: "TIMER_NOT_FAILED", message: "Only failed timers can be retried" });
+  assert.equal(rejected(() => db.mutate("retry", { id: "missing" })).failure!.code, "TIMER_NOT_FAILED");
+  db.now = 2_000_000;
+  assert.equal(db.maintain(), 1);
+  assert.deepEqual(db.query("log"), [7, "discarded", "flaky"]);
 });
 
-test("failure selection uses the original clock while backoff starts after a long failed attempt", () => {
-  const ctx = new MemoryContext();
-  const timers = scheduler("timers", { fail: mutation("fail", () => { throw new Error("slow failure"); }) }, { retryDelayMs: 100 });
-  timers.after(ctx, "original", 0, "fail", null);
-  timers.after(ctx, "became-due-later", 1_000, "fail", null);
-  maintenance(ctx, timers.maintenance, 6_000);
-  assert.equal(timers.get(ctx, "original")!.attempts, 1);
-  assert.equal(timers.get(ctx, "original")!.updatedAt, 6_000);
-  assert.equal(timers.get(ctx, "original")!.dueAt, 6_100);
-  assert.equal(timers.get(ctx, "became-due-later")!.attempts, 0);
-  assert.equal(timers.get(ctx, "became-due-later")!.dueAt, 2_000);
+test("handler argument schemas type scheduling and reject bad arguments when scheduled", async () => {
+  const db = await testDatabase(app);
+  assert.throws(() => db.mutate("unchecked", { id: "bad", args: { value: "x" } }),
+    (error: any) => error.failure.code === "INVALID_ARGUMENT" && /publish arguments: value: must be a finite number/.test(error.failure.message));
+  assert.equal(db.query("get", "bad"), null);
+  const typed = (ctx: MutationContext) => {
+    timers.after(ctx, "id", 0, "noop");
+    timers.at(ctx, "id", 0, "publish", { value: 1 });
+    // @ts-expect-error unknown handler aliases are rejected
+    timers.after(ctx, "id", 0, "missing", { value: 1 });
+    // @ts-expect-error arguments follow the handler's schema
+    timers.after(ctx, "id", 0, "publish", { value: "1" });
+    // @ts-expect-error arguments are required when the handler takes them
+    timers.at(ctx, "id", 0, "publish");
+    const until: number = timers.after(ctx, "id", 0, "flaky", { until: 1 }).args.until;
+    return until;
+  };
+  void typed;
 });
 
-test("reconstructed schedulers use durable records and current handlers; removed handlers fail finitely", () => {
-  const ctx = new MemoryContext();
-  const output = collection<string>("output");
-  const original = scheduler("timers", { publish: mutation("old", (ctx) => { ctx.set(output, "result", "old"); return null; }) });
-  original.after(ctx, "one", 0, "publish", null);
-  const redeployed = scheduler("timers", { publish: mutation("new", (ctx) => { ctx.set(output, "result", "new"); return null; }) });
-  maintenance(ctx, redeployed.maintenance);
-  assert.equal(ctx.get(output, "result"), "new");
-  original.after(ctx, "orphan", 0, "publish", null);
-  const removed = scheduler("timers", {}, { maxAttempts: 1 });
-  maintenance(ctx, removed.maintenance);
-  assert.equal(removed.get(ctx, "orphan")!.state, "failed");
-  assert.equal(removed.get(ctx, "orphan")!.error!.code, "SCHEDULER_HANDLER_MISSING");
-  assert.throws(() => removed.retry(ctx, "orphan"), /Unknown scheduler handler/);
-  redeployed.retry(ctx, "orphan");
-  maintenance(ctx, redeployed.maintenance);
-  assert.equal(redeployed.get(ctx, "orphan"), null);
+test("several schedulers in one module keep separate records, tasks and retry policies", async () => {
+  const fast = scheduler("fast", { flaky }, { maxAttempts: 1 });
+  const slow = scheduler("slow", { publish, flaky }, { maxAttempts: 2, retryDelayMs: 100 });
+  const both = mutation("both", (ctx) => {
+    fast.after(ctx, "x", 0, "flaky", { until: 2_000_000 });
+    slow.after(ctx, "x", 0, "flaky", { until: 2_000_000 });
+    slow.after(ctx, "y", 5, "publish", { value: 1 });
+    return null;
+  });
+  const view = query("view", (ctx) => ({
+    fast: fast.scan(ctx).map(({ id, state, attempts }) => ({ id, state, attempts })),
+    slow: slow.scan(ctx).map(({ id, state, attempts, dueAt }) => ({ id, state, attempts, dueAt })),
+  }));
+  const multi = define({ uses: [fast, slow], http: { both, view, log } });
+  assert.deepEqual(multi.collections!.map((each) => each.name), ["fast", "slow"]);
+  assert.deepEqual(Object.keys(multi.definitions).filter((name) => name.startsWith("$flower.")).sort(), ["$flower.maintenance", "$flower.maintenance.error"]);
+  const db = await testDatabase(multi);
+  db.mutate("both");
+  assert.equal(db.maintain(), 2);
+  assert.deepEqual(db.query("view"), {
+    fast: [{ id: "x", state: "failed", attempts: 1 }],
+    slow: [{ id: "y", state: "pending", attempts: 0, dueAt: 1_000_005 }, { id: "x", state: "pending", attempts: 1, dueAt: 1_000_100 }],
+  });
+  assert.equal(db.advance(5), 1);
+  assert.deepEqual(db.query("log"), [1]);
+  assert.equal(db.advance(95), 1);
+  assert.deepEqual(db.query("view").slow, [{ id: "x", state: "failed", attempts: 2, dueAt: 1_000_100 }]);
+  assert.throws(() => define({ uses: [scheduler("same", { noop }), scheduler("same", { noop })] }), /Duplicate task "scheduler:same"/);
 });
 
-test("async and non-JSON callbacks are failed attempts, including accessors that must not execute", () => {
-  let getterExecuted = false;
-  const accessor = { get value() { getterExecuted = true; return 1; } };
-  const invalid = [undefined, NaN, Infinity, Promise.resolve(null), accessor, [,], new Date(), Symbol("invalid")];
-  for (const result of invalid) {
-    const ctx = new MemoryContext();
-    const output = collection<number>("output");
-    const timers = scheduler("timers", { bad: mutation("bad", (ctx) => { ctx.set(output, "result", 42); return result; }) }, { maxAttempts: 1 });
-    timers.after(ctx, "bad", 0, "bad", null);
-    maintenance(ctx, timers.maintenance);
-    assert.equal(timers.get(ctx, "bad")!.state, "failed");
-    assert.equal(timers.get(ctx, "bad")!.attempts, 1);
-    assert.equal(ctx.get(output, "result"), null);
-  }
-  assert.equal(getterExecuted, false);
+test("timers whose handler was removed fail finitely and cannot be retried", async () => {
+  const orphans = scheduler("orphans", { publish }, { maxAttempts: 1 });
+  const plant = mutation("plant", (ctx) => {
+    const now = ctx.now();
+    ctx.set(orphans.records, "orphan", { state: "pending", handler: "gone", args: null, dueAt: now, attempts: 0, error: null, createdAt: now, updatedAt: now });
+    return null;
+  });
+  const revive = mutation("revive", (ctx) => orphans.retry(ctx, "orphan"));
+  const schedule = mutation("schedule", (ctx) => orphans.after(ctx, "x", 0, "gone" as never, null as never));
+  const peek = query("peek", (ctx) => orphans.get(ctx, "orphan"));
+  const db = await testDatabase(define({ uses: [orphans], http: { plant, revive, schedule, peek } }));
+  db.mutate("plant");
+  assert.equal(db.maintain(), 1);
+  assert.deepEqual([db.query("peek")!.state, db.query("peek")!.error!.code], ["failed", "SCHEDULER_HANDLER_MISSING"]);
+  const missing = { code: "SCHEDULER_HANDLER_MISSING", message: 'Unknown scheduler handler "gone"' };
+  assert.deepEqual(rejected(() => db.mutate("revive")).failure, missing);
+  assert.deepEqual(rejected(() => db.mutate("schedule")).failure, missing);
 });
 
-test("runtime validation rejects malformed configs and deadlines and protects reserved data", () => {
-  const ctx = new MemoryContext();
+test("async and non-JSON handler results are failed attempts whose writes are discarded", async () => {
+  const promised = mutation("private.promised", (ctx) => { record(ctx, "discarded"); return Promise.resolve(null) as never; });
+  const empty = mutation("private.empty", (ctx) => { record(ctx, "discarded"); return undefined as never; });
+  const strict = scheduler("strict", { promised, empty }, { maxAttempts: 1 });
+  const start = mutation("start", (ctx) => { strict.after(ctx, "p", 0, "promised"); strict.after(ctx, "u", 0, "empty"); return null; });
+  const states = query("states", (ctx) => strict.scan(ctx).map((each) => [each.id, each.state, each.attempts]));
+  const db = await testDatabase(define({ uses: [strict], http: { start, states, log } }));
+  db.mutate("start");
+  assert.equal(db.maintain(), 2);
+  assert.deepEqual(db.query("states"), [["p", "failed", 1], ["u", "failed", 1]]);
+  assert.deepEqual(db.query("log"), []);
+});
+
+test("retry deadline overflow makes the timer fail instead of jamming maintenance", async () => {
+  const db = await testDatabase(app, { now: Number.MAX_SAFE_INTEGER - 5 });
+  db.mutate("flakyAfter", { id: "f", until: Number.MAX_SAFE_INTEGER });
+  assert.equal(db.maintain(), 1);
+  const timer = db.query("get", "f")!;
+  assert.deepEqual([timer.state, timer.attempts, timer.updatedAt], ["failed", 1, Number.MAX_SAFE_INTEGER - 5]);
+  assert.equal(db.maintain(), 0);
+});
+
+test("registries snapshot handlers and options, and prototype-like aliases and IDs are safe", async () => {
+  const handlers = { ["__proto__"]: publish, constructor: publish, flaky };
+  const options = { maxAttempts: 1 };
+  const proto = scheduler("proto", handlers, options);
+  Reflect.set(handlers, "constructor", mutation("private.other", () => fail("REPLACED", "handlers were snapshotted")));
+  options.maxAttempts = 10;
+  const start = mutation("start", (ctx) => {
+    proto.after(ctx, "__proto__", 0, "__proto__", { value: 1 });
+    proto.after(ctx, "constructor", 0, "constructor", { value: 2 });
+    proto.after(ctx, "flaky", 0, "flaky", { until: 2_000_000 });
+    return null;
+  });
+  const flakyState = query("flakyState", (ctx) => proto.get(ctx, "flaky")?.state ?? null);
+  const db = await testDatabase(define({ uses: [proto], http: { start, log, flakyState } }));
+  db.mutate("start");
+  assert.equal(db.maintain(), 3);
+  assert.deepEqual(db.query("log"), [1, 2]);
+  assert.equal(db.query("flakyState"), "failed", "maxAttempts was read at construction");
+});
+
+test("scheduler() and its methods validate names, handlers, options and deadlines", () => {
   const run = mutation("run", () => null);
-  for (const name of ["", "$flower.fencing"]) {
-    assert.throws(() => scheduler(name, { run }), TypeError);
+  for (const name of ["", "$flower.timers"]) assert.throws(() => scheduler(name, { run }), TypeError);
+  for (const handlers of [null, [], { run: query("q", () => null) }, { run: derive("d", () => null) }, { run: { kind: "mutationMethod", name: "x" } }]) {
+    assert.throws(() => scheduler("t", handlers as never), TypeError);
   }
-  for (const handlers of [null, [], { run: query("read", () => null) }, { run: derive("derived", () => null) },
-    { run: { ...run, extra: true } }]) {
-    assert.throws(() => scheduler("timers", handlers as any), TypeError);
+  assert.throws(() => scheduler("t", { "": run }), /nonempty/);
+  for (const options of [null, [], { extra: 1 }, { maxAttempts: 0 }, { retryDelayMs: 0 }, { maxAttempts: 1.5 }, { retryDelayMs: Number.NaN },
+    { retryDelayMs: Infinity }, { maxAttempts: "3" }]) {
+    assert.throws(() => scheduler("t", { run }, options as never), TypeError, JSON.stringify(options));
   }
-  for (const options of [null, [], { extra: 1 }, { maxAttempts: 0 }, { retryDelayMs: 0 }, { maxAttempts: 1.5 },
-    { retryDelayMs: NaN }, { retryDelayMs: Infinity }, { maxRetryDelayMs: 999 }, { maxAttempts: "3" }]) {
-    assert.throws(() => scheduler("timers", { run }, options as any));
+  assert.throws(() => scheduler("t", { run }, { maxRetryDelayMs: 999 }), RangeError);
+  const simple = scheduler("simple", { run });
+  const clock = (now: number) => ({ now: () => now }) as unknown as MutationContext;
+  for (const delay of [-1, Infinity, Number.NaN, 0.5, "10"]) {
+    assert.throws(() => simple.after(clock(0), "one", delay as number, "run"), TypeError);
+    assert.throws(() => simple.at(clock(0), "one", delay as number, "run"), TypeError);
   }
-  const timers = scheduler("timers", { run });
-  for (const delay of [-1, Infinity, NaN, 0.5, "10"]) {
-    assert.throws(() => timers.after(ctx, "one", delay as number, "run", null), TypeError);
-    assert.throws(() => timers.at(ctx, "one", delay as number, "run", null), TypeError);
-  }
-  assert.throws(() => timers.after(ctx, "one", 0, "unknown" as "run", null), /Unknown scheduler handler/);
-  assert.throws(() => timers.after(ctx, "one", 0, "run", undefined), TypeError);
-  assert.doesNotThrow(() => timers.after(ctx, "x".repeat(513), 0, "run", null));
-  ctx.time = Number.MAX_SAFE_INTEGER;
-  assert.throws(() => timers.after(ctx, "overflow", 1, "run", null), /Deadline/);
-  assert.equal(timers.get(ctx, "overflow"), null);
-  assert.throws(() => timers.scan(ctx, "missing" as any), TypeError);
-});
-
-test("retry deadline overflow becomes terminal failure instead of jamming maintenance", () => {
-  const ctx = new MemoryContext();
-  const timers = scheduler("timers", { fail: mutation("fail", () => { throw new Error("failure"); }) });
-  timers.after(ctx, "one", 0, "fail", null);
-  maintenance(ctx, timers.maintenance, Number.MAX_SAFE_INTEGER);
-  assert.equal(timers.get(ctx, "one")!.state, "failed");
-  assert.equal(timers.get(ctx, "one")!.attempts, 1);
-  assert.equal(timers.get(ctx, "one")!.updatedAt, Number.MAX_SAFE_INTEGER);
-});
-
-test("registries snapshot their handlers and safely support prototype-like aliases and IDs", () => {
-  const ctx = new MemoryContext();
-  const output = collection<number>("output");
-  const handler = { kind: "mutationMethod" as const, name: "constructor", compute: (ctx: MutationContext) => { ctx.set(output, "value", 1); return null; } };
-  const config = { maxAttempts: 1, retryDelayMs: 10 };
-  const timers = scheduler("timers", { ["__proto__"]: handler }, config);
-  handler.compute = (ctx) => { ctx.set(output, "value", 2); return null; };
-  config.maxAttempts = 10;
-  timers.after(ctx, "__proto__", 0, "__proto__", null);
-  maintenance(ctx, timers.maintenance);
-  assert.equal(ctx.get(output, "value"), 1);
-  assert.equal(timers.get(ctx, "__proto__"), null);
-});
-
-test("scheduling example exposes business methods while handlers and maintenance remain private", async () => {
-  const bundle = await buildBundle(new URL("../examples/scheduling.ts", import.meta.url).pathname);
-  const sandbox: Record<string, any> = {};
-  runInNewContext(bundle.javascript, sandbox, { timeout: 1_000 });
-  const module = sandbox.__flowerBundle.default;
-  assert.equal(module.http["documents.update"].kind, "mutation");
-  assert.equal(module.http["documents.publication"].kind, "query");
-  assert.equal(module.maintenance.name, "internal.scheduler.publicationTimers.run");
-  assert.equal(module.maintenance.onError.name, "internal.scheduler.publicationTimers.onError");
-  assert.equal(Object.values(module.http).some((method: any) => method.name.startsWith("internal.scheduler.")), false);
-  assert.equal(Object.hasOwn(module.http, "internal.documents.publish"), false);
-});
-
-// Compile-time checks ensure the handler alias determines its argument type.
-function typedArguments(ctx: MutationContext) {
-  const timers = scheduler("typed", { publish: mutation("publish", (_ctx, args: { id: string; version: number }) => args.id) });
-  timers.after(ctx, "one", 0, "publish", { id: "a", version: 1 });
-  // @ts-expect-error Unknown aliases cannot be scheduled.
-  timers.after(ctx, "one", 0, "missing", { id: "a", version: 1 });
-  // @ts-expect-error Registered handlers retain their argument requirements.
-  timers.after(ctx, "one", 0, "publish", { id: "a" });
-}
-void typedArguments;
-
-
-test("scheduler catalogs and identifiers are bounded by application budgets, not fixed counts", () => {
-  const handlers = Object.fromEntries(Array.from({ length: 300 }, (_, index) =>
-    ["handler-" + index, mutation("internal.handler-" + index, () => null)]));
-  const timers = scheduler("🕰".repeat(200), handlers);
-  const context = new MemoryContext();
-  const id = "id".repeat(400);
-  timers.at(context, id, context.now(), "handler-299", null);
-  assert.deepEqual(maintenance(context, timers.maintenance), { id, $flower: { continue: false } });
-  assert.equal(timers.get(context, id), null);
-});
-
-test("maintenance selects due timers through bounded index ranges without scanning history", () => {
-  const ctx=new MemoryContext();
-  const callback=mutation("callback",()=>null);
-  const timers=scheduler("seek-timers",{callback});
-  timers.at(ctx,"later",2_000,"callback",null);
-  timers.at(ctx,"due",1_000,"callback",null);
-  ctx.scan=()=>{throw new Error("maintenance must not scan timers");};
-  assert.deepEqual(timers.maintenance.run.compute(ctx,null),{id:"due",$flower:{continue:false}});
-  assert.equal(timers.maintenance.run.compute(ctx,null),null);
-  assert.deepEqual(timers.records.indexes.due,["state","dueAt"]);
+  assert.throws(() => simple.after(clock(0), "", 0, "run"), /nonempty/);
+  assert.throws(() => simple.after(clock(Number.MAX_SAFE_INTEGER), "overflow", 1, "run"), /Deadline must be a safe integer/);
+  assert.throws(() => simple.after(clock(0), "json", 0, "run", { bad: Number.NaN } as never), TypeError);
+  assert.throws(() => simple.scan(clock(0), { state: "running" as never }), /Unknown timer state filter/);
+  assert.throws(() => simple.retry(clock(0), "x", -1), TypeError);
+  assert.deepEqual(plain(simple.records.indexes), { due: ["state", "dueAt"] });
+  assert.ok(Object.isFrozen(simple));
 });

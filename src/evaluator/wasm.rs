@@ -268,7 +268,7 @@ pub(super) fn check_json(value: &Value) -> Result<()> {
 
 pub(super) fn error_envelope(error: anyhow::Error) -> Value {
     if let Some(error) = error.downcast_ref::<super::rust_engine::EngineError>() {
-        return json!({"ok": false, "error": {"code": error.code, "message": error.message}});
+        return json!({"ok": false, "error": error.failure()});
     }
     let message = error.to_string();
     // Rust coordinator errors have a stable CODE: message display. Arbitrary

@@ -2,8 +2,9 @@
 import assert from "node:assert/strict";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
 import { LocalCluster } from "../bench/cluster.mjs";
-import { FlowerClient } from "../sdk/client.ts";
+import { FlowerAdmin, FlowerClient } from "../sdk/client.ts";
 import { buildBundle } from "../sdk/bundle.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -38,7 +39,7 @@ process.once("SIGTERM", interrupted);
 try {
   await cluster.start();
   const seed = cluster.members.find(node => node.id !== cluster.leader.id);
-  const sdk = new FlowerClient(seed.url, { adminToken: cluster.adminToken });
+  const sdk = new FlowerAdmin(seed.url, { adminToken: cluster.adminToken });
   // This deliberately omits the serving leader. Ping/create/activate must use
   // the seed's authenticated membership hint, as must application writes.
   await sdk.registerGroup({ id: group, addresses: [seed.address] }, { signal: signal() });
@@ -47,13 +48,29 @@ try {
   assert.equal(placement.status, "active");
   assert.deepEqual(placement.owner.addresses, [seed.address]);
   assert.ok(!placement.owner.addresses.includes(cluster.leader.address));
-  const tenant = sdk.partition("tenant🌷");
-  await tenant.deploy(await buildBundle(join(root, "examples/orders.ts")), { requestId: "deploy", signal: signal() });
+  const tenant = new FlowerClient(seed.url).partition("tenant🌷");
+  const deployed = await sdk.partition("tenant🌷").deploy(await buildBundle(join(root, "examples/orders.ts")), { requestId: "deploy", signal: signal() });
+  // order.total is materialized for each order: private maintenance commits its
+  // one-time backfill marker. Settle it so the CAS revisions below are exact.
+  const identity = async () => {
+    const response = await fetch(`${seed.url}/partitions/${encodeURIComponent("tenant🌷")}/v1/identity`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: "{}", signal: signal(),
+    });
+    assert.equal(response.status, 200);
+    return (await response.json()).revision;
+  };
+  for (const deadline = Date.now() + 20_000; await identity() === deployed.revision;) {
+    assert.ok(Date.now() < deadline, "maintenance did not commit the materialization marker");
+    await delay(50);
+  }
+  const settled = await identity();
+  assert.equal(settled, deployed.revision + 1);
   const create = { orderId: "order", shippingCents: 5, lines: [{ id: "line", quantity: 1, unitCents: 7 }] };
-  const created = await tenant.mutate("order.create", create, { requestId: "create-order", signal: signal() });
-  assert.equal(created.revision, 2);
-  const updated = await tenant.call("order.updateLine", { lineId: "line", quantity: 2 }, { requestId: "update", expectedRevision: 2, signal: signal() });
-  assert.equal(updated.revision, 3);
+  const creation = { requestId: "create-order", expectedRevision: settled };
+  const created = await tenant.mutate("order.create", create, { ...creation, signal: signal() });
+  assert.equal(created.revision, settled + 1);
+  const updated = await tenant.call("order.updateLine", { lineId: "line", quantity: 2 }, { requestId: "update", expectedRevision: created.revision, signal: signal() });
+  assert.equal(updated.revision, created.revision + 1);
   assert.equal(updated.value.total, 19);
   assert.deepEqual((await tenant.call("order.get", "order", { signal: signal() })).value, updated.value);
   await assert.rejects(tenant.mutate("order.updateLine", { lineId: "line", quantity: 3 }, {
@@ -85,7 +102,7 @@ try {
   await watch.return(); watch = undefined;
   await cluster.crashLeaderAndRecover();
   // The SDK retains the same URL and catalog retains the same seed descriptor.
-  const replay = await tenant.mutate("order.create", create, { requestId: "create-order", signal: signal() });
+  const replay = await tenant.mutate("order.create", create, { ...creation, signal: signal() });
   assert.deepEqual(replay, { ...created, duplicate: true });
   const after = await tenant.mutate("order.updateLine", { lineId: "line", quantity: 4 }, {
     requestId: "after-election", expectedRevision: watched.revision, signal: signal(),

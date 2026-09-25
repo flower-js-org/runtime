@@ -158,7 +158,7 @@ async fn public_http_cache_still_checks_registry_transactions_and_current_policy
         query_http(State(app.clone()), Json(input.clone()))
             .await
             .unwrap_err()
-            .1,
+            .code,
         "METHOD_NOT_FOUND"
     );
     metadata(
@@ -174,7 +174,7 @@ async fn public_http_cache_still_checks_registry_transactions_and_current_policy
         query_http(State(app.clone()), Json(input.clone()))
             .await
             .unwrap_err()
-            .1,
+            .code,
         "TRANSACTION_PREPARED"
     );
     metadata(
@@ -208,7 +208,7 @@ async fn public_http_cache_still_checks_registry_transactions_and_current_policy
         query_http(State(app.clone()), Json(input))
             .await
             .unwrap_err()
-            .1,
+            .code,
         "FORBIDDEN"
     );
     app.consensus.shutdown().await.unwrap();
@@ -227,13 +227,13 @@ async fn public_http_cache_preserves_fresh_and_replica_local_read_fences() {
         Json(json!({"name":"read","expectedRevision":1})),
     )
     .await;
-    assert_eq!(invalid.unwrap_err().1, "INPUT_INVALID");
+    assert_eq!(invalid.unwrap_err().code, "INPUT_INVALID");
     app.consensus.shutdown().await.unwrap();
     assert_eq!(
         query_http(State(app.clone()), Json(json!({"name":"fresh"})))
             .await
             .unwrap_err()
-            .0,
+            .status,
         StatusCode::SERVICE_UNAVAILABLE
     );
     let local = query_http(State(app), Json(json!({"name":"read"})))
@@ -312,7 +312,7 @@ async fn cached_http_output_must_fit_the_node_byte_budget() {
     let error = query_http(State(app.clone()), Json(input))
         .await
         .unwrap_err();
-    assert_eq!(error.1, "ADMISSION_OVERLOADED");
+    assert_eq!(error.code, "ADMISSION_OVERLOADED");
     assert_eq!(
         app.admission.metrics()["classes"][0]["retainedInputBytes"],
         0

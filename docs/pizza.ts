@@ -1,28 +1,27 @@
-import { collection, define, derive, mutation, query } from "@flower-js/sdk";
+import { collection, define, derive, fail, mutation, query, v } from "@flower-js/sdk";
 
-const orders = collection<{ topping: string }>("orders");
+const orders = collection("orders", v.object({ topping: v.string({ min: 1 }) }));
 
-const order = mutation("order", (ctx, args: { id: string; topping: string }) => {
-  if (!args || typeof args.id !== "string" || !args.id ||
-      typeof args.topping !== "string" || !args.topping) {
-    throw new Error("An order ID and topping, please.");
-  }
-  if (ctx.get(orders, args.id)) throw new Error("Already ordered!");
-  ctx.set(orders, args.id, { topping: args.topping });
-  ctx.materialize(board, null);
-  return { accepted: args.id };
-});
-
-const board = derive("board", (ctx, _args: null) => {
+const board = derive("board", (ctx) => {
   const pizzas = ctx.scan(orders).map(({ value }) => value);
   return {
     orders: pizzas.length,
-    mushroom: pizzas.filter(pizza => pizza.topping === "mushroom").length,
+    mushroom: pizzas.filter((pizza) => pizza.topping === "mushroom").length,
   };
-});
-const dashboard = query("dashboard", ctx => ctx.get(board, null));
+}, { materialize: "always" });
 
-export default define({
+const order = mutation("order", {
+  args: v.object({ id: v.string({ min: 1 }), topping: v.string({ min: 1 }) }),
+}, (ctx, { id, topping }) => {
+  if (ctx.get(orders, id)) fail("ALREADY_ORDERED", "Already ordered!");
+  ctx.set(orders, id, { topping });
+  return { accepted: id };
+});
+
+const dashboard = query("dashboard", (ctx) => ctx.get(board));
+
+const app = define({
   definitions: [board],
   http: { "pizza.order": order, "pizza.board": dashboard },
 });
+export default app;

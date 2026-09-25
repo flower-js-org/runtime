@@ -8,7 +8,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { FlowerClient } from "../sdk/client.ts";
+import { FlowerAdmin, FlowerClient } from "../sdk/client.ts";
 import { createHttp2Transport } from "../sdk/http2.ts";
 
 const directory=await mkdtemp(join(tmpdir(),"flower-tls-e2e-"));
@@ -38,12 +38,13 @@ try {
   const leader=await until(async()=>{for(const node of nodes){if((await http(node,"/raft/metrics")).value.state==="Leader")return node;}});
   for(const node of nodes){assert.equal((await http(node,"/raft/membership",peer)).status,401);}
   const follower=nodes.find(node=>node!==leader);
-  const client=new FlowerClient(follower.url,{adminToken:operator,fetch:transport.fetch,queryUrls:nodes.map(node=>node.url)});
+  const client=new FlowerClient(follower.url,{fetch:transport.fetch,queryUrls:nodes.map(node=>node.url)});
+  const admin=new FlowerAdmin(follower.url,{adminToken:operator,fetch:transport.fetch});
   const javascript=`const records={kind:'collection',name:'records'};var __flowerBundle={default:{definitions:{
     read:{kind:'queryMethod',name:'read',compute:ctx=>({count:ctx.get(records,'count')||0,padding:'x'.repeat(400)})},
     write:{kind:'mutationMethod',name:'write',compute:(ctx,args)=>{const n=(ctx.get(records,'count')||0)+args;ctx.set(records,'count',n);return n;}}
   },http:{read:{kind:'query',name:'read'},write:{kind:'mutation',name:'write'}}}};`;
-  await client.deploy({hash:createHash("sha256").update(javascript).digest("hex"),javascript},{requestId:randomUUID()});
+  await admin.deploy({hash:createHash("sha256").update(javascript).digest("hex"),javascript},{requestId:randomUUID()});
   const watches=[client.watch("read"),client.watch("read")];
   for(const watch of watches)assert.equal((await watch.next()).value.value.count,0);
   const requestId=randomUUID();
@@ -53,7 +54,7 @@ try {
   for(const node of nodes){const other=new FlowerClient(node.url,{fetch:transport.fetch});assert.equal((await other.query("read")).value.count,7);}
   // Revoke one peer credential on a restarted follower would require a cluster
   // rollout; this test instead proves privilege separation at exposed routes.
-  const forbidden=new FlowerClient(follower.url,{adminToken:peer,fetch:transport.fetch});
+  const forbidden=new FlowerAdmin(follower.url,{adminToken:peer,fetch:transport.fetch});
   await assert.rejects(forbidden.deploy({hash:createHash("sha256").update(javascript).digest("hex"),javascript},{requestId:randomUUID()}),error=>error.status===401);
   console.log("PASS: three-node native TLS/h2 quorum, follower forwarding, independent peer/operator tokens, SDK pooling, shared SSE and retry receipts");
 } catch(error){for(const node of nodes)console.error(`node ${node.id}: ${node.logs}`);throw error;}

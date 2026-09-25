@@ -5,8 +5,8 @@ import { build } from "esbuild";
 import type { Bundle } from "./client.ts";
 
 export interface BuildOptions {
-  /** Static initialization runs once before snapshotting. Module initialization
-   * must not depend on invocation bindings. Each callback still starts fresh. */
+  /** Static (default): module initialization runs once at deploy and every callback starts
+   * from a copy-on-write snapshot. per-invocation reruns module code in each callback. */
   initialization?: "per-invocation" | "static";
 }
 
@@ -31,7 +31,7 @@ export async function buildBundle(entry: string, options: BuildOptions = {}): Pr
     treeShaking: true,
     logLevel: "silent",
   });
-  const javascript = (options.initialization === "static" ? "/* flower:static-init */\n" : "") + result.outputFiles[0].text;
+  const javascript = (options.initialization === "per-invocation" ? "" : "/* flower:static-init */\n") + result.outputFiles[0].text;
   return { hash: createHash("sha256").update(javascript).digest("hex"), javascript };
 }
 
