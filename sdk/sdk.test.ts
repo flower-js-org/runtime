@@ -660,7 +660,8 @@ test("jwtBearer maps verified bearer tokens to principals and declares managed k
     assert.equal(operation, 101);
     assert.deepEqual(JSON.parse(options).algorithms, ["HS256"]);
     if (token === "no-subject") return JSON.stringify({ claims: { tenant: "t1" }, protectedHeader: { alg: "HS256" } });
-    if (token !== "good") throw new Error("bad signature");
+    if (token === "orphan") throw new Error("CRYPTO_ERROR: KEY_FORBIDDEN: Key must match a declaration in define({keys})");
+    if (token !== "good") throw new Error("CRYPTO_ERROR: bad signature");
     return JSON.stringify({ claims: { sub: "alice", tenant: "t1" }, protectedHeader: { alg: "HS256" } });
   };
   try {
@@ -668,6 +669,9 @@ test("jwtBearer maps verified bearer tokens to principals and declares managed k
     assert.deepEqual(mapped.query("whoami", null, { credentials: { token: "good" } }), { subject: "user:alice" });
     assert.deepEqual(rejected(() => mapped.query("whoami", null, { credentials: "Bearer forged" })).failure,
       { code: "UNAUTHENTICATED", message: "Invalid bearer token: bad signature" });
+    // Key trouble is the server's, so it keeps its code instead of blaming the token.
+    assert.deepEqual(rejected(() => mapped.query("whoami", null, { credentials: "orphan" })).failure,
+      { code: "KEY_FORBIDDEN", message: "Key must match a declaration in define({keys})" });
     assert.deepEqual(defaults.query("whoami", null, { credentials: "good" }), { subject: "alice", tenant: "t1", claims: { sub: "alice", tenant: "t1" } });
     assert.deepEqual(rejected(() => defaults.query("whoami", null, { credentials: "no-subject" })).failure, { code: "UNAUTHENTICATED", message: "The token has no subject" });
   } finally { delete bridge.__flowerCrypto; }

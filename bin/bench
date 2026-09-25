@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+
+cd "$(dirname "$0")/.."
+cargo build --release
+npm run bench:stress
+node scripts/publish-bench-results.mjs

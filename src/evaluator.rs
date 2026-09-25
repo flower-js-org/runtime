@@ -1275,7 +1275,7 @@ mod tests {
                 BTreeMap::new(),
                 input,
                 "deployment",
-                Duration::from_secs(5),
+                config::settings().unwrap().evaluation_timeout,
                 Some(0),
             ),
         )
@@ -1500,17 +1500,31 @@ mod tests {
         }};"#,
         );
         let deployment = json!({"requestId":"deploy","bundle":{"hash":hash(javascript.as_bytes()),"javascript":javascript}});
-        let data = evaluate_at(BTreeMap::new(), deployment, 1_000).unwrap().puts;
+        let data = evaluate_at(BTreeMap::new(), deployment, 1_000)
+            .unwrap()
+            .puts;
         let failure = |name: &str| {
-            let error = invoke_at(data.clone(), json!({"name":name,"requestId":name}), "mutation", 1_100).unwrap_err();
-            error.downcast_ref::<rust_engine::EngineError>().expect("engine failure").failure()
+            let error = invoke_at(
+                data.clone(),
+                json!({"name":name,"requestId":name}),
+                "mutation",
+                1_100,
+            )
+            .unwrap_err();
+            error
+                .downcast_ref::<rust_engine::EngineError>()
+                .expect("engine failure")
+                .failure()
         };
         assert_eq!(
             failure("checkout"),
             json!({"code":"CHECKOUT_ABORTED","message":"The user interrupted checkout","details":{"step":2}})
         );
         assert_eq!(failure("broken")["code"], "EVALUATION_BUDGET");
-        assert_eq!(failure("plain"), json!({"code":"COMPUTE_ERROR","message":"no"}));
+        assert_eq!(
+            failure("plain"),
+            json!({"code":"COMPUTE_ERROR","message":"no"})
+        );
     }
 
     #[test]

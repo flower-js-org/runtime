@@ -118,7 +118,7 @@ export function replaceSummary(source, summary) {
 export function siteNavigation(html, child) {
   const up = child ? "../../" : "../";
   const chrome = `<link rel="stylesheet" href="${up}chrome.css">`;
-  const links = `${child ? '<a href="../latest.html">All groups</a>' : '<a href="latest.json">Raw JSON</a>'}<a href="https://github.com/flower-js-org/runtime/blob/main/bench/CPU.md">CPU investigation</a>`;
+  const links = child ? '<a href="../latest.html">All groups</a>' : '<a href="latest.json">Raw JSON</a>';
   const withHead = html.replace("</head>", `${chrome}</head>`);
   const withHeader = withHead.replace(/(<body[^>]*>(?:<a class="skip"[^>]*>[^<]*<\/a>)?)/, `$1${siteHeader(up, "operate")}`);
   const withLinks = withHeader.replace(/(<nav\b[^>]*>)/, `$1${links}`);

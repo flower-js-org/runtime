@@ -21,7 +21,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            evaluation_timeout: Duration::from_secs(5),
+            evaluation_timeout: Duration::from_secs(10),
             bundle_max_bytes: 2 * 1024 * 1024,
             result_max_bytes: 16 * 1024 * 1024,
             guest_memory_bytes: 128 * 1024 * 1024,
@@ -66,7 +66,11 @@ impl Settings {
             ensure!(allow_zero || value > 0, "{key} must be positive");
             Ok(value)
         };
-        let evaluation_timeout = Duration::from_millis(number(KEYS[0], 5000, false)?);
+        let evaluation_timeout = Duration::from_millis(number(
+            KEYS[0],
+            defaults.evaluation_timeout.as_millis() as u64,
+            false,
+        )?);
         ensure!(
             Instant::now().checked_add(evaluation_timeout).is_some(),
             "FLOWER_EVALUATION_TIMEOUT_MS cannot be represented by the monotonic clock"

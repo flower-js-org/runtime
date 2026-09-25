@@ -17,7 +17,7 @@ use crypto_secretbox::{
     aead::{AeadInPlace, KeyInit},
 };
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
-use sha2::{Digest, Sha512};
+use sha2::{Digest, Sha256, Sha512};
 use subtle::ConstantTimeEq;
 use x25519_dalek::{X25519_BASEPOINT_BYTES, x25519};
 use zeroize::{Zeroize, Zeroizing};
@@ -55,7 +55,7 @@ pub fn output_len(op: u32, args: &[&[u8]]) -> Result<usize> {
         9 => &[None, Some(32)],
         11 => &[None, Some(64), Some(32)],
         13 => &[Some(64)],
-        15 => &[None],
+        15 | 17 => &[None],
         16 => &[None, None],
         _ => bail!("unknown native NaCl operation"),
     };
@@ -71,7 +71,7 @@ pub fn output_len(op: u32, args: &[&[u8]]) -> Result<usize> {
             .checked_add(16)
             .context("NaCl output too large"),
         2 | 7 => Ok(args[0].len().saturating_sub(16)),
-        3..=5 => Ok(32),
+        3..=5 | 17 => Ok(32),
         8 => args[0]
             .len()
             .checked_add(64)
@@ -92,7 +92,8 @@ pub fn output_len(op: u32, args: &[&[u8]]) -> Result<usize> {
 /// 9 sign.open(signed_message, public); 10 sign.detached(message, secret);
 /// 11 sign.detached.verify(message, signature, public);
 /// 12 sign.keyPair.fromSeed(seed); 13 sign.keyPair.fromSecretKey(secret);
-/// 14 box.keyPair.fromSecretKey(secret); 15 hash(message); 16 verify(a, b).
+/// 14 box.keyPair.fromSecretKey(secret); 15 hash(message); 16 verify(a, b);
+/// 17 SHA-256(message), which is not NaCl but shares its binary shape.
 /// Key-pair results are `public_key || secret_key` (96/64 bytes respectively).
 /// `box.after`/`box.open.after` are aliases for 1/2. Random key-pair wrappers
 /// obtain OS random bytes separately and use 12/14.
@@ -166,6 +167,7 @@ pub fn execute(op: u32, args: &[&[u8]]) -> Result<Output> {
             Ok(Output::Bytes(bytes))
         }
         15 => Ok(Output::Bytes(Sha512::digest(args[0]).to_vec())),
+        17 => Ok(Output::Bytes(Sha256::digest(args[0]).to_vec())),
         16 => Ok(Output::Bool(
             !args[0].is_empty() && bool::from(args[0].ct_eq(args[1])),
         )),
@@ -446,6 +448,15 @@ mod tests {
             hex(
                 "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
             )
+        );
+        // FIPS 180-2's SHA-256 vectors.
+        assert_eq!(
+            bytes(17, &[b""]),
+            hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+        );
+        assert_eq!(
+            bytes(17, &[b"abc"]),
+            hex("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
         );
         for (a, b, expected) in [
             (b"".as_slice(), b"".as_slice(), false),

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
-import { nacl, jwt } from "./crypto.ts";
+import { base64url, jwt, nacl, sha256, webauthn } from "./crypto.ts";
 
 const docs = new URL("../docs/", import.meta.url);
 // The reference spans several pages; audit them together.
@@ -54,5 +54,5 @@ test("the crypto reference covers every high-level method and attached constant"
       for (const [name, child] of Object.entries(value)) visit(`${path}.${name}`, child);
     } else assert.ok(values.has(path), `${path} constant is missing`);
   }
-  visit("nacl", nacl); visit("jwt", jwt);
+  visit("nacl", nacl); visit("jwt", jwt); visit("sha256", sha256); visit("base64url", base64url); visit("webauthn", webauthn);
 });

@@ -47,7 +47,9 @@ export function jwtBearer(options: JwtBearerOptions): Authenticator {
           ? jwt.verify(bearer, key as ManagedKey | ManagedKeyVersion, validation).claims
           : jwt.verify(bearer, key as Uint8Array | string, validation as JWTVerifyOptions).claims;
       } catch (error) {
-        return fail("UNAUTHENTICATED", `Invalid bearer token: ${(error as Error)?.message ?? error}`);
+        // Only a rejected token is the caller's problem; key trouble keeps its own code.
+        if ((error as { code?: unknown } | null)?.code !== "CRYPTO_ERROR") throw error;
+        return fail("UNAUTHENTICATED", `Invalid bearer token: ${(error as Error).message}`);
       }
       return principal(claims);
     },

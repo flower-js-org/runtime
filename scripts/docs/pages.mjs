@@ -80,6 +80,12 @@ export const pages = [
     description: "Use NaCl and JWT inside Flower callbacks, with managed keys that never enter application memory.",
   },
   {
+    path: "guide/passkeys.html", group: "guide", label: "Passkeys",
+    title: "Sign in with passkeys.",
+    lead: "Passwordless accounts: the browser creates a passkey, your methods verify it natively, and records keep the challenges, passkeys and sessions.",
+    description: "Build passkey (WebAuthn) registration and sign-in with Flower: ceremonies, native verification, sessions and counters.",
+  },
+  {
     path: "guide/testing.html", group: "guide", label: "Testing",
     title: "Test without a server.",
     lead: "Run your application in-process, call it synchronously, move the clock, and drive the real client from <code>node --test</code>.",
@@ -171,10 +177,10 @@ export const pages = [
     description: "Reference for testDatabase, TestDatabase and TestPartition.",
   },
   {
-    path: "reference/crypto.html", group: "reference", label: "NaCl & JWT",
-    title: "NaCl and JWT.",
-    lead: "Signing, encryption and tokens inside your methods.",
-    description: "Reference for Flower's native NaCl and JWT APIs.",
+    path: "reference/crypto.html", group: "reference", label: "Crypto & passkeys",
+    title: "Crypto and passkeys.",
+    lead: "Hashing, signing, encryption, tokens and passkeys inside your methods.",
+    description: "Reference for Flower's native NaCl, JWT, SHA-256 and WebAuthn passkey APIs.",
   },
   {
     path: "reference/keys.html", group: "reference", label: "Managed keys",

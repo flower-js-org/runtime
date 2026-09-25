@@ -8,7 +8,7 @@ These settings apply to the production QuickJS-in-Wasm evaluator and its Rust co
 
 | Environment variable | Default | Scope |
 | --- | ---: | --- |
-| `FLOWER_EVALUATION_TIMEOUT_MS` | 5000 | Entire application transaction: Rust coordination, bundle preparation and all nested callbacks. Guest interruption checks run on a shared 5 ms metronome; Rust loops check the same deadline. Trusted process setup precedes the request deadline. |
+| `FLOWER_EVALUATION_TIMEOUT_MS` | 10000 | Entire application transaction: Rust coordination, bundle preparation and all nested callbacks. Guest interruption checks run on a shared 5 ms metronome; Rust loops check the same deadline. Trusted process setup precedes the request deadline. |
 | `FLOWER_BUNDLE_MAX_BYTES` | 2097152 (2 MiB) | UTF-8 source bytes, both deployment validation and prepared-bundle lookup. |
 | `FLOWER_RESULT_MAX_BYTES` | 16777216 (16 MiB) | Invocation JSON, host-call JSON, guest results, transaction output and the generated HTTP registry. Also bounds aggregate crypto input bytes and output bytes separately. Envelopes and patch metadata count toward the bound. |
 | `FLOWER_GUEST_MEMORY_BYTES` | 134217728 (128 MiB) | Aggregate live Wasm linear memory across nested isolated callbacks in one transaction; resident instances are charged again at checkout. Also configures Wasmtime's per-memory pool growth maximum; virtual address reservation is separate. |
@@ -233,7 +233,7 @@ rejected before a request instead of becoming one-millisecond polling loops.
 `subscribe()` and `waitUntil()` treat `stallMs` (default 45000) without any
 received bytes, heartbeats included, as a disconnect and reconnect with
 jittered backoff from 250 ms to 30 s, adjustable through `reconnect`. A
-`retry` policy on calls defaults to 8 attempts, a 10000 ms per-attempt timeout,
+`retry` policy on calls defaults to 8 attempts, a 20000 ms per-attempt timeout,
 and jittered backoff from 250 ms to 30 s. These are client-side allowances and
 are never sent to the server.
 

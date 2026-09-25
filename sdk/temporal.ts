@@ -182,7 +182,6 @@ type QueueIndexes = {
   readonly leases: readonly ["scope", "state", "leaseExpiresAt"];
   readonly expiry: readonly ["state", "leaseExpiresAt"];
 };
-export type QueueScopeSource = "argument" | ((ctx: QueryContext) => string);
 // With scope: "argument" every method takes the scope; otherwise none accepts one.
 type ScopeArgs<A extends boolean> = A extends true ? { scope: string } : unknown;
 type LeaseArgs<A extends boolean> = LeaseIdentity & ScopeArgs<A>;
@@ -201,11 +200,11 @@ export interface QueueMethods<P, R, A extends boolean = false> {
 }
 const workerMethods = ["claim", "renew", "complete", "fail", "get", "ready", "stats"] as const;
 export type QueueHttp<Prefix extends string, P, R, M extends QueueMethodName, A extends boolean = false> = { readonly [K in M as `${Prefix}.${K}`]: QueueMethods<P, R, A>[K] };
-export interface QueueHttpOptions<M extends QueueMethodName, S extends QueueScopeSource | undefined = QueueScopeSource | undefined> {
+export interface QueueHttpOptions<M extends QueueMethodName> {
   /** Which methods to expose. Defaults to the worker set: claim, renew, complete, fail, get, ready, stats. */
   readonly methods?: readonly M[];
   /** Scope source: a caller argument, a function of the authenticated context, or the default scope. */
-  readonly scope?: S;
+  readonly scope?: "argument" | ((ctx: QueryContext) => string);
   readonly access?: Access;
 }
 
@@ -215,8 +214,10 @@ export interface Queue<P = Json, R = Json> extends QueueView<P, R>, Component {
   /** The same queue restricted to one namespace of the shared collection. */
   scope(name: string): QueueView<P, R>;
   /** Public methods for workers; spread into define({ http }). */
-  http<const Prefix extends string, const M extends QueueMethodName = typeof workerMethods[number], const S extends QueueScopeSource | undefined = undefined>(
-    prefix: Prefix, options?: QueueHttpOptions<M, S>): QueueHttp<Prefix, P, R, M, S extends "argument" ? true : false>;
+  http<const Prefix extends string, const M extends QueueMethodName = typeof workerMethods[number]>(
+    prefix: Prefix, options: QueueHttpOptions<M> & { readonly scope: "argument" }): QueueHttp<Prefix, P, R, M, true>;
+  http<const Prefix extends string, const M extends QueueMethodName = typeof workerMethods[number]>(
+    prefix: Prefix, options?: QueueHttpOptions<M> & { readonly scope?: (ctx: QueryContext) => string }): QueueHttp<Prefix, P, R, M>;
 }
 
 function leaseError(): never {

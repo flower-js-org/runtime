@@ -12,8 +12,6 @@ Use `nix develop --command cargo …` if Rust is supplied by the development she
 
 The preset sets adaptive batching with a **50 ms preparation ceiling**, a 1,024-request writer queue, 16 authorization/cache-probe slots, and 16 shared preparation slots per server. Writer preparation is serial because this workload repeatedly updates conflicting hot stores; independent groups and reads remain parallel. Each server uses two Tokio async workers because all 24 replicas share this host; QuickJS preparation and storage use separate blocking workers. Existing environment variables take precedence. These are scheduling/resource settings, not end-to-end latency guarantees or recommendations for every production topology.
 
-The latency-focused preset uses 256 outstanding customer loops per group. The prior capacity preset used 512 loops and a 200 ms preparation ceiling; comparisons must identify that difference. The [latency investigation](LATENCY.md) retains both configurations and matched before/after runs. To reproduce the previous offered concurrency on a current binary, use the base command with `--groups 8 --http2 --duration 60 --concurrency 512 --workers 4 --max-orders 96 --chaos` and set `FLOWER_WRITER_BATCH_MS=200` alongside the other recorded runtime settings.
-
 ## Results and publication
 
 The retained result is [results/latest.html](results/latest.html), with [raw measurements](results/latest.json) and each group's JSON/HTML under `results/latest-groups/`. [READS.md](READS.md) summarizes that run; [ARCHITECTURE.md](ARCHITECTURE.md) covers the architecture and [LIMITS.md](LIMITS.md) lists capacity controls. Keep experimental output outside the retained results directory, for example under `/tmp/`.
@@ -63,8 +61,6 @@ Open-loop mode retains the concurrency bound. If all driver slots are occupied, 
 Normal completion and interruption stop owned processes and remove temporary databases; `--keep-data` preserves database directories. Reports preserve failures. All local replicas share CPU, memory, and storage, so increasing groups or queues can increase contention and latency. This small bounded workload does not establish large-dataset, WAN, authenticated-query, watch-heavy, or distributed-transaction capacity.
 
 ## Profiling
-
-The [September 24 CPU investigation](CPU.md) records before/after measurements, native profiles, optimizations, and reproduction commands.
 
 ### OpenTelemetry reporting
 

@@ -12,7 +12,7 @@ The optimized server used **12.3% less estimated server CPU per successful custo
 
 ## Measurement setup
 
-Apple M5 Pro, 18 logical CPUs, Darwin 27.2.0, Node 26.10.0, release Rust build with thin LTO. Eight three-replica groups share the host. The server before this change includes the initial OTEL implementation; this comparison is **not** against the M6 binary retained in the historical benchmark.
+Apple M5 Pro, 18 logical CPUs, Darwin 27.2.0, Node 26.10.0, release Rust build with thin LTO. Eight three-replica groups share the host. The server before this change includes the initial OTEL implementation.
 
 | Artifact | SHA-256 |
 | --- | --- |

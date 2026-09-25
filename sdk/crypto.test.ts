@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { TestContext } from "node:test";
-import { nacl, jwt } from "./crypto.ts";
-import { nacl as rootNaCl, jwt as rootJWT } from "./index.ts";
+import { base64url, jwt, nacl, sha256, webauthn } from "./crypto.ts";
+import { nacl as rootNaCl, jwt as rootJWT, webauthn as rootWebAuthn } from "./index.ts";
 
 type Input = Uint8Array | string;
 type Result = Uint8Array | string | boolean | null;
@@ -19,6 +19,7 @@ function bridge(t: TestContext, callback: (operation: number, parameter: number,
 test("crypto imports are lazy and package root shares the same API", () => {
   assert.equal(rootNaCl, nacl);
   assert.equal(rootJWT, jwt);
+  assert.equal(rootWebAuthn, webauthn);
   assert.throws(() => nacl.hash(new Uint8Array()), /only inside a Flower method/);
   assert.throws(() => nacl.hash("no implicit UTF-8" as any), TypeError);
   assert.throws(() => nacl.randomBytes(-1), TypeError);
@@ -129,6 +130,26 @@ test("native entropy and explicit PRNG overrides have separate paths", (t) => {
   assert.equal(calls, 2);
 });
 
+test("host refusals become structured failures that keep a host code", (t) => {
+  let refusal = "";
+  bridge(t, () => { throw refusal ? new Error(refusal) : new TypeError("crypto inputs must be Uint8Array or primitive string"); });
+  const key = new Uint8Array(32);
+  const refused = (thrown: string, call: () => unknown, code: string, message: string) => {
+    refusal = thrown;
+    assert.throws(call, (error: Error & { code?: string; details?: unknown }) =>
+      error.code === code && error.message === message && !("details" in error));
+  };
+  refused("CRYPTO_ERROR: JWT expired", () => jwt.verify("a.b.c", key, { algorithms: ["HS256"] }), "CRYPTO_ERROR", "JWT expired");
+  refused("CRYPTO_ERROR: invalid JWT: bad header", () => jwt.verify("a.b.c", key, { algorithms: ["HS256"] }), "CRYPTO_ERROR", "invalid JWT: bad header");
+  refused("CRYPTO_ERROR: CRYPTO_RANDOM_FORBIDDEN: system randomness is available only in mutations", () => nacl.randomBytes(8),
+    "CRYPTO_RANDOM_FORBIDDEN", "system randomness is available only in mutations");
+  refused("CRYPTO_ERROR: KEY_FORBIDDEN: Key must match a declaration in define({keys})", () => nacl.hash(key),
+    "KEY_FORBIDDEN", "Key must match a declaration in define({keys})");
+  // The bridge's own argument checks are programming errors, not refusals.
+  refusal = "";
+  assert.throws(() => nacl.hash(key), (error: Error & { code?: string }) => error instanceof TypeError && error.code === undefined);
+});
+
 test("JWT sends binary keys directly and serializes only finite plain JSON", (t) => {
   let observed: [number, number, ...Input[]] = [0, 0];
   bridge(t, (op, parameter, ...inputs) => {
@@ -179,3 +200,125 @@ test("JWT encryption uses native entropy unless a nonce is explicitly provided",
   assert.throws(() => jwt.encrypt({}, new Uint8Array(31)), /32 bytes/);
   assert.throws(() => jwt.encrypt({}, key, { get nonce() { throw new Error("must not run"); } } as any), /accessors/);
 });
+
+test("base64url matches RFC 4648's url alphabet and accepts one encoding per byte string", () => {
+  const text = (value: string) => new Uint8Array(Array.from(value, (character) => character.charCodeAt(0)));
+  for (const [plain, encoded] of [["", ""], ["f", "Zg"], ["fo", "Zm8"], ["foo", "Zm9v"], ["foob", "Zm9vYg"], ["fooba", "Zm9vYmE"], ["foobar", "Zm9vYmFy"]]) {
+    assert.equal(base64url.encode(text(plain)), encoded);
+    assert.deepEqual(base64url.decode(encoded), text(plain));
+  }
+  assert.equal(base64url.encode(new Uint8Array([0xfb, 0xff])), "-_8");
+  assert.deepEqual(base64url.decode("Zg=="), text("f"));
+  assert.deepEqual(base64url.decode("Zm8="), text("fo"));
+  for (let length = 0; length < 70; length++) {
+    const bytes = Uint8Array.from({ length }, (_, index) => (index * 151 + length * 7) & 0xff);
+    assert.deepEqual(base64url.decode(base64url.encode(bytes)), bytes);
+  }
+  for (const invalid of ["Z", "Zh", "Zm9=", "Zg=", "a+b/", "Zm 9v", "Zg==="]) {
+    assert.throws(() => base64url.decode(invalid), TypeError, invalid);
+  }
+  assert.throws(() => base64url.decode(7 as any), TypeError);
+  assert.throws(() => base64url.encode("text" as any), TypeError);
+});
+
+test("sha256 hands bytes to the native digest", (t) => {
+  const digest = new Uint8Array(32).fill(9), message = new Uint8Array([1, 2, 3]);
+  bridge(t, (op, parameter, ...inputs) => {
+    assert.deepEqual([op, parameter, inputs.length], [17, 0, 1]);
+    assert.equal(inputs[0], message);
+    return digest;
+  });
+  assert.equal(sha256(message), digest);
+  assert.equal(sha256.hashLength, 32);
+  assert.throws(() => sha256("text" as any), TypeError);
+});
+
+test("passkey ceremony options carry a fresh challenge and safe defaults", (t) => {
+  let draws = 0;
+  bridge(t, (op, parameter) => {
+    assert.deepEqual([op, parameter], [0, 32]);
+    return new Uint8Array(32).fill(++draws);
+  });
+  const user = { id: base64url.encode(new Uint8Array(16).fill(4)), name: "ada@example.com" };
+  const created = webauthn.registrationOptions({ rp: { id: "example.com", name: "Example" }, user, exclude: [{ id: "AQID", transports: ["internal"] }] });
+  assert.deepEqual(created, {
+    challenge: base64url.encode(new Uint8Array(32).fill(1)),
+    rp: { id: "example.com", name: "Example" },
+    user: { ...user, displayName: "ada@example.com" },
+    pubKeyCredParams: [{ type: "public-key", alg: -8 }, { type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+    timeout: 300_000,
+    excludeCredentials: [{ type: "public-key", id: "AQID", transports: ["internal"] }],
+    authenticatorSelection: { residentKey: "required", requireResidentKey: true, userVerification: "required" },
+    attestation: "none",
+  });
+  const custom = webauthn.registrationOptions({ rp: { id: "example.com", name: "Example" }, user: { ...user, displayName: "Ada" },
+    residentKey: "preferred", userVerification: "preferred", algorithms: [-7], timeoutMs: 60_000 });
+  assert.equal(custom.challenge, base64url.encode(new Uint8Array(32).fill(2)));
+  assert.deepEqual([custom.user.displayName, custom.pubKeyCredParams, custom.timeout, custom.authenticatorSelection],
+    ["Ada", [{ type: "public-key", alg: -7 }], 60_000, { residentKey: "preferred", requireResidentKey: false, userVerification: "preferred" }]);
+  assert.deepEqual(webauthn.authenticationOptions({ rpId: "example.com" }), {
+    challenge: base64url.encode(new Uint8Array(32).fill(3)), rpId: "example.com", timeout: 300_000, userVerification: "required", allowCredentials: [],
+  });
+  assert.deepEqual(webauthn.authenticationOptions({ rpId: "example.com", allow: [{ id: "AQID" }] }).allowCredentials, [{ type: "public-key", id: "AQID" }]);
+
+  const init = { rp: { id: "example.com", name: "Example" }, user };
+  for (const [change, message] of [
+    [{ user: { ...user, id: base64url.encode(new Uint8Array(65)) } }, /1 to 64 bytes/],
+    [{ user: { ...user, id: "" } }, /user.id must be a nonempty string/],
+    [{ algorithms: [-65535] }, /supported COSE identifiers/],
+    [{ residentKey: "sometimes" }, /residentKey/],
+    [{ userVerification: "maybe" }, /userVerification/],
+    [{ timeoutMs: 0 }, /timeoutMs/],
+    [{ exclude: [{ id: "AQID", extra: true }] }, /does not accept "extra"/],
+    [{ attestation: "direct" }, /does not accept "attestation"/],
+  ] as const) {
+    assert.throws(() => webauthn.registrationOptions({ ...init, ...change } as any), message);
+  }
+});
+
+test("passkey verification sends the response and exact expectations to native code", (t) => {
+  const calls: [number, unknown, unknown][] = [];
+  let refusal: string | null = null;
+  bridge(t, (op, _parameter, response, expected) => {
+    calls.push([op, JSON.parse(response as string), JSON.parse(expected as string)]);
+    if (refusal) throw new Error(refusal);
+    return op === 110 ? '{"credential":{"id":"AQID","signCount":0},"userVerified":true,"attestation":{"format":"none"}}'
+      : '{"credentialId":"AQID","signCount":7,"userVerified":true,"backupEligible":true,"backupState":true,"userHandle":null}';
+  });
+  const response = { id: "AQID", rawId: "AQID", type: "public-key", response: { clientDataJSON: "e30" } };
+  const challenge = base64url.encode(new Uint8Array(32).fill(5));
+  const registered = webauthn.verifyRegistration(response, { challenge, origin: "https://example.com", rpId: "example.com" });
+  assert.equal(registered.attestation.format, "none");
+  const stored = { id: "AQID", publicKey: "pQECAyYgASFY", algorithm: -7, signCount: 6, transports: ["internal"], backupEligible: true, backupState: true, aaguid: "" };
+  const signedIn = webauthn.verifyAuthentication(response, { challenge, origin: ["https://example.com", "android:apk-key-hash:x"], rpId: "example.com",
+    userVerification: "preferred", credential: stored, userHandle: "dXNlcg" });
+  assert.equal(signedIn.signCount, 7);
+  assert.deepEqual(calls, [
+    [110, response, { challenge, origins: ["https://example.com"], rpId: "example.com", userVerification: "required", algorithms: [-8, -7, -257] }],
+    [111, response, { challenge, origins: ["https://example.com", "android:apk-key-hash:x"], rpId: "example.com", userVerification: "preferred",
+      credential: { id: "AQID", publicKey: "pQECAyYgASFY", signCount: 6, userHandle: "dXNlcg" } }],
+  ]);
+
+  refusal = "CRYPTO_ERROR: WEBAUTHN_COUNTER: the signature counter did not increase, so the authenticator may be cloned";
+  assert.throws(() => webauthn.verifyAuthentication(response, { challenge, origin: "https://example.com", rpId: "example.com", credential: stored }),
+    { code: "WEBAUTHN_COUNTER", message: "the signature counter did not increase, so the authenticator may be cloned" });
+  refusal = "CRYPTO_ERROR: WebAuthn challenge does not match";
+  assert.throws(() => webauthn.verifyRegistration(response, { challenge, origin: "https://example.com", rpId: "example.com" }),
+    { code: "CRYPTO_ERROR", message: "WebAuthn challenge does not match" });
+  refusal = null;
+
+  const valid = { challenge, origin: "https://example.com", rpId: "example.com", credential: stored };
+  for (const [change, message] of [
+    [{ origin: [] }, /origin must be/],
+    [{ challenge: "" }, /challenge must be a nonempty string/],
+    [{ credential: { ...stored, signCount: -1 } }, /uint32/],
+    [{ credential: { ...stored, signCount: 2 ** 32 } }, /uint32/],
+    [{ userHandle: "!" }, /Invalid base64url/],
+    [{ expected: true }, /does not accept "expected"/],
+  ] as const) {
+    assert.throws(() => webauthn.verifyAuthentication(response, { ...valid, ...change } as any), message);
+  }
+  assert.throws(() => webauthn.verifyRegistration(response, { challenge, origin: "https://example.com", rpId: "example.com", algorithms: [] as any }), /COSE/);
+  assert.equal(calls.length, 4);
+});
+

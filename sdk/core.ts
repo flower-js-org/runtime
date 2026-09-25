@@ -387,7 +387,8 @@ export function transaction(name: string, specOrPlan: unknown, maybePlan?: unkno
 
 // ---- Typed method maps shared by define, participants and clients
 
-export interface TransactionResult<V = Json> { results: Json[]; value: V }
+/** A committed transaction: each call's result, and the plan's value when it has one. */
+export interface TransactionResult<V = Json> { results: Json[]; value?: V }
 export interface ManifestMethod { readonly name: string; readonly kind: "query" | "mutation" | "transaction"; readonly consistency?: "replica-local" }
 export interface CollectionManifest { readonly name: string; readonly indexes: Readonly<Record<string, readonly string[]>> }
 export interface FlowerModule<H extends HttpMap = HttpMap> {

@@ -266,10 +266,14 @@ async fn exhausted_callback_has_fresh_recovery_budget_and_original_time() {
     ))
     .await;
     let before = app.consensus.read().await.unwrap();
+    let budget = crate::evaluator::config::settings()
+        .unwrap()
+        .evaluation_timeout;
     let started = Instant::now();
     maintain(&app).await.unwrap();
-    assert!(started.elapsed() >= Duration::from_secs(4));
-    assert!(started.elapsed() < Duration::from_secs(10));
+    // The loop spends one whole budget; the recovery runs on a fresh one and returns quickly.
+    assert!(started.elapsed() >= budget * 4 / 5);
+    assert!(started.elapsed() < budget * 2);
     let after = app.consensus.read().await.unwrap();
     assert_eq!(after.revision, before.revision + 1);
     assert_eq!(after.requests, before.requests);

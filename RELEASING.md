@@ -50,8 +50,8 @@ write access to the `@flower-js` scope. This creates `@flower-js/sdk`; configure
 its trusted publisher in npm package settings with these exact values:
 
 - Provider: GitHub Actions
-- Organization: `flower-js-org`
-- Repository: `runtime`
+- Organization: `xmit-dev`
+- Repository: `flower`
 - Workflow filename: `release.yml`
 - Environment: `npm`
 - Allowed action: direct **`npm publish`**

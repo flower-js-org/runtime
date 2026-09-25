@@ -45,20 +45,9 @@ fn representation(value: &Evaluation) -> Value {
 }
 
 fn compare(data: &mut BTreeMap<String, Value>, input: Value, mode: &str, now: u64) {
-    let expected = oracle::evaluate_inner(
-        data.clone(),
-        input.clone(),
-        mode,
-        Duration::from_secs(5),
-        Some(now),
-    );
-    let actual = evaluate_inner(
-        data.clone().into(),
-        input.clone(),
-        mode,
-        Duration::from_secs(5),
-        Some(now),
-    );
+    let budget = config::settings().unwrap().evaluation_timeout;
+    let expected = oracle::evaluate_inner(data.clone(), input.clone(), mode, budget, Some(now));
+    let actual = evaluate_inner(data.clone().into(), input.clone(), mode, budget, Some(now));
     match (actual, expected) {
         (Ok(actual), Ok(expected)) => {
             // Rust can evaluate one dirty child before its parent and skip an

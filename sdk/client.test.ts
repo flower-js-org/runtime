@@ -420,6 +420,12 @@ test("waitUntil resolves with the first matching update and closes its subscript
 
   const truthy = scripted([events(snapshot(0, 1) + patch(7, 2, 1))]);
   assert.equal((await bounded(new FlowerClient("http://db", { fetch: truthy.fetch }).waitUntil("count", null, undefined, { signal }))).value, 7);
+  // Null arguments can be omitted before the predicate, or before the options alone.
+  const omitted = scripted([events(snapshot(1, 1) + patch(3, 2, 1)), events(snapshot(0, 1) + patch(5, 2, 1))]);
+  const bare = new FlowerClient("http://db", { fetch: omitted.fetch });
+  assert.equal((await bounded(bare.waitUntil("count", (value: any) => value > 2, { signal }))).value, 3);
+  assert.equal((await bounded(bare.waitUntil("count", undefined, { signal }))).value, 5);
+  assert.deepEqual(omitted.requests.map(({ init }) => JSON.parse(String(init.body)).args), [null, null]);
   const ended = scripted([events(snapshot(false))]);
   await assert.rejects(bounded(new FlowerClient("http://db", { fetch: ended.fetch }).waitUntil("flag", null, Boolean, { signal, reconnect: false })),
     (error: unknown) => error instanceof FlowerError && error.code === "WATCH_ENDED" && isTransient(error));
@@ -508,6 +514,8 @@ test("typed clients check aliases, method kinds, arguments and results at compil
     for await (const update of client.subscribe("count")) { const value: number = update.value, reset: boolean = update.reset; void value; void reset; }
     for await (const { value } of client.watch("find", "main")) { const row: { n: number } | null = value; void row; }
     const ready: number = (await client.waitUntil("count", null, (n) => n > 2)).value;
+    const soon: number = (await client.waitUntil("count", (n) => n > 2, { signal: AbortSignal.timeout(1) })).value;
+    void soon;
     const moved = (await client.mutate("move", { to: "west" })).value.results;
     void ready; void moved;
   };
@@ -534,6 +542,8 @@ test("typed clients check aliases, method kinds, arguments and results at compil
     client.subscribe("add", { by: 1 });
     // @ts-expect-error predicates receive the typed value
     await client.waitUntil("count", null, (n: string) => n === "3");
+    // @ts-expect-error find requires its argument before the predicate
+    await client.waitUntil("find", (row) => row !== null);
     // @ts-expect-error results are typed
     const wrong: QueryResult<string> = await client.query("count");
     // @ts-expect-error explicit value generics are gone

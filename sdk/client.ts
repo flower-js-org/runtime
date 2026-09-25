@@ -18,7 +18,7 @@ export interface RetryPolicy {
   readonly initialDelayMs?: number;
   /** Default 30000 ms. */
   readonly maxDelayMs?: number;
-  /** Abort each attempt after this long. Default 10000 ms. */
+  /** Abort each attempt after this long. Default 20000 ms, room for a fresh read fence and a full evaluation. */
   readonly timeoutMs?: number;
   /** Defaults to isTransient. */
   readonly retryable?: (error: unknown) => boolean;
@@ -197,6 +197,7 @@ function partitionPath(name: string): string {
 }
 
 type Args<App, A extends string> = ArgsParameter<ArgsOf<ApiOf<App>[A]>>;
+type NullaryQueryAlias<App> = { [K in QueryAliasOf<App>]: null extends ArgsOf<ApiOf<App>[K]> ? K : never }[QueryAliasOf<App>];
 type Value<App, A extends string> = ResultOf<ApiOf<App>[A]>;
 
 /**
@@ -240,7 +241,7 @@ export class FlowerClient<App = FlowerModule> {
     const setting = options.retry ?? this.retry;
     if (setting === false) return send(options.signal);
     const policy: RetryPolicy = setting === true ? {} : setting;
-    const attempts = policy.attempts ?? 8, timeoutMs = policy.timeoutMs ?? 10_000;
+    const attempts = policy.attempts ?? 8, timeoutMs = policy.timeoutMs ?? 20_000;
     const retryable = policy.retryable ?? isTransient;
     for (let attempt = 0; ; attempt++) {
       options.signal?.throwIfAborted();
@@ -413,11 +414,15 @@ export class FlowerClient<App = FlowerModule> {
     });
   }
 
-  /** Resolve with the first value satisfying predicate, reconnecting as needed. */
-  async waitUntil<A extends QueryAliasOf<App>>(alias: A, args: ArgsOf<ApiOf<App>[A]>, predicate: (value: Value<App, A>) => boolean = Boolean,
-    options: SubscribeOptions = {}): Promise<Update<Value<App, A>>> {
-    const subscribe = this.subscribe as unknown as (alias: string, args: unknown, options: SubscribeOptions) => AsyncGenerator<Update<Value<App, A>>>;
-    for await (const update of subscribe.call(this, alias, args, options)) if (predicate(update.value)) return update;
+  /** Resolve with the first value satisfying predicate, reconnecting as needed. Queries that take null may omit args. */
+  waitUntil<A extends NullaryQueryAlias<App>>(alias: A, predicate?: (value: Value<App, A>) => boolean, options?: SubscribeOptions): Promise<Update<Value<App, A>>>;
+  waitUntil<A extends QueryAliasOf<App>>(alias: A, args: ArgsOf<ApiOf<App>[A]>, predicate?: (value: Value<App, A>) => boolean, options?: SubscribeOptions): Promise<Update<Value<App, A>>>;
+  async waitUntil(alias: string, ...rest: unknown[]): Promise<Update<Json>> {
+    // Arguments are JSON, so a function or nothing in their place means they were omitted.
+    const [args, predicate, options = {}] = (typeof rest[0] === "function" || rest[0] === undefined ? [null, ...rest] : rest) as
+      [Json, ((value: Json) => boolean) | undefined, SubscribeOptions | undefined];
+    const subscribe = this.subscribe as unknown as (alias: string, args: unknown, options: SubscribeOptions) => AsyncGenerator<Update<Json>>;
+    for await (const update of subscribe.call(this, alias, args, options)) if ((predicate ?? Boolean)(update.value)) return update;
     throw options.signal?.reason ?? new FlowerError("The subscription ended", 0, "WATCH_ENDED");
   }
 

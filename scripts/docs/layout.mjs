@@ -3,7 +3,7 @@
 // <nav> and <footer> so self-contained report styles cannot restyle them.
 import { groups } from "./pages.mjs";
 
-export const repository = "https://github.com/flower-js-org/runtime";
+export const repository = "https://github.com/xmit-dev/flower";
 
 // `prefix` leads from the page's directory to the site root ("", "../", ...).
 export function siteHeader(prefix, currentGroup, { menu = false } = {}) {

@@ -67,11 +67,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/flower-js-org/runtime.git"
+    "url": "git+https://github.com/xmit-dev/flower.git"
   },
   "homepage": "https://flower.js.org",
   "bugs": {
-    "url": "https://github.com/flower-js-org/runtime/issues"
+    "url": "https://github.com/xmit-dev/flower/issues"
   },
   "files": [
     "dist",

@@ -252,7 +252,8 @@ export class TestDatabase<App = FlowerModule> {
         if (entry.kind === "mutation") this.commit(participant, output);
         results.push(plain(output.value));
       }
-      const value = { results, value: Object.hasOwn(plan, "value") ? plan.value ?? null : null };
+      // Like the server, a plan without a value commits to { results } alone.
+      const value = Object.hasOwn(plan, "value") ? { results, value: plan.value } : { results };
       store.revision++;
       this.notify();
       return { revision: store.revision, value: value as unknown as Json, duplicate: false };
@@ -355,8 +356,8 @@ export async function testDatabase<App extends Manifest = Manifest>(app: App | s
   if (typeof app === "string") {
     const bundle = await buildBundle(app);
     const sandbox = createContext(Object.create(null));
-    runInContext(bundle.javascript, sandbox, { timeout: 5_000 });
-    runInContext(source, sandbox, { timeout: 5_000 });
+    runInContext(bundle.javascript, sandbox, { timeout: 10_000 });
+    runInContext(source, sandbox, { timeout: 10_000 });
     const local = <T>(value: T): T => sandbox.JSON.parse(JSON.stringify(value));
     return new TestDatabase<App>(sandbox.__flowerBundle.default, sandbox as unknown as Engine, options, local);
   }

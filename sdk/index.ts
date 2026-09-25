@@ -24,8 +24,10 @@ export { jwtBearer } from "./auth.ts";
 export type { JwtBearerOptions } from "./auth.ts";
 export { key } from "./keys.ts";
 export type { ManagedKey, ManagedKeyVersion, ManagedKeyAlgorithm, KeyUsage, KeyOptions, SharedKey } from "./keys.ts";
-export { nacl, jwt, publicKey, keyVersion } from "./crypto.ts";
-export type { NaClKeyPair, NaClPRNG, JWTAlgorithm, JWTKey, JWTKeyFormat, JWTClaims, JWTSignOptions, ManagedJWTSignOptions, ManagedJWTVerifyOptions, JWTValidationOptions, JWTVerifyOptions, JWTEncryptOptions, JWTProtectedHeader, JWTVerified } from "./crypto.ts";
+export { nacl, jwt, publicKey, keyVersion, sha256, base64url, webauthn } from "./crypto.ts";
+export type { NaClKeyPair, NaClPRNG, JWTAlgorithm, JWTKey, JWTKeyFormat, JWTClaims, JWTSignOptions, ManagedJWTSignOptions, ManagedJWTVerifyOptions, JWTValidationOptions, JWTVerifyOptions, JWTEncryptOptions, JWTProtectedHeader, JWTVerified,
+  COSEAlgorithm, UserVerification, WebAuthnRegistrationInit, WebAuthnAuthenticationInit, WebAuthnCreationOptions, WebAuthnRequestOptions,
+  WebAuthnRegistrationExpectation, WebAuthnAuthenticationExpectation, WebAuthnCredential, WebAuthnRegistration, WebAuthnAuthentication } from "./crypto.ts";
 export { FlowerClient, FlowerAdmin, FlowerError, isTransient, backoff } from "./client.ts";
 export type {
   Bundle, FlowerFetch, FlowerRequestInit, RetryPolicy, RequestOptions, MutationOptions, QueryResult, MutationResult, WatchOptions, WatchPollOptions,

@@ -192,7 +192,7 @@ export function latencyCell(histogram, options) {
 }
 
 /** The table view of a histogram: every nonempty bin, including any beyond the axis. */
-export function latencyTable(histogram, caption, { domain = latencyDomain([histogram]) } = {}) {
+export function latencyTable(histogram, caption, { domain = latencyDomain([histogram]), noun = "calls" } = {}) {
   if (!usableHistogram(histogram) || !domain) return "";
   const percent = (fraction) => fraction > 0 && fraction < 0.00005 ? "<0.01%" : `${(fraction * 100).toFixed(2)}%`;
   let running = 0;
@@ -201,5 +201,5 @@ export function latencyTable(histogram, caption, { domain = latencyDomain([histo
     const cumulative = running === histogram.samples ? "100%" : `${Math.min(99.99, running / histogram.samples * 100).toFixed(2)}%`;
     return `<tr><th scope="row">${escape(binLabel(bin, domain.size))}</th><td>${count(samples)}</td><td>${percent(samples / histogram.samples)}</td><td>${cumulative}</td></tr>`;
   }).join("");
-  return `<table class="latency-table"><caption>${escape(caption)}</caption><thead><tr><th scope="col">Latency</th><th scope="col">Calls</th><th scope="col">Share</th><th scope="col">Cumulative</th></tr></thead><tbody>${rows}</tbody></table>`;
+  return `<table class="latency-table"><caption>${escape(caption)}</caption><thead><tr><th scope="col">Latency</th><th scope="col">${noun[0].toUpperCase()}${noun.slice(1)}</th><th scope="col">Share</th><th scope="col">Cumulative</th></tr></thead><tbody>${rows}</tbody></table>`;
 }

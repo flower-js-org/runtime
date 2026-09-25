@@ -256,7 +256,7 @@ test("http() generates worker methods with argument or context scopes and caches
     "w.claim": "mutation", "w.renew": "mutation", "w.complete": "mutation", "w.fail": "mutation", "w.get": "query", "w.ready": "query", "w.stats": "query",
   });
   const db = await testDatabase(app);
-  assert.deepEqual(rejected(() => db.mutate("tenant.claim", { owner: "w" })).failure, { code: "INVALID_ARGUMENT", message: 'is missing "scope"', details: { path: [] } });
+  assert.deepEqual(rejected(() => db.mutate("tenant.claim", { owner: "w" } as never)).failure, { code: "INVALID_ARGUMENT", message: 'is missing "scope"', details: { path: [] } });
   assert.equal(db.query("jobs.ready", null), false);
   assert.equal(rejected(() => db.query("jobs.ready", { scope: "a" } as never)).failure!.code, "INVALID_ARGUMENT");
 

@@ -1,7 +1,7 @@
 //! Borrow guest byte spans while computing; allocate the guest result only after
 //! releasing every memory borrow. Neither NaCl inputs nor outputs traverse JSON.
 use super::{Host, check_json};
-use crate::crypto::{jwt, managed, nacl};
+use crate::crypto::{jwt, managed, nacl, webauthn};
 use anyhow::{Context, Result, ensure};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -55,8 +55,8 @@ fn arity(op: u32) -> Option<usize> {
     Some(match op {
         0 => 0,
         1 | 2 | 11 | 100 | 101 | 103 => 3,
-        3 | 5 | 8 | 9 | 10 | 16 | 201 | 202 => 2,
-        4 | 12..=15 => 1,
+        3 | 5 | 8 | 9 | 10 | 16 | 110 | 111 | 201 | 202 => 2,
+        4 | 12..=15 | 17 => 1,
         6 | 7 | 102 | 200 => 4,
         _ => return None,
     })
@@ -95,6 +95,11 @@ fn dispatch(op: u32, args: &[&[u8]], now: u64) -> Result<Output> {
             args[1],
             &options(args[2])?,
             now,
+        )?)?,
+        110 => serde_json::to_string(&webauthn::verify_registration(args[0], &options(args[1])?)?)?,
+        111 => serde_json::to_string(&webauthn::verify_authentication(
+            args[0],
+            &options(args[1])?,
         )?)?,
         _ => anyhow::bail!("unsupported crypto operation"),
     };

@@ -372,3 +372,30 @@ fn native_validation_errors_are_catchable_without_panic_or_key_disclosure() {
         json!([true, true, true, true, true])
     );
 }
+
+#[test]
+fn sha256_and_webauthn_verification_are_reachable_from_the_guest() {
+    let code = bundle(
+        r#"()=>{
+        const digest = Array.from(__flowerCrypto(17,0,'abc'));
+        const expected = JSON.stringify({challenge:'AAECAwQFBgcICQoLDA0ODw',origins:['https://example.com'],
+            rpId:'example.com',userVerification:'required',algorithms:[-7]});
+        let refusal = null, arity = false;
+        try { __flowerCrypto(110,0,'{}',expected) } catch (e) { refusal = e.message }
+        try { __flowerCrypto(111,0,'{}') } catch (e) { arity = true }
+        return {digest, refusal, arity};
+    }"#,
+        true,
+    );
+    let value = &run(&code, Value::Null).unwrap()["value"];
+    use sha2::Digest;
+    assert_eq!(
+        value["digest"],
+        json!(sha2::Sha256::digest(b"abc").to_vec())
+    );
+    assert_eq!(
+        value["refusal"],
+        "CRYPTO_ERROR: WebAuthn response type must be public-key"
+    );
+    assert_eq!(value["arity"], true);
+}

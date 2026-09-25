@@ -13,6 +13,7 @@ fn validates_only_budgets_and_representation_constraints() {
         })
     };
     let defaults = read(&[]).unwrap();
+    assert_eq!(defaults.evaluation_timeout, Duration::from_secs(10));
     assert_eq!(defaults.index_memory_bytes, 16 * 1024 * 1024);
     assert_eq!(defaults.wasm_recycle_bytes, 96 * 1024 * 1024);
     for key in KEYS {

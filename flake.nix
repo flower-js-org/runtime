@@ -8,6 +8,11 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    xmit = {
+      url = "github:xmit-co/xmit";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -15,6 +20,7 @@
       self,
       nixpkgs,
       rust-overlay,
+      xmit,
     }:
     let
       supportedSystems = [
@@ -65,7 +71,7 @@
 
             meta = {
               description = "A Raft-backed database of reactive TypeScript values";
-              homepage = "https://github.com/flower-js-org/runtime";
+              homepage = "https://github.com/xmit-dev/flower";
               license = pkgs.lib.licenses.mit;
               mainProgram = "flower";
               platforms = supportedSystems;
@@ -107,6 +113,7 @@
             pkgs.rust-bin.stable.${rustVersion}.default
             pkgs.nodejs_26
             pkgs.stdenv.cc
+            xmit.packages.${pkgs.stdenv.hostPlatform.system}.default
           ];
         };
       });

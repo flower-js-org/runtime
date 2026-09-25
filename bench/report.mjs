@@ -50,7 +50,7 @@ function lifecycleCharts(lifecycle) {
   const charts = [["Oven lateness", lifecycle.timerLatenessMs], ["Order to door", lifecycle.orderToDeliveryMs]];
   return `<div class="charts-grid">${charts.map(([name, histogram]) => `<figure class="chart"><p class="latency-title">${escape(name)}<span>${count(object(histogram).samples)} samples</span></p>${latencyHistogram(histogram, { label: name, noun: "samples", width: 440, height: 140 })}</figure>`).join("")}</div><details><summary>Show as tables</summary><div class="two-up">${charts.map(([name, histogram]) => {
     const value = object(histogram);
-    return latencyTable(histogram, `${name}: ${count(value.samples)} samples, ${count(value.invalidSamples)} invalid, ${count(value.overflowSamples)} beyond 24 hours`);
+    return latencyTable(histogram, `${name}: ${count(value.samples)} samples, ${count(value.invalidSamples)} invalid, ${count(value.overflowSamples)} beyond 24 hours`, { noun: "samples" });
   }).join("")}</div></details>`;
 }
 

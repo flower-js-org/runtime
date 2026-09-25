@@ -1,8 +1,8 @@
 # Latency investigation, 2026-09-24
 
-The fresh publication measured **56,154.7 calls/sec, 12.9 ms read p99 and 228.3 ms write p99**. Against the preceding 89,127.3 calls/sec publication, read p99 fell 81.4%, write p99 fell 53.5%, and goodput fell 37.0%. The final run was slower than the 65.7k redb controls below; it is retained as the preselected fresh publication rather than replaced by a better exploratory observation. These shared-desktop runs show variation, not a guaranteed capacity or latency bound.
+The fresh publication measured **56,154.7 calls/sec, 12.9 ms read p99 and 228.3 ms write p99**. The final run was slower than the 65.7k redb controls below; it is retained as the preselected fresh publication rather than replaced by a better exploratory observation. These shared-desktop runs show variation, not a guaranteed capacity or latency bound.
 
-The latency preset uses 256 customer loops per group and a 50 ms writer preparation ceiling. The preceding capacity preset used 512 loops and 200 ms. The reduced outstanding work is an intentional throughput/latency tradeoff; it must be distinguished from the server optimizations below. Reads and writes have separate latency distributions throughout the published report.
+The latency preset uses 256 customer loops per group and a 50 ms writer preparation ceiling. Outstanding work is an intentional throughput/latency tradeoff; it must be distinguished from the server optimizations below. Reads and writes have separate latency distributions throughout the published report.
 
 ## Current snapshot design: recover directly from redb
 
