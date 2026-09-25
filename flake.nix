@@ -91,6 +91,7 @@
           ];
           buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             pkgs.stdenv.cc.cc.lib
+            pkgs.ncurses
             pkgs.zlib
           ];
           dontConfigure = true;
