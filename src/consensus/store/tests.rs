@@ -115,6 +115,7 @@ async fn pending_append_is_readable_before_flush_but_never_acknowledged_or_appli
     append.await.unwrap();
     assert!(store.inner.appending.read().unwrap().is_none());
     drop(appender);
+    store.close().await.unwrap();
     drop(store);
     let mut reopened = Store::open(1, directory.path().into()).await.unwrap();
     assert_eq!(reopened.try_get_log_entries(..).await.unwrap().len(), 3);
@@ -146,6 +147,7 @@ async fn cancelled_append_still_flushes_before_truncation_and_releases_its_buffe
     assert_eq!(store.try_get_log_entries(..).await.unwrap().len(), 1);
     drop(appender);
     drop(truncator);
+    store.close().await.unwrap();
     drop(store);
     let mut reopened = Store::open(1, directory.path().into()).await.unwrap();
     assert_eq!(reopened.try_get_log_entries(..).await.unwrap().len(), 1);
@@ -157,10 +159,10 @@ async fn successive_appends_share_one_buffer_and_readers_never_lose_the_suffix()
     let mut store = Store::open(1, directory.path().into()).await.unwrap();
     let blocker = store.inner.db.begin_write().unwrap();
     let first = store
-        .start_append(vec![entry(1, command("first", 0, &[], &[]))])
+        .start_append(vec![entry(1, command("first", 0, &[], &[]))], Durability::Immediate)
         .await;
     let next = store.clone();
-    let mut second = Box::pin(next.start_append(vec![entry(2, command("second", 1, &[], &[]))]));
+    let mut second = Box::pin(next.start_append(vec![entry(2, command("second", 1, &[], &[]))], Durability::Immediate));
     assert!(futures_util::poll!(&mut second).is_pending());
     assert_eq!(store.try_get_log_entries(..).await.unwrap().len(), 1);
     drop(blocker);
@@ -433,6 +435,7 @@ async fn legacy_snapshots_upgrade_on_build_and_binary_snapshots_survive_restart_
         read_meta::<u64>(&store.inner.db, "snapshot_sequence").unwrap(),
         Some(sequence)
     );
+    store.close().await.unwrap();
     drop(store);
     let mut reopened = Store::open(1, directory.path().into()).await.unwrap();
     let read = reopened.get_current_snapshot().await.unwrap().unwrap();
@@ -502,6 +505,7 @@ async fn malformed_stored_snapshot_is_an_error_and_never_an_absent_snapshot() {
         transaction.commit().unwrap();
     }
     assert!(read_snapshot_metadata(&store.inner.db).is_err());
+    store.close().await.unwrap();
     drop(store);
     // Recovery now reads the snapshot position to reconstruct byte accounting.
     // Invalid metadata must fail startup, never masquerade as no snapshot.
@@ -583,6 +587,7 @@ async fn legacy_migration_is_atomic_preserves_raft_state_and_restarts_incrementa
     assert!(!expected.data.contains_key("remove"));
     assert!(!expected.data.contains_key("bad"));
     assert_eq!(expected.requests.len(), 3);
+    store.close().await.unwrap();
     drop(store);
     let mut reopened = Store::open(1, directory.path().into()).await.unwrap();
     assert_eq!(reopened.snapshot().await, expected);
@@ -658,6 +663,7 @@ async fn grouped_deltas_preserve_order_dedup_cas_and_untouched_allocations() {
         assert!(matches!(result, ApplyResult::Committed(result)
             if result.revision == index as u64 + 2 && !result.duplicate));
     }
+    store.inner.persistence.drain().await.unwrap();
     {
         let guard = store.inner.state.read().await;
         assert_eq!(
@@ -699,6 +705,7 @@ async fn grouped_deltas_preserve_order_dedup_cas_and_untouched_allocations() {
         retained.requests.get_shared("original").unwrap(),
         expected.requests.get_shared("original").unwrap(),
     ));
+    store.close().await.unwrap();
     drop(store);
     let reopened = Store::open(1, directory.path().into()).await.unwrap();
     assert_eq!(reopened.snapshot().await, expected);
@@ -738,6 +745,7 @@ async fn snapshot_install_replaces_all_tables_and_preserves_legacy_wire_format()
     let built = store.build_snapshot().await.unwrap();
     assert_eq!(snapshot_bytes(built.snapshot).await, bytes);
     assert_eq!(built.meta.last_log_id, old.last_applied);
+    store.close().await.unwrap();
     drop(store);
     let mut reopened = Store::open(2, directory.path().into()).await.unwrap();
     assert_eq!(reopened.snapshot().await, old.application);
@@ -768,10 +776,10 @@ async fn snapshot_install_replaces_all_tables_and_preserves_legacy_wire_format()
 }
 
 #[tokio::test]
-async fn cancellation_after_disk_dispatch_still_publishes_durable_delta() {
+async fn apply_publishes_before_its_write_and_cancelled_drains_still_persist_it() {
     let directory = tempfile::tempdir().unwrap();
-    let store = Store::open(1, directory.path().into()).await.unwrap();
-    // Hold redb's writer lock so the apply is dispatched but cannot commit.
+    let mut store = Store::open(1, directory.path().into()).await.unwrap();
+    // Hold redb's writer lock: the apply must still complete and publish.
     let db = store.inner.db.clone();
     let (ready, ready_rx) = tokio::sync::oneshot::channel();
     let (release, release_rx) = std::sync::mpsc::channel();
@@ -782,40 +790,31 @@ async fn cancellation_after_disk_dispatch_still_publishes_durable_delta() {
         transaction.abort().unwrap();
     });
     ready_rx.await.unwrap();
-    let mut applying = store.clone();
-    let task = tokio::spawn(async move {
-        applying
-            .apply([entry(
-                1,
-                command("cancelled-caller", 0, &[("durable", json!(7))], &[]),
-            )])
-            .await
-    });
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while store.inner.io.try_lock().is_ok() {
-            tokio::task::yield_now().await;
-        }
-    })
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        store.apply([entry(
+            1,
+            command("published", 0, &[("durable", json!(7))], &[]),
+        )]),
+    )
     .await
+    .expect("apply waits for no disk write")
     .unwrap();
-    assert!(
-        store.inner.state.try_read().is_err(),
-        "cache stays exclusively locked through commit"
-    );
-    task.abort();
-    assert!(task.await.unwrap_err().is_cancelled());
-    release.send(()).unwrap();
-    blocker.await.unwrap();
-    let expected = tokio::time::timeout(Duration::from_secs(2), store.snapshot())
-        .await
-        .unwrap();
+    let expected = store.snapshot().await;
     assert_eq!(expected.revision, 1);
     assert_eq!(expected.data["durable"], json!(7));
-    assert_eq!(expected.requests["cancelled-caller"].revision, 1);
+    assert_eq!(expected.requests["published"].revision, 1);
     assert_eq!(store.snapshot_for(None).await.data, expected.data);
-    // Wait for the blocking worker's owned I/O guard as well as the state lock
-    // before closing the database file for a recovery check.
-    drop(store.inner.io.lock().await);
+    assert_eq!(store.applied_state().await.unwrap().0, Some(log_id(1)));
+    // The queued write waits for the disk; abandoning a drain cannot drop it.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), store.inner.persistence.drain())
+            .await
+            .is_err()
+    );
+    release.send(()).unwrap();
+    blocker.await.unwrap();
+    store.close().await.unwrap();
     drop(store);
     let mut reopened = Store::open(1, directory.path().into()).await.unwrap();
     assert_eq!(reopened.snapshot().await, expected);
@@ -823,13 +822,14 @@ async fn cancellation_after_disk_dispatch_still_publishes_durable_delta() {
 }
 
 #[tokio::test]
-async fn write_error_rolls_back_changed_records_and_applied_metadata() {
+async fn write_error_rolls_back_changed_records_and_fails_later_applies() {
     let directory = tempfile::tempdir().unwrap();
     let mut store = Store::open(1, directory.path().into()).await.unwrap();
     store
         .apply([entry(1, command("original", 0, &[("keep", json!(1))], &[]))])
         .await
         .unwrap();
+    store.inner.persistence.drain().await.unwrap();
     let original = store.inner.state.read().await.clone();
     // A mismatched table type injects an error after DATA writes have been
     // staged, before metadata/receipts and commit. redb must roll them all back.
@@ -842,16 +842,13 @@ async fn write_error_rolls_back_changed_records_and_applied_metadata() {
         transaction.commit().unwrap();
     }
     let update = entry(2, command("retry", 1, &[("bad", json!(2))], &["keep"]));
-    assert!(store.apply([update.clone()]).await.is_err());
-    assert_eq!(store.snapshot().await, original.application);
-    assert_eq!(
-        store.snapshot_for(None).await.data,
-        original.application.data
-    );
-    assert_eq!(
-        store.applied_state().await.unwrap().0,
-        original.last_applied
-    );
+    // The log already made the entry durable: its state publishes, and the
+    // failed projection stops this store before any later delta is written.
+    store.apply([update.clone()]).await.unwrap();
+    assert_eq!(store.snapshot().await.revision, 2);
+    assert!(store.inner.persistence.drain().await.is_err());
+    let later = entry(3, command("later", 2, &[("later", json!(3))], &[]));
+    assert!(store.apply([later]).await.is_err());
     {
         let transaction = store.inner.db.begin_read().unwrap();
         let table = transaction.open_table(DATA).unwrap();
@@ -870,10 +867,17 @@ async fn write_error_rolls_back_changed_records_and_applied_metadata() {
         replace_application(&transaction, &original).unwrap();
         transaction.commit().unwrap();
     }
-    store.apply([update]).await.unwrap();
-    let expected = store.snapshot().await;
-    assert_eq!(expected.revision, 2);
+    assert!(store.close().await.is_err());
     drop(store);
+    // Recovery restarts from the last written state and replays the log.
+    let mut reopened = Store::open(1, directory.path().into()).await.unwrap();
+    assert_eq!(reopened.snapshot().await, original.application);
+    assert_eq!(reopened.applied_state().await.unwrap().0, original.last_applied);
+    reopened.apply([update]).await.unwrap();
+    let expected = reopened.snapshot().await;
+    assert_eq!(expected.revision, 2);
+    reopened.close().await.unwrap();
+    drop(reopened);
     let reopened = Store::open(1, directory.path().into()).await.unwrap();
     assert_eq!(reopened.snapshot().await, expected);
 }
@@ -887,6 +891,7 @@ async fn incomplete_v2_layout_is_rejected_without_resetting_application_state() 
         transaction.delete_table(DATA).unwrap();
         transaction.commit().unwrap();
     }
+    store.close().await.unwrap();
     drop(store);
     let result = Store::open(1, directory.path().into()).await;
     assert!(
@@ -1075,6 +1080,7 @@ async fn concurrent_log_reads_remain_coherent_through_append_and_truncate() {
     for reader in readers {
         assert!(reader.await.unwrap() >= 10);
     }
+    store.close().await.unwrap();
     drop(store);
     let mut reopened = Store::open(1, directory.path().into()).await.unwrap();
     let entries = reopened.try_get_log_entries(1..9).await.unwrap();
@@ -1156,6 +1162,9 @@ fn store_with_database(directory: &std::path::Path, db: Database) -> Store {
             snapshot_accounting: super::super::snapshot_policy::Accounting::new(0, None, None),
             published: Arc::new(PublishedLock::new(Published::from(&state))),
             state: Arc::new(RwLock::new(state)),
+            lazy: Default::default(),
+            persistence: Default::default(),
+            holders: Default::default(),
         }),
         raft_lifetime: None,
     }
@@ -1196,6 +1205,7 @@ async fn graph_metadata_migrates_supported_layouts_atomically_and_fences_downgra
             .await
             .unwrap();
         let expected = store.snapshot().await;
+        store.inner.persistence.drain().await.unwrap();
         {
             let transaction = store.inner.db.begin_write().unwrap();
             let mut meta = transaction.open_table(META).unwrap();
@@ -1206,6 +1216,7 @@ async fn graph_metadata_migrates_supported_layouts_atomically_and_fences_downgra
             drop(meta);
             transaction.commit().unwrap();
         }
+        store.close().await.unwrap();
         drop(store);
         {
             let db = Database::create(directory.path().join("flower.redb")).unwrap();
@@ -1230,6 +1241,7 @@ async fn graph_metadata_migrates_supported_layouts_atomically_and_fences_downgra
                 assert_eq!(serde_json::from_slice::<Value>(retired.value()).unwrap()["storage_format"], 4);
             }
         }
+        store.close().await.unwrap();
         drop(store);
         let store = Store::open(1, directory.path().into()).await.unwrap();
         assert_eq!(store.snapshot().await, expected);
@@ -1251,6 +1263,7 @@ async fn retired_graph_metadata_cannot_fall_back_to_stale_supported_layout() {
         drop(meta);
         transaction.commit().unwrap();
     }
+    store.close().await.unwrap();
     drop(store);
     assert!(Store::open(1, directory.path().into()).await.is_err());
 }
@@ -1290,6 +1303,7 @@ async fn raft_storage_drain_waits_for_clones_and_cancelled_blocking_io_only() {
         "drain closes after the final Raft worker, even with ordinary router handles alive"
     );
     drop(ordinary_router);
+    store.close().await.unwrap();
     drop(store);
     Store::open(1, directory.path().into()).await.unwrap();
 }
@@ -1302,6 +1316,7 @@ async fn log_reads_progress_during_fsync_but_append_ack_waits_for_durability() {
         .blocking_append([entry(1, command("initial", 0, &[], &[]))])
         .await
         .unwrap();
+    store.close().await.unwrap();
     drop(store);
     let (mut store, pause) = open_pausing_store(directory.path());
     let (ready, ready_rx) = tokio::sync::oneshot::channel();
@@ -1340,6 +1355,7 @@ async fn log_reads_progress_during_fsync_but_append_ack_waits_for_durability() {
         "replication must see pending logs without treating them as durable"
     );
     assert_eq!(store.try_get_log_entries(1..3).await.unwrap().len(), 2);
+    store.close().await.unwrap();
     drop(store);
     let mut reopened = Store::open(1, directory.path().into()).await.unwrap();
     assert_eq!(reopened.try_get_log_entries(1..3).await.unwrap().len(), 2);
@@ -1389,6 +1405,7 @@ async fn published_readers_progress_during_apply_without_exposing_staged_records
         .apply([entry(1, command("initial", 0, &[("value", json!(1))], &[]))])
         .await
         .unwrap();
+    store.close().await.unwrap();
     drop(store);
     let store = Store::open(1, directory.path().into()).await.unwrap();
     let initial = store.snapshot_for(None).await;
@@ -1398,30 +1415,14 @@ async fn published_readers_progress_during_apply_without_exposing_staged_records
         applied: log_id(2),
         revision: 2,
     };
-    let (ready, ready_rx) = tokio::sync::oneshot::channel();
-    let (release, release_rx) = std::sync::mpsc::channel();
-    // Apply no longer fsyncs. Hold redb's writer so its detached disk worker
-    // pauses before the atomic projection transaction can commit instead.
-    let db = store.inner.db.clone();
-    let blocked = tokio::task::spawn_blocking(move || {
-        let transaction = db.begin_write().unwrap();
-        ready.send(()).unwrap();
-        release_rx.recv().unwrap();
-        transaction.abort().unwrap();
-    });
-    ready_rx.await.unwrap();
+    // Hold the state lock as an apply does while it computes and publishes.
+    let held = store.inner.state.clone().write_owned().await;
     let mut applying = store.clone();
     let writer = tokio::spawn(async move {
         applying
             .apply([entry(2, command("next", 1, &[("value", json!(2))], &[]))])
             .await
     });
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while store.inner.state.try_read().is_ok() || store.inner.io.try_lock().is_ok() {
-            tokio::task::yield_now().await;
-        }
-    }).await.unwrap();
-    assert!(store.inner.state.try_read().is_err());
     assert_eq!(store.read_fence().unwrap().applied, initial_fence.applied);
     assert!(store.snapshot_after_fence(&next_fence).unwrap().is_none());
     let before = tokio::time::timeout(Duration::from_secs(2), async {
@@ -1434,18 +1435,13 @@ async fn published_readers_progress_during_apply_without_exposing_staged_records
         )
     })
     .await;
-    let acknowledged_before_commit = writer.is_finished();
-    // Cancel the awaiting caller too: its detached disk task must still finish
-    // atomic publication so records, receipts and metadata remain together.
-    writer.abort();
-    release.send(()).unwrap();
-    blocked.await.unwrap();
-    let cancelled = writer.await.unwrap_err().is_cancelled();
+    let acknowledged_before_publication = writer.is_finished();
+    drop(held);
+    writer.await.unwrap().unwrap();
     let durable = tokio::time::timeout(Duration::from_secs(2), store.snapshot())
         .await
         .unwrap();
-    assert!(cancelled);
-    assert!(!acknowledged_before_commit);
+    assert!(!acknowledged_before_publication);
     let (before, before_writer, before_receipt, before_many) =
         before.expect("published reader waited behind application transaction");
     assert_eq!(before.revision, initial.revision);
@@ -1479,7 +1475,7 @@ async fn published_readers_progress_during_apply_without_exposing_staged_records
         published_writer.requests.get_shared("initial").unwrap(),
     ));
     assert_eq!(initial.data["value"], 1);
-    drop(store.inner.io.lock().await);
+    store.close().await.unwrap();
     drop(store);
     let reopened = Store::open(1, directory.path().into()).await.unwrap();
     assert_eq!(reopened.snapshot().await, durable);
@@ -1498,6 +1494,7 @@ async fn cancelled_snapshot_install_publishes_data_and_receipts_together_after_f
         )])
         .await
         .unwrap();
+    store.close().await.unwrap();
     drop(store);
     let (store, pause) = open_pausing_store(directory.path());
     let initial = store.snapshot_for_writer().await;
@@ -1550,6 +1547,7 @@ async fn cancelled_snapshot_install_publishes_data_and_receipts_together_after_f
     assert!(!durable.requests.contains_key("obsolete"));
     assert_eq!(durable.requests["old-b"].revision, durable.revision);
     drop(store.inner.io.lock().await);
+    store.close().await.unwrap();
     drop(store);
     let reopened = Store::open(1, directory.path().into()).await.unwrap();
     assert_eq!(reopened.snapshot_for_writer().await, expected);
@@ -1620,6 +1618,7 @@ async fn detached_snapshot_capture_allows_apply_and_never_regresses_newer_builde
         store.get_current_snapshot().await.unwrap().unwrap().meta,
         meta
     );
+    store.close().await.unwrap();
     drop(store);
     let reopened = Store::open(1, directory.path().into()).await.unwrap();
     assert_eq!(reopened.snapshot().await.data["value"], json!(999));
@@ -1652,6 +1651,7 @@ async fn snapshot_byte_accounting_captures_only_published_prefix_and_recovers_fr
         store.snapshot_accounting().metrics(&limits)["unsnapshottedLogBytes"],
         expected
     );
+    store.close().await.unwrap();
     drop(store);
     let mut reopened = Store::open(1, directory.path().into()).await.unwrap();
     assert_eq!(
@@ -1763,6 +1763,7 @@ async fn metadata_checkpoints_recover_after_power_loss_before_and_after_log_prun
     let second = entry(2, command("second", 1, &[("value", json!("new"))], &[]));
     store.blocking_append([second.clone()]).await.unwrap();
     store.apply([second]).await.unwrap();
+    store.inner.persistence.drain().await.unwrap();
     let unflushed_apply = durable.lock().unwrap().clone();
     store.save_vote(&Vote::new_committed(3, 1)).await.unwrap();
     let advanced_projection = durable.lock().unwrap().clone();
@@ -1786,6 +1787,7 @@ async fn metadata_checkpoints_recover_after_power_loss_before_and_after_log_prun
         serde_json::from_slice(&snapshot_bytes(snapshot.snapshot).await).unwrap();
     assert_eq!(old.last_applied, Some(log_id(1)));
     assert_eq!(old.application.requests.len(), 1);
+    store.close().await.unwrap();
     drop(store);
 
     for (image, expected_applied, log_count) in [
@@ -1830,6 +1832,7 @@ async fn failed_checkpoint_flush_cannot_publish_an_image_or_retire_recovery_logs
     assert!(store.build_snapshot().await.is_err());
     assert!(store.inner.current_snapshot.read().unwrap().is_none());
     let image = durable.lock().unwrap().clone();
+    store.close().await.unwrap();
     drop(store);
     let recovered_dir = tempfile::tempdir().unwrap();
     std::fs::write(recovered_dir.path().join("flower.redb"), image).unwrap();
@@ -1867,6 +1870,7 @@ async fn cancelled_checkpoint_waits_for_flush_and_publishes_only_after_success()
     store.purge(log_id(1)).await.unwrap();
     assert_metadata_only_snapshot(&store);
     assert!(store.inner.current_snapshot.read().unwrap().is_some());
+    store.close().await.unwrap();
     drop(store);
     let mut reopened = Store::open(1, directory.path().into()).await.unwrap();
     assert_eq!(reopened.snapshot().await.data["value"], json!(1));
@@ -1899,6 +1903,7 @@ async fn checkpoint_ahead_of_durable_application_state_fails_closed_on_restart()
         )
         .unwrap();
     transaction.commit().unwrap();
+    store.close().await.unwrap();
     drop(store);
     assert!(Store::open(1, directory.path().into()).await.is_err());
 }

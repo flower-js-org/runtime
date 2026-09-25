@@ -140,6 +140,7 @@ async fn precopy_preserves_mutations_receipt_gc_and_durable_base_through_restart
     ));
     // A retry never moves the base forward to include later writes.
     invoke(&mut source, &mut index, capture).await;
+    source.close().await.unwrap();
     drop(source);
     let mut source = Store::open(1, directory.path().into()).await.unwrap();
     assert_eq!(source.partition_state("shop").unwrap().base, base.base);
@@ -205,6 +206,7 @@ async fn precopy_preserves_mutations_receipt_gc_and_durable_base_through_restart
     )
     .await;
     let raft_image = destination.build_snapshot().await.unwrap();
+    destination.close().await.unwrap();
     drop(destination);
     let mut destination = Store::open(2, target_dir.path().into()).await.unwrap();
     assert_eq!(
@@ -253,6 +255,7 @@ async fn precopy_preserves_mutations_receipt_gc_and_durable_base_through_restart
         },
     )
     .await;
+    source.close().await.unwrap();
     drop(source);
     let source = Store::open(1, directory.path().into()).await.unwrap();
     assert!(source.partition_state("shop").unwrap().base.is_none());

@@ -62,6 +62,7 @@ async fn read_fences_bind_publication_to_log_identity_and_revision() {
     // for the fence's log identity.
     assert!(store.snapshot_after_fence(&different_log).is_err());
     let final_fence = store.read_fence().unwrap();
+    store.close().await.unwrap();
     drop(store);
     let reopened = Store::open(1, directory.path().into()).await.unwrap();
     assert_eq!(reopened.read_fence().unwrap().applied, final_fence.applied);

@@ -157,6 +157,7 @@ async fn malformed_or_stale_compact_batches_leave_no_data_or_receipts() {
         }
         assert_eq!(store.snapshot().await, original);
     }
+    store.close().await.unwrap();
     drop(store);
     let reopened = Store::open(1, directory.path().into()).await.unwrap();
     assert_eq!(reopened.snapshot().await, original);

@@ -108,6 +108,11 @@ fn projection_crash_child() {
             assert!(matches!(&results[0], ApplyResult::Batch(results) if results.len() == 2 && results.iter().all(|result| matches!(result,ApplyResult::Committed(_)))));
             assert!(results[1..].iter().all(|result| matches!(result, ApplyResult::Committed(_) | ApplyResult::Partition(_))));
             assert_eq!(store.snapshot().await.requests[if confirmed {"confirmed"} else {"root"}].result, json!({"written":if confirmed {98} else {16}}));
+            if matches!(mode.as_str(), "append" | "vote") {
+                // Write the queued no-sync projection; the Immediate commit
+                // below must then make it durable.
+                store.persisted().await.unwrap();
+            }
             match mode.as_str() {
                 "deferred" | "confirmed" => {},
                 "append" => store.blocking_append([Entry { log_id: LogId::new(CommittedLeaderId::new(1,1), 5), payload: EntryPayload::Blank }]).await.unwrap(),
@@ -366,6 +371,7 @@ async fn deferred_projection_recovers_data_receipts_and_partitions_from_durable_
             .index,
         4
     );
+    store.close().await.unwrap();
     drop(store);
     let consensus = Consensus::open(
         1,
@@ -419,6 +425,7 @@ async fn acknowledged_raft_write_survives_crash_before_projection_flush() {
     assert!(
         store.get_log_state().await.unwrap().last_log_id > store.applied_state().await.unwrap().0
     );
+    store.close().await.unwrap();
     drop(store);
     let consensus = Consensus::open(
         1,

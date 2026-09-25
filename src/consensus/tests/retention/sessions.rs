@@ -157,6 +157,7 @@ async fn retention_session_contiguous_ack_rejects_gaps_and_fences_queued_replays
         3
     );
     let snapshot = store.build_snapshot().await.unwrap();
+    store.close().await.unwrap();
     drop(store);
     let mut store = Store::open(1, directory.path().into()).await.unwrap();
     assert_eq!(store.snapshot().await, expected);

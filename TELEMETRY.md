@@ -85,8 +85,12 @@ deadline, and a failed preparer wakes waiters to retry with their own limits.
 Ordinary prepared-image hits do not emit these cold-stage measurements.
 
 Storage `commit` measures redb transaction commit. `durability=immediate`
-includes its durability flush; `durability=none` identifies deferred application
-checkpoints and must not be reported as an fsync. `build_snapshot` now measures
+includes its durability flush; `durability=none` identifies deferred commits
+and must not be reported as an fsync. `apply` publishes applied state in memory
+and no longer commits; `persist` writes queued applied states in the
+background. A leader of three or more voters records its own log appends as
+`leader_append` and makes them durable in `leader_flush`, one immediate commit
+per grace period or interval; followers still flush every `append`. `build_snapshot` now measures
 capture plus a metadata-only checkpoint and immediate flush; it does not encode
 or rewrite the complete state. `snapshot_transfer`, with `durability=none`,
 measures lazy JSON encoding into a temporary file when a peer reads or seeks a

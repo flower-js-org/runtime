@@ -24,6 +24,7 @@ async fn fenced_commands_check_the_full_log_leader_and_preserve_rejection_across
     assert!(store.snapshot().await.data.is_empty());
     assert!(store.snapshot().await.requests.is_empty());
     assert_eq!(store.applied_state().await.unwrap().0, Some(stale.log_id));
+    store.close().await.unwrap();
     drop(store);
     let mut store = Store::open(1, directory.path().into()).await.unwrap();
     assert_eq!(store.snapshot().await.revision, 0);
@@ -36,6 +37,7 @@ async fn fenced_commands_check_the_full_log_leader_and_preserve_rejection_across
     assert_eq!(store.snapshot().await.revision, 0);
     assert!(store.snapshot().await.data.is_empty());
     assert!(store.snapshot().await.requests.is_empty());
+    store.close().await.unwrap();
     drop(store);
     let mut store = Store::open(1, directory.path().into()).await.unwrap();
     assert_eq!(store.snapshot().await.revision, 0);

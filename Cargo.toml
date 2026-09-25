@@ -55,3 +55,7 @@ libc = "0.2"
 
 [profile.release]
 lto = "thin"
+
+# The leader's own log append does not block replication. See vendor/openraft/FLOWER.md.
+[patch.crates-io]
+openraft = { path = "vendor/openraft" }

@@ -104,6 +104,7 @@ async fn partition_graph_cleanup_remains_deleted_after_restart() {
     cleanup.deletes = vec![cell.into(), root.into()];
     assert!(matches!(apply(&mut store, &mut index, scoped("graph", 1, cleanup)).await,
         ApplyResult::Committed(_)));
+    store.close().await.unwrap();
     drop(store);
     let store = Store::open(1, directory.path().into()).await.unwrap();
     let snapshot = store.partition_snapshot(&binding("graph", 1), None, true).unwrap();
@@ -226,6 +227,7 @@ async fn partitions_isolate_revision_receipts_keys_and_ownership_before_replay()
         .await,
         ApplyResult::Partition(_)
     ));
+    store.close().await.unwrap();
     drop(store);
     let store = Store::open(1, directory.path().into()).await.unwrap();
     assert_eq!(
@@ -326,6 +328,7 @@ async fn partition_import_resumes_after_restart_preserves_entire_state_and_survi
         control(chunk(0, chunks[0].clone())),
     )
     .await;
+    destination.close().await.unwrap();
     drop(destination);
     let mut destination = Store::open(1, destination_dir.path().into()).await.unwrap();
     assert_eq!(
@@ -421,6 +424,7 @@ async fn partition_import_resumes_after_restart_preserves_entire_state_and_survi
             .unwrap(),
         expected
     );
+    restored.close().await.unwrap();
     drop(restored);
     let restored = Store::open(1, restored_dir.path().into()).await.unwrap();
     assert_eq!(

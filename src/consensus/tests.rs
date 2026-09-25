@@ -169,6 +169,7 @@ async fn grouped_commits_reject_atomically_and_keep_durable_individual_receipts(
     store.apply([entry(5, commit("e", 3, 5))]).await.unwrap();
     let expected = store.snapshot().await;
     let snapshot = store.build_snapshot().await.unwrap();
+    store.close().await.unwrap();
     drop(store);
 
     let reopened = Store::open(1, directory.path().into()).await.unwrap();
@@ -203,6 +204,7 @@ async fn durable_applied_state_recovers_without_a_separate_committed_marker() {
     assert_eq!(store.read_committed().await.unwrap(), None);
     store.apply([applied.clone()]).await.unwrap();
     let expected = store.snapshot().await;
+    store.close().await.unwrap();
     drop(store);
 
     let mut reopened = Store::open(1, directory.path().into()).await.unwrap();
@@ -231,6 +233,7 @@ async fn legacy_committed_markers_remain_readable_and_cannot_regress_applied_sta
     let second = entry(2, commit("second", 1, 20));
     store.apply([first.clone(), second.clone()]).await.unwrap();
     let expected = store.snapshot().await;
+    store.close().await.unwrap();
     drop(store);
 
     // Reproduce the metadata format of a database created by an earlier binary.
@@ -274,6 +277,7 @@ async fn legacy_committed_marker_replays_a_durable_log_not_yet_applied_before_re
     store.apply([first.clone()]).await.unwrap();
     store.build_snapshot().await.unwrap();
     store.purge(first.log_id).await.unwrap();
+    store.close().await.unwrap();
     drop(store);
 
     // An old binary could crash after flushing its commit marker, before apply.
@@ -383,6 +387,7 @@ async fn internal_maintenance_preserves_cas_and_client_receipts_across_restart()
     assert_eq!(expected.data["clock"], json!(1000));
     assert_eq!(expected.data["source:[\"counter\",\"one\"]"], json!(40));
     let snapshot = store.build_snapshot().await.unwrap();
+    store.close().await.unwrap();
     drop(store);
 
     let mut reopened = Store::open(1, directory.path().into()).await.unwrap();
@@ -445,6 +450,7 @@ async fn durable_state_receipts_vote_and_snapshot_install() {
     assert_eq!(expected.data["source:[\"counter\",\"one\"]"], json!(10));
     assert_eq!(expected.requests["a"].result, json!({"written": 10}));
     assert!(!expected.requests.contains_key("stale"));
+    store.close().await.unwrap();
     drop(store);
 
     let mut reopened = Store::open(1, first.path().into()).await.unwrap();
@@ -461,6 +467,7 @@ async fn durable_state_receipts_vote_and_snapshot_install() {
         .install_snapshot(&snapshot.meta, snapshot.snapshot)
         .await
         .unwrap();
+    destination.close().await.unwrap();
     drop(destination);
     let mut destination = Store::open(2, second.path().into()).await.unwrap();
     assert_eq!(destination.snapshot().await, expected);
@@ -469,6 +476,7 @@ async fn durable_state_receipts_vote_and_snapshot_install() {
         4
     );
     assert!(destination.get_current_snapshot().await.unwrap().is_some());
+    reopened.close().await.unwrap();
     drop(reopened);
     let wrong_id = Store::open(99, first.path().into()).await.err().unwrap();
     assert!(wrong_id.to_string().contains("belongs to node 1"));
@@ -1101,6 +1109,55 @@ async fn three_node_group_commit_replays_after_failover_and_full_restart() {
         .unwrap();
     assert!(result.duplicate);
     assert_eq!(result.revision, 1);
+    for node in &mut nodes {
+        node.stop().await;
+    }
+}
+
+/// A leader of three voters commits on its followers' flushes and defers its
+/// own, but still flushes in time to commit while one follower is down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn three_node_leader_defers_its_own_flush_but_keeps_quorum_with_one_follower() {
+    let mut nodes = vec![Node::new(1).await, Node::new(2).await, Node::new(3).await];
+    nodes[0]
+        .raft()
+        .initialize(
+            nodes
+                .iter()
+                .map(|node| (node.id, node.address.clone()))
+                .collect(),
+        )
+        .await
+        .unwrap();
+    let first = leader(&nodes).await;
+    nodes[first].raft().commit(commit("a", 0, 1)).await.unwrap();
+    assert!(nodes[first].raft().store.deferred_leader_appends() > 0);
+    let down = (first + 1) % nodes.len();
+    nodes[down].stop().await;
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        nodes[first].raft().commit(commit("b", 1, 2)),
+    )
+    .await
+    .expect("leader flushed its own append to complete the quorum")
+    .unwrap();
+    assert_eq!(result.revision, 2);
+    // Graceful shutdown makes the leader's deferred appends durable.
+    nodes[first].stop().await;
+    nodes[first].restart().await;
+    nodes[down].restart().await;
+    for node in &nodes {
+        wait_revision(node, 2).await;
+    }
+    let restored = leader(&nodes).await;
+    assert!(
+        nodes[restored]
+            .raft()
+            .commit(commit("a", 0, 1))
+            .await
+            .unwrap()
+            .duplicate
+    );
     for node in &mut nodes {
         node.stop().await;
     }

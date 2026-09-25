@@ -30,6 +30,7 @@ impl From<&PartitionState> for Metadata {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct PartitionWrite {
     pub(super) state: PartitionState,
     replace: bool,

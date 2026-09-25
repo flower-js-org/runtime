@@ -90,6 +90,7 @@ async fn retention_floor_precedes_receipt_lookup_and_survives_gc_snapshot_restar
     assert!(!expected.requests.contains_key(&old_id));
     policy::validate_snapshot(&expected).unwrap();
     let snapshot = store.build_snapshot().await.unwrap();
+    store.close().await.unwrap();
     drop(store);
     let mut reopened = Store::open(1, directory.path().into()).await.unwrap();
     assert_eq!(reopened.snapshot().await, expected);
@@ -434,6 +435,7 @@ async fn retention_partition_migration_preserves_expired_identity_after_physical
             .unwrap();
         assert!(matches!(result[0], ApplyResult::Partition(_)), "{result:?}");
     }
+    destination.close().await.unwrap();
     drop(destination);
     let mut destination = Store::open(2, destination_dir.path().into()).await.unwrap();
     let moved = PartitionBinding {
@@ -485,6 +487,7 @@ async fn retention_partition_migration_preserves_expired_identity_after_physical
         )])
         .await
         .unwrap();
+    destination.close().await.unwrap();
     drop(destination);
     let mut destination = Store::open(2, destination_dir.path().into()).await.unwrap();
     let rejected_replay = destination

@@ -1,8 +1,14 @@
-//! Redb storage: every acknowledgement follows an immediate-durability commit.
-//! Disk work uses Tokio's blocking pool so fsync never blocks Raft heartbeats.
+//! Redb storage: every acknowledgement follows immediate-durability commits on
+//! a quorum. Votes, follower appends, snapshots and purges flush before they
+//! complete. A leader of at least three voters defers its own log flush
+//! (`lazy_flush`), and applied state reaches redb behind its in-memory
+//! publication (`persistence`). Disk work uses Tokio's blocking pool so fsync
+//! never blocks Raft heartbeats.
 
 mod profile;
 use profile::{StoragePhase, StorageTrace};
+mod lazy_flush;
+mod persistence;
 
 mod partition_storage;
 use partition_storage::*;
@@ -212,22 +218,57 @@ struct Inner {
     // No await, I/O or user code runs under this lock, only a root-pointer swap
     // or clone. Complete retry history shares the same published revision.
     published: Arc<PublishedLock<Published>>,
+    // The current leader's own appends whose flush is deferred.
+    lazy: Arc<lazy_flush::LazyFlush>,
+    // Applied states published in memory but not yet written to redb.
+    persistence: Arc<persistence::Persistence>,
+    // Background writers currently holding this storage.
+    holders: Arc<persistence::Holders>,
 }
 
 #[derive(Clone)]
 pub(super) struct Store {
     inner: Arc<Inner>,
-    // Only handles passed into Raft carry this sender. Ordinary Consensus and
+    // Only handles passed into Raft carry this lifetime. Ordinary Consensus and
     // HTTP router clones must not delay shutdown. The receiver closes when the
-    // final Raft log reader/state-machine/snapshot worker releases storage.
-    raft_lifetime: Option<Arc<watch::Sender<()>>>,
+    // final Raft log reader/state-machine/snapshot worker releases storage and
+    // the store has closed.
+    raft_lifetime: Option<Arc<RaftLifetime>>,
+}
+
+/// Once Raft releases its last storage handle, close the store before
+/// signaling drain, so a waiting shutdown finds every applied state written
+/// and the leader's deferred appends durable.
+struct RaftLifetime {
+    inner: Arc<Inner>,
+    drained: Option<watch::Sender<()>>,
+}
+
+impl Drop for RaftLifetime {
+    fn drop(&mut self) {
+        let drained = self.drained.take();
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let store = Store {
+            inner: self.inner.clone(),
+            raft_lifetime: None,
+        };
+        runtime.spawn(async move {
+            if let Err(error) = store.close().await {
+                tracing::error!(target: "flower::storage", error = %format!("{error:#}"), "Raft storage closed without persisting applied state; it replays from the log");
+            }
+            drop(store);
+            drop(drained);
+        });
+    }
 }
 
 // Field order matters: release the database reference before signaling drain,
 // including during unwinding. Cancellation cannot stop a spawn_blocking task.
 struct DatabaseWork {
     db: Arc<Database>,
-    _raft_lifetime: Option<Arc<watch::Sender<()>>>,
+    _raft_lifetime: Option<Arc<RaftLifetime>>,
 }
 
 impl DatabaseWork {
@@ -305,7 +346,9 @@ impl Store {
         })
         .await
         .context("open database worker")??;
-        Ok(Self {
+        let lazy = Arc::new(lazy_flush::LazyFlush::default());
+        lazy.update_membership(&state.membership);
+        let store = Self {
             inner: Arc::new(Inner {
                 id,
                 db: Arc::new(db),
@@ -317,9 +360,37 @@ impl Store {
                 snapshot_accounting,
                 published: Arc::new(PublishedLock::new(Published::from(&state))),
                 state: Arc::new(RwLock::new(state)),
+                lazy: lazy.clone(),
+                persistence: Arc::default(),
+                holders: Arc::default(),
             }),
             raft_lifetime: None,
-        })
+        };
+        lazy_flush::spawn(Arc::downgrade(&store.inner), store.inner.holders.clone(), lazy);
+        Ok(store)
+    }
+
+    /// After Raft has stopped: write every applied state, make the leader's
+    /// held appends durable, and wait until no background task holds the
+    /// database, so it can be reopened at once. Raft's storage lifetime runs
+    /// this before signaling drain.
+    pub(super) async fn close(&self) -> anyhow::Result<()> {
+        let persisted = self.inner.persistence.drain().await;
+        lazy_flush::flush(self, &self.inner.lazy).await;
+        self.inner.holders.idle().await;
+        persisted
+    }
+
+    /// Leader appends that did not wait for their own flush.
+    #[cfg(test)]
+    pub(super) fn deferred_leader_appends(&self) -> u64 {
+        self.inner.lazy.deferred()
+    }
+
+    /// Wait until every applied state so far has been written.
+    #[cfg(test)]
+    pub(super) async fn persisted(&self) -> anyhow::Result<()> {
+        self.inner.persistence.drain().await
     }
 
     pub(super) fn raft_storage(&self) -> (Self, watch::Receiver<()>) {
@@ -327,7 +398,10 @@ impl Store {
         (
             Self {
                 inner: self.inner.clone(),
-                raft_lifetime: Some(Arc::new(sender)),
+                raft_lifetime: Some(Arc::new(RaftLifetime {
+                    inner: self.inner.clone(),
+                    drained: Some(sender),
+                })),
             },
             drained,
         )
@@ -576,8 +650,13 @@ impl Store {
     async fn start_append(
         &self,
         entries: Vec<Entry<TypeConfig>>,
+        durability: Durability,
     ) -> tokio::task::JoinHandle<anyhow::Result<()>> {
-        let mut profile = StorageTrace::new(self.inner.id, "append");
+        let deferred = matches!(durability, Durability::None);
+        let mut profile = StorageTrace::new(
+            self.inner.id,
+            if deferred { "leader_append" } else { "append" },
+        );
         profile.entries(&entries);
         profile.phase(StoragePhase::Prepare);
         // Acquire before publishing or spawning: appends, votes, truncation,
@@ -599,7 +678,7 @@ impl Store {
                 profile.phase(StoragePhase::BlockingQueue);
                 let result = (|| {
                     let mut transaction = db.begin_write()?;
-                    transaction.set_durability(Durability::Immediate)?;
+                    transaction.set_durability(durability)?;
                     profile.phase(StoragePhase::Begin);
                     {
                         let mut table = transaction.open_table(LOGS)?;
@@ -1066,11 +1145,14 @@ impl RaftLogStorage<TypeConfig> for Store {
 
     async fn save_committed(
         &mut self,
-        _committed: Option<LogId<u64>>,
+        committed: Option<LogId<u64>>,
     ) -> Result<(), StorageError<u64>> {
+        // Only the leader holds deferred appends; see lazy_flush.
+        self.inner.lazy.committed(committed);
         // Committed entries are already durable in the quorum's Raft logs.
-        // apply() materializes them without a second flush; the next Immediate
-        // transaction persists the entire redb state, including last_applied.
+        // apply() materializes them without a second flush; once its queued
+        // write commits, the next Immediate transaction persists the entire
+        // redb state, including last_applied.
         // Startup floors committed to that atomic durable state and Raft
         // re-establishes any newer committed prefix. Consensus gates local
         // application reads until a fresh recovery fence when logs are ahead.
@@ -1096,7 +1178,27 @@ impl RaftLogStorage<TypeConfig> for Store {
         I: IntoIterator<Item = Entry<TypeConfig>> + OptionalSend,
         I::IntoIter: OptionalSend,
     {
-        let worker = self.start_append(entries.into_iter().collect()).await;
+        let entries: Vec<_> = entries.into_iter().collect();
+        if self.inner.lazy.applies(&callback)
+            && let Some(last_index) = entries.last().map(|entry| entry.log_id.index)
+        {
+            // The leader's own append: visible now, durable at a later flush.
+            let worker = self.start_append(entries, Durability::None).await;
+            let lazy = self.inner.lazy.clone();
+            tokio::spawn(async move {
+                match worker
+                    .await
+                    .context("Raft append worker")
+                    .and_then(|result| result)
+                {
+                    Ok(()) => lazy.hold(last_index, callback),
+                    Err(error) => callback
+                        .log_io_completed(Err(std::io::Error::other(error.to_string()))),
+                }
+            });
+            return Ok(());
+        }
+        let worker = self.start_append(entries, Durability::Immediate).await;
         // Replication can start once entries are readable. Raft's local durable
         // position advances only on this callback after Immediate commit. Keep
         // observing the worker on caller cancellation; panic/storage errors
@@ -1141,6 +1243,13 @@ impl RaftLogStorage<TypeConfig> for Store {
     }
 
     async fn purge(&mut self, log_id: LogId<u64>) -> Result<(), StorageError<u64>> {
+        // Keep the log until the state it would replay is written. This purge's
+        // Immediate commit then persists that state too.
+        self.inner
+            .persistence
+            .drain()
+            .await
+            .map_err(|error| io_error(ErrorSubject::Logs, ErrorVerb::Delete, error))?;
         self.disk_profiled(
             StorageTrace::new(self.inner.id, "purge"),
             move |db, profile| {
@@ -1190,13 +1299,27 @@ impl RaftStateMachine<TypeConfig> for Store {
         let mut profile = StorageTrace::new(self.inner.id, "apply");
         profile.entries(&entries);
         profile.phase(StoragePhase::Prepare);
+        self.inner
+            .persistence
+            .check()
+            .map_err(|error| io_error(ErrorSubject::StateMachine, ErrorVerb::Write, error))?;
         let mut guard = self.inner.state.clone().write_owned().await;
         profile.phase(StoragePhase::StateLock);
         let published = self.inner.published.clone();
-        // The disk task owns the guard and publishes the cache itself. Dropping
-        // the caller's future cannot leave disk and cache at different revisions.
+        let lazy = self.inner.lazy.clone();
+        let work = self.database_work();
+        // Apply, publish and queue the redb projection without taking the I/O
+        // guard: persistence follows in order, off Raft's critical path. The
+        // blocking task owns the state guard, so dropping this future cannot
+        // leave a later apply to observe a half-published state.
         let snapshot_accounting = self.inner.snapshot_accounting.clone();
-        self.disk_profiled(profile, move |db, profile| {
+        let persistence = self.inner.persistence.clone();
+        let weak = Arc::downgrade(&self.inner);
+        let holders = self.inner.holders.clone();
+        let responses = tokio::task::spawn_blocking(move || work.run(|db| -> anyhow::Result<_> {
+            let span = profile.span();
+            let _entered = span.enter();
+            profile.phase(StoragePhase::BlockingQueue);
             let applied_bytes={
                 let transaction=db.begin_read()?;
                 let logs=transaction.open_table(LOGS)?;
@@ -1261,54 +1384,51 @@ impl RaftStateMachine<TypeConfig> for Store {
                 delta.requests.len(),
             );
             profile.phase(StoragePhase::Prepare);
-            let mut transaction = db.begin_write()?;
             // Log append has already made every applied entry quorum-durable.
             // This atomic projection may roll back on process/power loss; the
             // next Immediate log/vote/snapshot/purge commit also persists it.
-            // In particular snapshots become durable with at least their
-            // captured state before OpenRaft can purge the covered logs.
-            transaction.set_durability(Durability::None)?;
-            profile.phase(StoragePhase::Begin);
-            {
-                let mut data = transaction.open_table(DATA)?;
-                for (key, value) in &delta.data {
-                    match value {
-                        Some(value) => {
-                            data.insert(key.as_str(), profile.encode(value)?.as_slice())?;
-                        }
-                        None => {
-                            data.remove(key.as_str())?;
-                        }
-                    }
-                }
-                let mut requests = transaction.open_table(REQUESTS)?;
-                for key in &delta.deleted_requests {
-                    requests.remove(key.as_str())?;
-                }
-                for (key, value) in &delta.requests {
-                    requests.insert(key.as_str(), profile.encode(value)?.as_slice())?;
-                }
-                let mut meta = transaction.open_table(META)?;
-                meta.insert(STATE_META, profile.encode(&metadata)?.as_slice())?;
-            }
-            write_partitions(&transaction, &partition_writes, profile)?;
+            // Snapshot checkpoints, purges and installations drain the queue
+            // first, so a log is never discarded before the state it would
+            // replay.
+            let write = persistence::StateWrite {
+                data: delta
+                    .data
+                    .iter()
+                    .map(|(key, value)| {
+                        Ok((key.clone(), value.as_ref().map(|value| profile.encode(value)).transpose()?))
+                    })
+                    .collect::<anyhow::Result<_>>()?,
+                requests: delta
+                    .requests
+                    .iter()
+                    .map(|(key, value)| Ok((key.clone(), profile.encode(value)?)))
+                    .collect::<anyhow::Result<_>>()?,
+                deleted_requests: delta.deleted_requests.iter().cloned().collect(),
+                metadata: profile.encode(&metadata)?,
+                partitions: partition_writes.clone(),
+            };
             profile.phase(StoragePhase::Write);
-            let result = transaction.commit();
-            profile.phase(StoragePhase::Flush);
-            result?;
             for (_, write) in partition_writes { guard.partitions.insert(write.state); }
-            // No fallible operation follows atomic commit. Move the small
-            // overlay into the locked cache before readers or later applies run.
+            // No fallible operation follows. Move the small overlay into the
+            // locked cache before readers or later applies run.
             delta.publish(&mut guard.application);
             guard.last_applied = metadata.last_applied;
             guard.membership = metadata.membership;
+            lazy.update_membership(&guard.membership);
             snapshot_accounting.applied(applied_bytes,guard.last_applied.map(|id|id.index));
             publish(&published, &guard);
+            // Queue under the guard: whoever next observes this state, even
+            // after this future is cancelled, also finds its write submitted.
+            persistence.submit(weak, holders, write);
             profile.phase(StoragePhase::Publish);
+            profile.report(true);
             Ok(responses)
-        })
+        }))
         .await
-        .map_err(|error| io_error(ErrorSubject::StateMachine, ErrorVerb::Write, error))
+        .context("Raft apply worker")
+        .and_then(|result| result)
+        .map_err(|error| io_error(ErrorSubject::StateMachine, ErrorVerb::Write, error))?;
+        Ok(responses)
     }
 
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
@@ -1384,6 +1504,11 @@ impl RaftStateMachine<TypeConfig> for Store {
         }
         profile.phase(StoragePhase::Prepare);
         let mut guard = self.inner.state.clone().write_owned().await;
+        // No apply can queue another state while this guard is held. An older
+        // queued state must not land after the installed one.
+        self.inner.persistence.drain().await.map_err(|error| {
+            io_error(ErrorSubject::Snapshot(Some(meta.signature())), ErrorVerb::Write, error)
+        })?;
         profile.phase(StoragePhase::StateLock);
         profile.application(
             guard.application.revision,
@@ -1420,6 +1545,7 @@ impl RaftStateMachine<TypeConfig> for Store {
                 state: Arc::new(next.clone()),
             };
             *guard = next;
+            inner.lazy.update_membership(&guard.membership);
             publish(&published, &guard);
             *inner.current_snapshot.write().expect("snapshot image lock") = Some(image);
             inner
@@ -1494,6 +1620,9 @@ impl Store {
         capture: SnapshotCapture,
         mut profile: StorageTrace,
     ) -> anyhow::Result<RaftSnapshot<TypeConfig>> {
+        // The checkpoint lets Raft prune the logs up to the captured state, so
+        // that state must be written first. Its Immediate commit persists it.
+        self.inner.persistence.drain().await?;
         let activity = self.inner.snapshot_accounting.begin();
         profile.phase(StoragePhase::StateLock);
         if let Some(timing) = &mut profile.0 {

@@ -130,7 +130,10 @@ impl StorageTrace {
     }
 
     fn enabled(node: u64, operation: &'static str, legacy: bool, telemetry: bool) -> Self {
-        let durability = if matches!(operation, "apply" | "snapshot_transfer") {
+        let durability = if matches!(
+            operation,
+            "apply" | "persist" | "leader_append" | "snapshot_transfer"
+        ) {
             "none"
         } else {
             "immediate"
@@ -398,6 +401,12 @@ mod tests {
         let append = StorageTrace::enabled(1, "append", false, false);
         assert_eq!(apply.0.as_ref().unwrap().durability, "none");
         assert_eq!(append.0.as_ref().unwrap().durability, "immediate");
+        for deferred in ["persist", "leader_append"] {
+            let trace = StorageTrace::enabled(1, deferred, false, false);
+            assert_eq!(trace.0.as_ref().unwrap().durability, "none");
+        }
+        let flush = StorageTrace::enabled(1, "leader_flush", false, false);
+        assert_eq!(flush.0.as_ref().unwrap().durability, "immediate");
         let value = serde_json::json!({"secret-value": "never a label"});
         let encoded = apply.encode(&value).unwrap();
         apply.phase(StoragePhase::Write);
