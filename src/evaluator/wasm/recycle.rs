@@ -144,10 +144,15 @@ struct State {
     pending: VecDeque<Idle>,
     // Images of instances the background thread is resetting right now.
     resetting: Vec<usize>,
+    // The background thread is waiting for work, and callers are waiting for
+    // one of its resets: only then does anyone pay for a wakeup.
+    sleeping: bool,
+    waiters: usize,
 }
 
 struct Pool {
     state: Mutex<State>,
+    work: Condvar,
     changed: Condvar,
 }
 
@@ -156,7 +161,10 @@ static POOL: Pool = Pool {
         ready: Vec::new(),
         pending: VecDeque::new(),
         resetting: Vec::new(),
+        sleeping: false,
+        waiters: 0,
     }),
+    work: Condvar::new(),
     changed: Condvar::new(),
 };
 
@@ -187,11 +195,13 @@ fn resetter() {
     let mut state = POOL.lock();
     loop {
         let Some(mut idle) = state.pending.pop_front() else {
+            state.sleeping = true;
             state = POOL
-                .changed
+                .work
                 .wait_timeout(state, IDLE_LIFETIME / 4)
                 .unwrap_or_else(|error| error.into_inner())
                 .0;
+            state.sleeping = false;
             let expired = take_expired(&mut state);
             if !expired.is_empty() {
                 // Store destruction returns slots to Wasmtime; keep it unlocked.
@@ -210,12 +220,13 @@ fn resetter() {
         if let Some(position) = state.resetting.iter().position(|item| *item == key) {
             state.resetting.swap_remove(position);
         }
+        if state.waiters > 0 {
+            POOL.changed.notify_all();
+        }
         if matches!(outcome, Ok(Ok(_))) {
             idle.since = Instant::now();
             state.ready.push(idle);
-            POOL.changed.notify_all();
         } else {
-            POOL.changed.notify_all();
             drop(state);
             discard(idle.into_cell());
             state = POOL.lock();
@@ -318,7 +329,7 @@ fn take(image: &Arc<Image>) -> Option<(Cell, bool)> {
             .iter()
             .position(|idle| idle.cell.image.key() == key)
         {
-            return Some((state.ready.swap_remove(position).cell, false));
+            return Some((state.ready.swap_remove(position).into_cell(), false));
         }
         if let Some(position) = state
             .pending
@@ -326,16 +337,24 @@ fn take(image: &Arc<Image>) -> Option<(Cell, bool)> {
             .position(|idle| idle.cell.image.key() == key)
         {
             let idle = state.pending.remove(position).expect("queued instance");
-            return Some((idle.cell, true));
+            return Some((idle.into_cell(), true));
         }
         if !state.resetting.contains(&key) {
             return None;
         }
-        state = POOL
-            .changed
-            .wait(state)
-            .unwrap_or_else(|error| error.into_inner());
+        state = wait(state);
     }
+}
+
+/// Wait for the background thread to finish a reset.
+fn wait(mut state: MutexGuard<'_, State>) -> MutexGuard<'_, State> {
+    state.waiters += 1;
+    let mut state = POOL
+        .changed
+        .wait(state)
+        .unwrap_or_else(|error| error.into_inner());
+    state.waiters -= 1;
+    state
 }
 
 #[derive(Default)]
@@ -544,8 +563,13 @@ pub(super) fn finish(
         since: Instant::now(),
         _reservation: reservation,
     };
-    POOL.lock().pending.push_back(idle);
-    POOL.changed.notify_all();
+    let mut state = POOL.lock();
+    state.pending.push_back(idle);
+    let wake = state.sleeping;
+    drop(state);
+    if wake {
+        POOL.work.notify_one();
+    }
     start_resetter();
     Ok(())
 }
@@ -623,10 +647,7 @@ pub(super) fn stats(prepared: &Prepared) -> Stats {
             .iter()
             .any(|idle| idle.cell.image.key() == key)
     {
-        state = POOL
-            .changed
-            .wait(state)
-            .unwrap_or_else(|error| error.into_inner());
+        state = wait(state);
     }
     let idle = state
         .ready

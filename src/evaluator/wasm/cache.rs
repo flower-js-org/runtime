@@ -18,7 +18,7 @@ mod flight;
 mod profile;
 
 const WASM: &[u8] = include_bytes!("../../../vendor/quickjs-ng/quickjs.wasm");
-const WASM_HASH: &str = "099925f68919e38c315a012090db3d971cf2f2383ba081061b0934e51bdf1b68";
+const WASM_HASH: &str = "4146efd6851a79d0f056cebd5e927682f51ef3a740ee006bceaa32eaeba0b822";
 const MAX_CACHE_BYTES: usize = 96 * 1024 * 1024;
 const MAX_CACHE_ENTRIES: usize = 8;
 const TABLE_ELEMENTS: usize = 4096;

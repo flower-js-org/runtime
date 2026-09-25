@@ -1,6 +1,18 @@
-//! Invocation costs of the benchmark application through the production
-//! evaluator. Build its bundle, then:
-//! FLOWER_GOBLIN_BUNDLE=path cargo test --release --lib goblin -- --ignored --nocapture
+//! Invocation costs through the production evaluator, for tuning. Build the
+//! bundles with the SDK, then run the ignored tests in release mode:
+//!
+//! ```sh
+//! node -e 'import("./sdk/bundle.ts").then(async ({buildBundle}) => {
+//!   const fs = await import("node:fs");
+//!   fs.writeFileSync("/tmp/goblin.js", (await buildBundle("examples/goblin-pizza.ts")).javascript);
+//!   fs.writeFileSync("/tmp/ops.js", (await buildBundle("bench/guest-ops.ts")).javascript);
+//! })'
+//! FLOWER_GOBLIN_BUNDLE=/tmp/goblin.js FLOWER_MICRO_BUNDLE=/tmp/ops.js \
+//!   cargo test --release --lib perf_tests -- --ignored --nocapture --test-threads 1
+//! ```
+//!
+//! FLOWER_GOBLIN_ONLY selects one method, FLOWER_GOBLIN_CALLS sets the call
+//! count, and FLOWER_MICRO_TRIVIAL=N only loops a trivial query, for sampling.
 use super::*;
 use crate::consensus::Records;
 
@@ -25,9 +37,12 @@ fn goblin_invocation_costs() {
     let path = std::env::var("FLOWER_GOBLIN_BUNDLE").expect("FLOWER_GOBLIN_BUNDLE");
     let javascript = std::fs::read_to_string(path).unwrap();
     let bundle = json!({"hash": hash(javascript.as_bytes()), "javascript": javascript});
-    let mut data = evaluate(BTreeMap::new(), json!({"requestId":"deploy","bundle":bundle}))
-        .unwrap()
-        .puts;
+    let mut data = evaluate(
+        BTreeMap::new(),
+        json!({"requestId":"deploy","bundle":bundle}),
+    )
+    .unwrap()
+    .puts;
     let setup = invoke(
         data.clone(),
         json!({"name":"internal.pizza.setup","requestId":"setup","args":{
@@ -40,14 +55,84 @@ fn goblin_invocation_costs() {
     let records: Records = data.into();
     let calls = std::env::var("FLOWER_GOBLIN_CALLS").map_or(2000, |calls| calls.parse().unwrap());
     timed("order", calls, |index| {
-        invoke(records.clone(), json!({"name":"internal.pizza.order","requestId":format!("o{index}"),
-            "args":{"id":format!("o{index}"),"shop":["t0","store-0"],"quantity":1}}), "mutation").unwrap();
+        invoke(
+            records.clone(),
+            json!({"name":"internal.pizza.order","requestId":format!("o{index}"),
+            "args":{"id":format!("o{index}"),"shop":["t0","store-0"],"quantity":1}}),
+            "mutation",
+        )
+        .unwrap();
     });
     timed("tip", calls, |index| {
-        invoke(records.clone(), json!({"name":"internal.pizza.tip","requestId":format!("t{index}"),
-            "args":{"shop":["t0","store-1"],"amount":1}}), "mutation").unwrap();
+        invoke(
+            records.clone(),
+            json!({"name":"internal.pizza.tip","requestId":format!("t{index}"),
+            "args":{"shop":["t0","store-1"],"amount":1}}),
+            "mutation",
+        )
+        .unwrap();
     });
     timed("shop", calls, |_| {
-        invoke(records.clone(), json!({"name":"internal.pizza.shop","args":["t0","store-2"]}), "query").unwrap();
+        invoke(
+            records.clone(),
+            json!({"name":"internal.pizza.shop","args":["t0","store-2"]}),
+            "query",
+        )
+        .unwrap();
     });
+}
+
+/// Per-operation guest costs: FLOWER_MICRO_BUNDLE=path, ops loop inside one call.
+#[test]
+#[ignore]
+fn guest_operation_costs() {
+    let path = std::env::var("FLOWER_MICRO_BUNDLE").expect("FLOWER_MICRO_BUNDLE");
+    let javascript = std::fs::read_to_string(path).unwrap();
+    let bundle = json!({"hash": hash(javascript.as_bytes()), "javascript": javascript});
+    let mut data = evaluate(
+        BTreeMap::new(),
+        json!({"requestId":"deploy","bundle":bundle}),
+    )
+    .unwrap()
+    .puts;
+    data.insert(
+        "source:[\"pizza.shops\",\"[\\\"t0\\\",\\\"store-0\\\"]\"]".into(),
+        json!({"id":["t0","store-0"],"key":"[\"t0\",\"store-0\"]","name":"The Crispy Cauldron · store-0","initialStock":1000,"stock":900,"revenue":7,"tips":3}),
+    );
+    let records: Records = data.into();
+    let run = |op: &str, n: usize| {
+        let started = Instant::now();
+        invoke(
+            records.clone(),
+            json!({"name":"micro","args":{"op":op,"n":n}}),
+            "query",
+        )
+        .unwrap();
+        started.elapsed().as_secs_f64()
+    };
+    if let Ok(calls) = std::env::var("FLOWER_MICRO_TRIVIAL") {
+        for _ in 0..calls.parse::<usize>().unwrap() {
+            run("noop", 1);
+        }
+        return;
+    }
+    let single = (0..2000).map(|_| run("noop", 1)).fold(f64::MAX, f64::min);
+    println!("{:>16}: {:7.2} µs/call", "trivial query", single * 1e6);
+    let n = 20_000;
+    let base = (0..5).map(|_| run("noop", n)).fold(f64::MAX, f64::min);
+    for op in [
+        "canonicalTuple",
+        "canonicalRecord",
+        "regex",
+        "identifier",
+        "tuple",
+        "object",
+        "encodeKey",
+        "spread",
+        "get",
+        "now",
+    ] {
+        let best = (0..5).map(|_| run(op, n)).fold(f64::MAX, f64::min);
+        println!("{op:>16}: {:7.2} µs/op", (best - base) * 1e6 / n as f64);
+    }
 }

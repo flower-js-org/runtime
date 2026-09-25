@@ -38,14 +38,27 @@ export interface ModuleConfig<H extends HttpMap = HttpMap> extends ComponentPart
 
 type Host = Record<string, (...args: any[]) => any>;
 interface Session { readonly ctx: MutationContext; readonly flush: () => void }
-interface Runtime { readonly triggers: ReadonlyMap<string, readonly Trigger[]>; readonly sessions: Map<object, Session> }
+interface Runtime {
+  readonly triggers: ReadonlyMap<string, readonly Trigger[]>;
+  /** Collections whose triggers only observe rows appearing or disappearing. */
+  readonly existence: ReadonlySet<string>;
+  readonly sessions: Map<object, Session>;
+}
 
 // Flower publishes the contexts it will pass to callbacks before initializing
 // the application. Binding them in define() puts the bound contexts into the
 // initialization snapshot: every callback starts from that pristine state, so
 // its session is already built and its trigger bookkeeping already empty.
 declare const __flowerContexts: readonly Host[] | undefined;
-interface Touch { readonly reference: Collection<any, any, any>; readonly raw: string; readonly before: Json; readonly triggers: readonly Trigger[] }
+interface Touch {
+  readonly reference: Collection<any, any, any>;
+  readonly raw: string;
+  readonly triggers: readonly Trigger[];
+  /** The row before this round, or, for existence-only collections, whether it existed. */
+  readonly before: Json | boolean;
+}
+/** Internal triggers that need only a row's existence, run as (ctx, key, exists). */
+const existenceTriggers = new WeakMap<Trigger, (ctx: MutationContext, key: Json, exists: boolean) => void>();
 const hosts = new WeakMap<object, Host>();
 const flushes = new WeakMap<object, () => void>();
 
@@ -90,17 +103,40 @@ function keyScan(reference: Collection<any, any, any>, options: Record<string, u
   return { ...rest, gte: head + ",", lt: head + "-" };
 }
 
+/** Equality of host values, which are plain JSON data: canonical JSON equality without encoding. */
 function sameValue(a: Json, b: Json): boolean {
-  return a === b || (a !== null && b !== null && canonicalJson(a) === canonicalJson(b));
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== "object" || typeof b !== "object") return false;
+  if (Array.isArray(a)) {
+    if (!Array.isArray(b) || a.length !== b.length) return false;
+    for (let index = 0; index < a.length; ++index) if (!sameValue(a[index], b[index])) return false;
+    return true;
+  }
+  if (Array.isArray(b)) return false;
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  for (const key of keys) if (!Object.hasOwn(b, key) || !sameValue(a[key], b[key])) return false;
+  return true;
 }
 
 function bind(host: Host, runtime: Runtime): Session {
   const touched = new Map<string, Touch>();
+  // Row existence this mutation has observed or written, for existence-only collections.
+  const exists = new Map<string, boolean>();
+  const identity = (reference: Collection<any, any, any>, raw: string) => reference.name + "\u0000" + raw;
+  function observe(reference: Collection<any, any, any>, raw: string, value: Json) {
+    if (runtime.existence.has(reference.name)) exists.set(identity(reference, raw), value !== null);
+    return value;
+  }
   function track(reference: Collection<any, any, any>, raw: string) {
     const triggers = runtime.triggers.get(reference.name);
     if (!triggers) return;
-    const id = reference.name + "\u0000" + raw;
-    if (!touched.has(id)) touched.set(id, { reference, raw, before: host.get(reference, raw), triggers });
+    const id = identity(reference, raw);
+    if (touched.has(id)) return;
+    const before = runtime.existence.has(reference.name)
+      ? exists.get(id) ?? host.get(reference, raw) !== null
+      : host.get(reference, raw);
+    touched.set(id, { reference, raw, before, triggers });
   }
   const ctx: MutationContext = Object.freeze({
     now: () => host.now(),
@@ -110,7 +146,10 @@ function bind(host: Host, runtime: Runtime): Session {
       return principal !== null && typeof principal === "object" && principal.subject === ANONYMOUS_SUBJECT ? null : principal;
     },
     get(reference: any, key?: unknown) {
-      if (reference?.kind === "collection") return host.get(reference, encodeKey(reference, key));
+      if (reference?.kind === "collection") {
+        const raw = encodeKey(reference, key);
+        return observe(reference, raw, host.get(reference, raw));
+      }
       return host.get(reference, key === undefined ? null : key);
     },
     scan(reference: any, options?: Record<string, unknown>) {
@@ -140,11 +179,13 @@ function bind(host: Host, runtime: Runtime): Session {
       }
       track(reference, raw);
       host.set(reference, raw, value);
+      observe(reference, raw, true);
     },
     delete(reference: any, key: unknown) {
       const raw = encodeKey(reference, key);
       track(reference, raw);
       host.delete(reference, raw);
+      observe(reference, raw, null);
     },
     materialize: (definition: any, args?: unknown) => { host.materialize(definition, args === undefined ? null : args); },
     unmaterialize: (definition: any, args?: unknown) => { host.unmaterialize(definition, args === undefined ? null : args); },
@@ -155,12 +196,23 @@ function bind(host: Host, runtime: Runtime): Session {
       if (round === 32) fail("TRIGGER_LOOP", "Triggers kept changing records for 32 rounds");
       // Read every after value before any trigger of this round runs: a trigger's own writes are
       // tracked for the next round, so reading them here too would report overlapping changes.
-      const batch = [...touched.values()].map((entry) => ({ ...entry, after: host.get(entry.reference, entry.raw) as Json }));
+      const batch = [...touched.values()].map((entry) => ({
+        ...entry,
+        after: runtime.existence.has(entry.reference.name)
+          ? exists.get(identity(entry.reference, entry.raw)) === true
+          : host.get(entry.reference, entry.raw) as Json,
+      }));
       touched.clear();
       for (const entry of batch) {
-        const after = entry.after;
-        if (sameValue(entry.before, after)) continue;
-        const change = Object.freeze({ key: decodeKey(entry.reference, entry.raw), before: entry.before, after });
+        if (runtime.existence.has(entry.reference.name)) {
+          if (entry.before === entry.after) continue;
+          const key = decodeKey(entry.reference, entry.raw);
+          for (const each of entry.triggers) existenceTriggers.get(each)!(ctx, key, entry.after as boolean);
+          continue;
+        }
+        const after = entry.after as Json;
+        if (sameValue(entry.before as Json, after)) continue;
+        const change = Object.freeze({ key: decodeKey(entry.reference, entry.raw), before: entry.before as Json, after });
         for (const each of entry.triggers) each.run(ctx, change);
       }
     }
@@ -257,10 +309,13 @@ function materialization(definitions: readonly Definition[]): { tasks: Task[]; t
       continue;
     }
     jobs.push({ marker: `each:${definition.name}:${policy.each.name}`, derived: definition, source: policy.each });
-    triggers.push(trigger(`materialize:${definition.name}`, policy.each, (ctx, change) => {
-      if (change.before === null && change.after !== null) ctx.materialize(definition, change.key);
-      else if (change.before !== null && change.after === null) ctx.unmaterialize(definition, change.key);
-    }));
+    const maintain = (ctx: MutationContext, key: Json, exists: boolean) =>
+      exists ? ctx.materialize(definition, key) : ctx.unmaterialize(definition, key);
+    const each = trigger(`materialize:${definition.name}`, policy.each, (ctx, change) => {
+      if ((change.before === null) !== (change.after === null)) maintain(ctx, change.key, change.after !== null);
+    });
+    existenceTriggers.set(each, maintain);
+    triggers.push(each);
   }
   if (!jobs.length) return { tasks: [], triggers };
   const pending = (ctx: QueryContext) => jobs.find((job) => ctx.get(markers, job.marker)?.done !== true);
@@ -443,7 +498,8 @@ export function define<const H extends HttpMap = {}>(config: ModuleConfig<H> = {
     list.push(each);
     triggers.set(each.source.name, list);
   }
-  const runtime: Runtime = { triggers, sessions: new Map() };
+  const existence = new Set([...triggers].filter(([, list]) => list.every((each) => existenceTriggers.has(each))).map(([name]) => name));
+  const runtime: Runtime = { triggers, existence, sessions: new Map() };
   if (typeof __flowerContexts !== "undefined") {
     for (const host of __flowerContexts) runtime.sessions.set(host, bind(host, runtime));
   }

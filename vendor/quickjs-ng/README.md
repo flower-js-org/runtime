@@ -7,8 +7,8 @@ upstream file's SHA-256, the upstream archive digest, compiler and static-librar
 revisions, and the final artifact digest. The upstream CLI, `quickjs-libc`, module
 loaders, and examples are neither vendored nor linked.
 
-The checked-in `quickjs.wasm` is **1,127,378 bytes**, SHA-256
-`099925f68919e38c315a012090db3d971cf2f2383ba081061b0934e51bdf1b68`.
+The checked-in `quickjs.wasm` is **1,130,175 bytes**, SHA-256
+`4146efd6851a79d0f056cebd5e927682f51ef3a740ee006bceaa32eaeba0b822`.
 Rust embeds it with `include_bytes!` and verifies its digest and complete ABI
 before compiling. Normal Cargo builds need no guest cross-compiler or WASI SDK;
 native Rust dependencies may still require a host C compiler. Server operation
