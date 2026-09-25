@@ -20,6 +20,7 @@ pub(super) struct Image {
     globals: Vec<ModuleExport>,
     pub(super) memory_bytes: usize,
     initial: OnceLock<Snapshot>,
+    learning: Arc<super::dirty::Learning>,
     #[cfg(test)]
     stats: test_stats::Counters,
 }
@@ -80,6 +81,7 @@ impl Image {
             globals,
             memory_bytes,
             initial: OnceLock::new(),
+            learning: Arc::default(),
             #[cfg(test)]
             stats: Default::default(),
         })
@@ -279,11 +281,12 @@ fn reset(cell: &mut Cell) -> Result<usize> {
         .get()
         .context("missing pristine reset image")?;
     let memory = cell.abi.memory.data_mut(&mut cell.store);
-    let copied = if let Some(dirty) = &cell.dirty {
-        dirty.restore(memory, &initial.memory)?
+    let (copied, reusable) = if let Some(dirty) = &cell.dirty {
+        let restored = dirty.restore(memory, &initial.memory)?;
+        (restored.copied, restored.reusable)
     } else {
         memory.copy_from_slice(&initial.memory);
-        memory.len()
+        (memory.len(), true)
     };
     for (global, initial) in cell.globals.iter().zip(&initial.globals) {
         global.set(&mut cell.store, initial.value())?;
@@ -298,6 +301,8 @@ fn reset(cell: &mut Cell) -> Result<usize> {
         );
         cell.reported_faults = faults;
     }
+    // Memory is pristine either way, but tracking could not be re-armed.
+    ensure!(reusable, "dirty-page protection failed after reset");
     Ok(copied)
 }
 
@@ -480,9 +485,15 @@ fn fresh(
         #[cfg(test)]
         reported_faults: 0,
     };
-    if recyclable && let Some(dirty) = super::dirty::install(&mut cell.store, cell.abi.memory)? {
-        // Own cleanup before the first read-only protection call; mprotect may
-        // fail after changing only part of a mapping.
+    if recyclable
+        && let Some(dirty) = super::dirty::install(
+            &mut cell.store,
+            cell.abi.memory,
+            cell.image.learning.clone(),
+        )?
+    {
+        // Own cleanup before the first protection call; protection may fail
+        // after changing only part of a mapping.
         cell.dirty = Some(dirty.clone());
         if dirty.protect().is_ok() {
             cell.store.data_mut().dirty = Some(dirty.clone());
