@@ -174,7 +174,7 @@ impl Engine<'_> {
         }
         // Old cells were all reachable and no roots/edges were removed. Every
         // new cell must also be reached; otherwise use the full collector.
-        if depths.len() != self.staged.reactive().cells.len() {
+        if depths.len() != self.staged.reactive().cell_count() {
             return Ok(false);
         }
         self.staged.reactive().mark_validated(depths);
@@ -363,7 +363,7 @@ impl Engine<'_> {
         if bundle_changed {
             self.preview
                 .dirty
-                .extend(self.staged.reactive().cells.keys().cloned());
+                .extend(self.staged.graph_cells().map(|(id, _)| id.to_owned()));
         }
         if bundle_changed {
             self.preview
@@ -384,15 +384,17 @@ impl Engine<'_> {
             if cursor % 64 == 0 {
                 self.check_fatal()?;
             }
-            let id = &changed_dependencies[cursor];
-            if let Some(readers) = self.staged.reactive().reverse.get(id) {
-                for reader in readers {
-                    if cursor < direct_dependencies {
-                        self.preview.direct.insert(reader.clone());
-                    }
-                    if self.preview.dirty.insert(reader.clone()) {
-                        changed_dependencies.push(reader.clone());
-                    }
+            let readers: Vec<String> = self
+                .staged
+                .readers(&changed_dependencies[cursor])
+                .map(str::to_owned)
+                .collect();
+            for reader in readers {
+                if cursor < direct_dependencies {
+                    self.preview.direct.insert(reader.clone());
+                }
+                if self.preview.dirty.insert(reader.clone()) {
+                    changed_dependencies.push(reader);
                 }
             }
             cursor += 1;
@@ -491,11 +493,10 @@ impl Engine<'_> {
             }
             let obsolete: Vec<_> = self
                 .staged
-                .reactive()
-                .cells
-                .keys()
+                .graph_cells()
+                .map(|(id, _)| id)
                 .filter(|id| !depths.contains_key(*id))
-                .cloned()
+                .map(str::to_owned)
                 .collect();
             for id in obsolete {
                 self.remove(&id);

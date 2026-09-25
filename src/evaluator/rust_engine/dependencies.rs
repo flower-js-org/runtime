@@ -217,7 +217,13 @@ impl Engine<'_> {
         self.certificate_stamp(id.as_ref(), false);
     }
     pub(super) fn marker_read(&mut self, id: impl AsRef<str>) {
-        self.certificate_stamp(id.as_ref(), true);
+        let id = id.as_ref();
+        // Equality buckets have no markers of their own; stamp their entries.
+        if let Some((marker, lower, upper)) = bucket_window(id) {
+            self.window_read(marker, &lower, &upper);
+            return;
+        }
+        self.certificate_stamp(id, true);
     }
     pub(super) fn derived_read(&mut self, id: String) {
         // A stored cell may read the clock without this query noticing: only
@@ -272,7 +278,9 @@ impl Engine<'_> {
                 self.marker_read(id);
             } else if id.starts_with("cell:") {
                 if self.base.get(&id).is_some() {
-                    self.marker_read(format!("outcome:{id}"));
+                    // The patch never rewrites an unchanged record, so the
+                    // allocation survives until the outcome or its deps change.
+                    self.record_read(id);
                 } else if let Some(cell) = self.staged.get(&id) {
                     let Some(deps) = cell["deps"].as_array() else {
                         self.query_cacheable = false;
@@ -361,6 +369,18 @@ fn component(value: &str) -> Option<(&str, &str)> {
     }
     None
 }
+/// An equality bucket's entries and the marker of its whole index, which
+/// changes whenever any bucket of that index gains or loses an entry. One
+/// marker per distinct indexed value would grow with the data.
+pub(super) fn bucket_window(id: &str) -> Option<(String, String, String)> {
+    let (spec, bucket) = component(id.strip_prefix("index-bucket:")?)?;
+    Some((
+        format!("index-entries:{spec}"),
+        format!("index-entry:{spec}:{bucket}:"),
+        format!("index-entry:{spec}:{bucket};"),
+    ))
+}
+
 /// The collection and fields of an `index-bucket:` dependency.
 pub(super) fn bucket_spec(id: &str) -> Option<(String, Vec<String>)> {
     let (spec, _) = component(id.strip_prefix("index-bucket:")?)?;
@@ -397,8 +417,8 @@ pub(super) fn membership_marker(id: &str) -> Option<String> {
         None
     } else if let Some(encoded) = id.strip_prefix("index-entry:") {
         let (spec, tail) = component(encoded)?;
-        let (bucket, _) = component(tail)?;
-        Some(format!("index-bucket:{spec}:{bucket}"))
+        component(tail)?;
+        Some(format!("index-entries:{spec}"))
     } else if let Some(encoded) = id.strip_prefix("ordered-entry:") {
         let (spec, _) = component(encoded)?;
         Some(format!("index-range:{spec}"))

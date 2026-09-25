@@ -166,8 +166,8 @@ fn quiet_tenants_share_topology_and_skip_global_traversal() {
     );
     assert!(Arc::ptr_eq(&proof, &data.reactive().topology));
     assert!(Arc::ptr_eq(
-        &prior.reactive().cells[&cell_id("top", &json!("200"))],
-        &data.reactive().cells[&cell_id("top", &json!("200"))]
+        prior.get_shared(&cell_id("top", &json!("200"))).unwrap(),
+        data.get_shared(&cell_id("top", &json!("200"))).unwrap()
     ));
     assert_eq!(prior[&source_id("input", "1")], 1);
     assert_eq!(data[&source_id("input", "1")], 1001);
@@ -226,8 +226,8 @@ fn terminal_preview_errors_match_rollback_path_at_memory_boundaries() {
     let mut failures = 0;
     for budget in [
         1,
-        base.reactive().bytes() / 2,
-        base.reactive().bytes(),
+        metadata::graph_bytes(&base) / 2,
+        metadata::graph_bytes(&base),
         32_768,
         131_072,
     ] {
@@ -305,7 +305,7 @@ fn restart_revalidates_then_reuses_topology_without_charging_it() {
         "mutation",
         Some(1000),
         &fixture,
-        recovered.reactive().bytes() / 4,
+        metadata::graph_bytes(&recovered) / 4,
     )
     .unwrap();
     assert!(recovered.reactive().validated());
@@ -346,12 +346,12 @@ fn transaction_budget_covers_the_graph_it_adds_not_the_graph_it_inherits() {
     write(&mut large, &fixture, "0", 1000);
     let one = needed(&small, 1);
     let many = needed(&small, 16);
-    assert!(large.reactive().bytes() > 8 * many);
+    assert!(metadata::graph_bytes(&large) > 8 * many);
     assert_eq!(needed(&large, 1), one);
     assert_eq!(needed(&large, 16), many);
     // Every added tenant is charged at least its graph entries, so large
     // transactions stay bounded.
-    assert!(many - one >= 15 * large.reactive().bytes() / 512);
+    assert!(many - one >= 15 * metadata::graph_bytes(&large) / 512);
     let error = run_with_limit(
         large.clone(),
         grow(10_000, 16),
@@ -370,7 +370,7 @@ fn inserts_continue_after_the_graph_outgrows_the_transaction_budget() {
     let budget = 128 * 1024;
     let mut data = tenants(&fixture, 1);
     let mut next = 1;
-    while data.reactive().bytes() <= 8 * budget {
+    while metadata::graph_bytes(&data) <= 8 * budget {
         let result = run_with_limit(
             data.clone(),
             grow(next, 16),
@@ -455,7 +455,7 @@ fn committed_append_pages_visit_only_new_nodes_with_single_and_multiple_roots() 
             );
             assert!(data.graph_view(Some(GENERATION)).reactive().validated());
             assert!(
-                data.reactive().cells.is_empty(),
+                data.reactive().cell_count() == 0,
                 "the legacy graph stays isolated"
             );
         }
@@ -652,7 +652,7 @@ fn untrusted_append_deltas_reject_cycles_and_missing_cells_and_collect_orphans()
     .unwrap();
     assert_eq!(result.deletes, vec![orphan]);
     apply(&mut baseline, result);
-    assert_eq!(baseline.reactive().cells.len(), 2);
+    assert_eq!(baseline.reactive().cell_count(), 2);
 }
 
 #[test]
@@ -777,9 +777,9 @@ fn root_removal_collects_only_unreachable_shared_descendants() {
         json!({"unmaterialize":[{"name":"scratch","args":"0"}]}),
         &fixture,
     );
-    assert!(data.reactive().cells.is_empty());
+    assert!(data.reactive().cell_count() == 0);
     assert!(data.reactive().roots.is_empty());
-    assert!(data.reactive().reverse.is_empty());
+    assert!(!data.keys().any(|key| key.starts_with("reader:")));
 }
 
 #[test]

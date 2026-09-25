@@ -521,6 +521,58 @@ impl Engine<'_> {
     }
 
     fn put(&mut self, id: String, value: Value) -> EngineResult<()> {
+        if id.starts_with("cell:") {
+            self.update_readers(&id, Some(&value));
+        }
+        self.write(id, value)
+    }
+
+    fn remove(&mut self, id: &str) {
+        if id.starts_with("cell:") {
+            self.update_readers(id, None);
+        }
+        self.delete(id);
+    }
+
+    /// A stored cell has one `reader:` record per non-scan dependency, written
+    /// in the same patch, so propagation can seek a dependency's readers.
+    fn update_readers(&mut self, id: &str, next: Option<&Value>) {
+        fn edges(cell: &Value) -> impl Iterator<Item = &str> {
+            cell["deps"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|dep| !windows::Window::is_dependency(dep))
+        }
+        let old: BTreeSet<String> = self
+            .staged
+            .get(id)
+            .map(|cell| edges(cell).map(str::to_owned).collect())
+            .unwrap_or_default();
+        let new: BTreeSet<&str> = next.map(|cell| edges(cell).collect()).unwrap_or_default();
+        for dep in &old {
+            if !new.contains(dep.as_str()) {
+                self.delete(&Records::reader_key(dep, id));
+            }
+        }
+        for dep in new {
+            if !old.contains(dep) {
+                self.write_reader(Records::reader_key(dep, id));
+            }
+        }
+    }
+
+    /// A reader record is its cell's reverse edge, reserved in the cell's
+    /// accounted graph bytes rather than charged as an overlay write.
+    fn write_reader(&mut self, id: String) {
+        self.speculative_read(&id);
+        self.changed.insert(id.clone());
+        self.preview.changed.insert(id.clone());
+        self.staged.insert(id, Value::Null);
+    }
+
+    fn write(&mut self, id: String, value: Value) -> EngineResult<()> {
         self.speculative_read(&id);
         self.retain(&id, Some(&value))?;
         self.changed.insert(id.clone());
@@ -536,7 +588,7 @@ impl Engine<'_> {
         Ok(())
     }
 
-    fn remove(&mut self, id: &str) {
+    fn delete(&mut self, id: &str) {
         self.speculative_read(id);
         if let Some(bytes) = self.retained_costs.remove(id) {
             self.retained_bytes = self.retained_bytes.saturating_sub(bytes);
@@ -554,10 +606,7 @@ impl Engine<'_> {
         if !id.starts_with("cell:") && !id.starts_with("root:") {
             return;
         }
-        let bytes = self
-            .staged
-            .reactive()
-            .unshared_bytes(self.base.reactive(), id);
+        let bytes = metadata::ReactiveIndex::unshared_bytes(&self.staged, &self.base, id);
         let previous = if bytes == 0 {
             self.graph_costs.remove(id)
         } else {
@@ -1036,7 +1085,7 @@ impl Engine<'_> {
     fn check_materialized_keys(&mut self, root: &str) -> EngineResult<()> {
         if self.keys_ready
             || matches!(self.mode, "deployment" | "keyUpdate")
-            || !self.staged.reactive().reverse.contains_key("managedKeys")
+            || !self.staged.has_readers("managedKeys")
         {
             return Ok(());
         }
@@ -1235,7 +1284,7 @@ impl Engine<'_> {
             // virtual manifest must not invalidate every completed root again.
             bundle_changed = false;
             self.keys_changed = command["$keysChanged"] == true;
-            if self.staged.reactive().reverse.contains_key("managedKeys") {
+            if self.staged.has_readers("managedKeys") {
                 let catalog = self
                     .staged
                     .get("managedKeys")

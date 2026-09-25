@@ -105,10 +105,44 @@ Seeding batches slowed from 62 ms to 352 ms across the runs for the same reason.
 
 - Moving values to disk alone gains at most a factor of 1.5: keys, graph metadata and the proof would still take 17 KB per order. The graph metadata has to shrink or move to disk as well. Keys alone cost 131 bytes each in memory, so a disk-backed design has to keep them on disk too.
 - Before storage matters, materialized collections need the two fixes above: charge a transaction for the graph it changes, not the whole graph, and find added and removed roots from the transaction's writes. Otherwise they stop at about 40,000 rows per logical database.
-- Smaller in-memory sets would help today. Storing lone readers inline instead of in singleton `im::HashSet`s would save about 1 KB per dependency target, roughly 6 of this workload's 14.7 KB per order. That is an estimate from the singleton measurement, not an end-to-end result.
+- Most graph metadata can leave memory before any storage change. [Restructured graph metadata](#restructured-graph-metadata) moves reverse edges into records and drops three other per-cell structures, halving `Records`.
 - Startup needs the graph metadata built in bulk or read from disk, not rebuilt through per-record persistent-map updates. Scanning and parsing redb is under 10% of today's load.
 - Warm redb reads are cheap enough to serve from. The risk is SSD misses on the serial sequencer path: at 25–150 µs each, a few thousand per batch would stall a group for hundreds of milliseconds. Certificate validation should not need to reread values.
 - Receipts belong on disk too, or under retention.
+
+## Restructured graph metadata
+
+A follow-up on branch `memory-footprint` removes most per-cell structures from memory. Measuring each structure by building `Records` without it first (10,000 orders) put reverse edges at 10.7 KB per order, the cells map at 1.7 KB, outcome markers at 0.9 KB, bucket memberships at 0.4 KB, and roots at 0.3 KB. The changes:
+
+- **Reverse edges are records.** For each non-scan dependency of a stored cell, the engine writes `reader:<dependency>\0<cell>` in the same patch, like an index entry. Propagation seeks a dependency's readers by prefix. They are replicated, persisted and copied like any other record, so startup no longer derives them. Reader records share one null value in memory.
+- **No cells map.** The index keeps a count of cells and parses a cell record again when it is replaced. Code that needs every cell scans the `cell:` records of its graph.
+- **No outcome markers.** A certificate stamps a stored cell by its record's allocation. Patches never rewrite an unchanged record, so the stamp holds until the outcome or the dependencies change. Before, a change to dependencies alone, with the same outcome, kept cached results valid; now it invalidates them.
+- **No marker per equality bucket.** A certificate stamps a bucket by the entries in its range, like an index window, with one marker per index as the fast path. A change to any bucket of that index makes the next check compare the bucket's entries.
+
+Heap per order at 10,000 orders:
+
+| | Before | After |
+| --- | ---: | ---: |
+| Keys per order | 14 | 20 |
+| Stored JSON text | 1,843 | 2,346 |
+| Keys and parsed values | 10,698 | 11,956 |
+| Graph metadata | 14,779 | 702 |
+| Production `Records` | 25,461 | 12,659 |
+
+Creating an order writes 6 reader records, 27% more stored text. Alternating runs of both builds at 30,000 orders, on a host loaded by other benchmarks:
+
+| | Before | After |
+| --- | ---: | ---: |
+| Load into `Records` | 1,089–1,128 ms | 507–562 ms |
+| First mutation after loading | 79–82 ms | 63–65 ms |
+| Seeding 30,000 orders | 6.0–6.5 s | 5.1–6.0 s |
+| Process CPU time | 16.3–16.6 s | 12.9–14.1 s |
+| Create one order | 16.9–17.2 ms | 17.2–19.7 ms |
+| Update one line | 0.09–0.13 ms | 0.08–0.16 ms |
+
+All 623 library tests pass. The JavaScript-reference differential test now compares patches without reader records, then checks after every step that the stored reader records are exactly the reverse of every cell's dependencies. A new case covers rows moving between equality buckets.
+
+What still grows with the graph in memory: roots (250 bytes per order) and the topology proof (450 bytes per order of pending frontier after loading, 775 once validated). Removing a root runs the full collector over the whole graph: deleting one order takes 32 ms at 10,000 orders and 146 ms at 30,000. Reader records make an incremental replacement possible: store each cell's height, propagate height changes up through reader records to detect cycles and depth, and delete cells that are neither roots nor read by any cell.
 
 ## What this does not measure
 

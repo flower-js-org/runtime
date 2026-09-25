@@ -675,7 +675,12 @@ async fn collect(app: &App, id: String, requested: Option<usize>) -> Result<Valu
             if state.data.active_graph().is_none() {
                 return Err(error("cleanup would remove the active legacy graph"));
             }
-            prefixes.extend(["cell:".into(), "root:".into(), "clock".into()]);
+            prefixes.extend([
+                "cell:".into(),
+                "root:".into(),
+                "clock".into(),
+                "reader:".into(),
+            ]);
         }
     }
     let mut deletes = Vec::new();

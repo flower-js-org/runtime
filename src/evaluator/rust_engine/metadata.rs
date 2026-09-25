@@ -1,6 +1,7 @@
 //! Structurally shared indexes derived from immutable application records.
-//! Updating source values does no graph work. Cell outcome changes keep reverse
-//! edges and the reachability proof when dependency topology is unchanged.
+//! Updating source values does no graph work. Cell outcome changes keep the
+//! reachability proof when dependency topology is unchanged. Reverse edges are
+//! durable `reader:` records maintained by the engine, not derived here.
 
 use super::*;
 use std::sync::OnceLock;
@@ -44,16 +45,69 @@ impl Topology {
     }
 }
 
-#[derive(Clone, Debug)]
-pub(super) struct Cell {
-    deps: Arc<[String]>,
-    // Parsed `scan:` dependencies, which have no reverse edges.
-    scans: Arc<[windows::Window]>,
+/// The selected graph's whole accounted size: what building it from nothing
+/// costs.
+#[cfg(test)]
+pub(super) fn graph_bytes(data: &Records) -> usize {
+    let empty = Records::new();
+    data.graph_cells()
+        .map(|(id, _)| id)
+        .chain(data.graph_roots().map(|(id, _)| id))
+        .map(|id| ReactiveIndex::unshared_bytes(data, &empty, id))
+        .sum()
+}
+
+/// What the index derives from one stored cell record. It is parsed again
+/// from the record whenever the record is replaced, not retained per cell.
+struct Cell<'a> {
+    deps: Vec<&'a str>,
+    // Parsed `scan:` dependencies, which have no reader records.
+    scans: Vec<windows::Window>,
     // The collection and fields of each `index-bucket:` dependency.
-    buckets: Arc<[(String, Vec<String>)]>,
-    error: Option<EngineError>,
+    buckets: Vec<(String, Vec<String>)>,
     bytes: usize,
     clock: bool,
+}
+
+impl<'a> Cell<'a> {
+    fn parse(id: &str, value: &'a Value) -> Self {
+        let listed = value.get("deps").and_then(Value::as_array);
+        let clock = listed.is_none_or(|deps| {
+            deps.iter()
+                .any(|value| value == "clock" || value == "managedKeys")
+        });
+        let deps: Vec<&str> = listed
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        // validate_cell rejected any scan dependency that does not parse.
+        let scans = deps
+            .iter()
+            .filter(|dep| windows::Window::is_dependency(dep))
+            .filter_map(|dep| windows::Window::parse(dep))
+            .collect();
+        let buckets = deps
+            .iter()
+            .filter_map(|dep| dependencies::bucket_spec(dep))
+            .collect();
+        // Includes persistent depth certificates and pending append IDs, as
+        // well as traversal reservations and the cell's reader records.
+        let bytes = 384_usize
+            .saturating_add(id.len().saturating_mul(6))
+            .saturating_add(
+                deps.iter()
+                    .map(|dep| 160 + id.len() + dep.len().saturating_mul(2))
+                    .sum::<usize>(),
+            );
+        Self {
+            deps,
+            scans,
+            buckets,
+            bytes,
+            clock,
+        }
+    }
 }
 
 /// Scan windows by collection, then by index fields (`None` orders by key).
@@ -76,11 +130,10 @@ impl Root {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ReactiveIndex {
-    pub(super) reverse: im::HashMap<String, im::HashSet<String>>,
     scans: ScanWindows,
     // Equality-queried field sets by collection, with their dependency counts.
     buckets: im::HashMap<String, im::HashMap<Vec<String>, usize>>,
-    pub(super) cells: im::HashMap<String, Arc<Cell>>,
+    cell_count: usize,
     pub(super) roots: im::OrdMap<String, Arc<Value>>,
     pub(super) root_cells: im::OrdMap<Key, Arc<Root>>,
     invalid_cells: im::OrdMap<String, EngineError>,
@@ -95,16 +148,14 @@ pub(crate) struct ReactiveIndex {
     // Physical sources/indexes are shared by all graph generations. Their
     // marker map is updated once and retained by each graph in O(1).
     memberships: im::HashMap<String, dependencies::Generation>,
-    generations: im::HashMap<String, dependencies::Generation>,
 }
 
 impl Default for ReactiveIndex {
     fn default() -> Self {
         Self {
-            reverse: im::HashMap::new(),
             scans: im::HashMap::new(),
             buckets: im::HashMap::new(),
-            cells: im::HashMap::new(),
+            cell_count: 0,
             roots: im::OrdMap::new(),
             root_cells: im::OrdMap::new(),
             invalid_cells: im::OrdMap::new(),
@@ -113,7 +164,6 @@ impl Default for ReactiveIndex {
             topology: Arc::new(Topology::empty()),
             shape: Arc::new(()),
             memberships: im::HashMap::new(),
-            generations: im::HashMap::new(),
         }
     }
 }
@@ -148,30 +198,17 @@ impl ReactiveIndex {
             );
         }
         if id.starts_with("cell:") {
-            if !previous
-                .zip(next)
-                .is_some_and(|(old, new)| equal(&old["outcome"], &new["outcome"]))
-            {
-                Self::change_generation(
-                    &mut self.generations,
-                    format!("outcome:{id}"),
-                    previous.is_some(),
-                    next.is_some(),
-                );
-            }
             self.update_cell(id, previous, next, record_depth_valid);
         } else if id.starts_with("root:") {
             self.update_root(id, previous, next, record_depth_valid);
         }
     }
 
+    /// A source collection, index bucket or index range's membership token.
+    /// Cell outcomes need none: a stored cell keeps its allocation until its
+    /// outcome or dependencies change.
     pub(crate) fn generation(&self, id: &str) -> Option<&Arc<()>> {
-        let generations = if id.starts_with("outcome:") {
-            &self.generations
-        } else {
-            &self.memberships
-        };
-        generations.get(id).map(|generation| &generation.token)
+        self.memberships.get(id).map(|generation| &generation.token)
     }
 
     pub(crate) fn share_memberships(&mut self, source: &Self) {
@@ -284,37 +321,37 @@ impl ReactiveIndex {
         }
     }
 
-    /// Accounted bytes of this graph's entry for cell or root `id` that `base`
-    /// does not share, i.e. what a transaction adds or replaces. Entries kept
-    /// unchanged from the snapshot, and removed entries, cost nothing.
-    pub(super) fn unshared_bytes(&self, base: &Self, id: &str) -> usize {
+    /// Stored cells of this graph, including invalid ones.
+    pub(crate) fn cell_count(&self) -> usize {
+        self.cell_count
+    }
+
+    /// Accounted bytes of the graph entry for cell or root `id` that `base`
+    /// does not share, i.e. what a transaction adds or replaces. Stored
+    /// records are the graph's entries: one kept from the snapshot, a cell
+    /// whose outcome alone changed, and a removed entry cost nothing.
+    pub(super) fn unshared_bytes(staged: &Records, base: &Records, id: &str) -> usize {
+        let Some(record) = staged.get_shared(id) else {
+            return 0;
+        };
+        let old = base.get_shared(id);
+        if old.is_some_and(|old| Arc::ptr_eq(old, record)) {
+            return 0;
+        }
         if id.starts_with("cell:") {
-            match (self.cells.get(id), base.cells.get(id)) {
-                (Some(cell), Some(old)) if Arc::ptr_eq(cell, old) => 0,
-                (Some(cell), _) => cell.bytes,
-                (None, _) => 0,
+            let same_edges = old.is_some_and(|old| old.get("deps") == record.get("deps"))
+                && staged.reactive().invalid_cells.get(id) == base.reactive().invalid_cells.get(id);
+            if same_edges {
+                0
+            } else {
+                Cell::parse(id, record).bytes
             }
         } else if id.starts_with("root:") {
-            match (self.roots.get(id), base.roots.get(id)) {
-                (Some(root), Some(old)) if Arc::ptr_eq(root, old) => 0,
-                // Root lookup/traversal storage plus a pending append-frontier entry.
-                (Some(_), _) => 320 + id.len().saturating_mul(4),
-                (None, _) => 0,
-            }
+            // Root lookup/traversal storage plus a pending append-frontier entry.
+            320 + id.len().saturating_mul(4)
         } else {
             0
         }
-    }
-
-    /// The whole graph's accounted size: what building it from nothing costs.
-    #[cfg(test)]
-    pub(super) fn bytes(&self) -> usize {
-        let empty = Self::default();
-        self.cells
-            .keys()
-            .chain(self.roots.keys())
-            .map(|id| self.unshared_bytes(&empty, id))
-            .sum()
     }
 
     pub(super) fn cacheable(&self) -> bool {
@@ -368,15 +405,9 @@ impl ReactiveIndex {
         next: Option<&Arc<Value>>,
         record_depth_valid: bool,
     ) {
-        let old = self.cells.get(id).cloned();
+        let old = previous.map(|value| Cell::parse(id, value));
+        let old_error = self.invalid_cells.get(id).cloned();
         let new = next.map(|value| {
-            let clock = value
-                .get("deps")
-                .and_then(Value::as_array)
-                .is_none_or(|deps| {
-                    deps.iter()
-                        .any(|value| value == "clock" || value == "managedKeys")
-                });
             let error = if record_depth_valid {
                 Ok(())
             } else {
@@ -384,75 +415,25 @@ impl ReactiveIndex {
                 // depth. Protect recursive identity handling using only args.
                 depth(&value["args"], 0, "INPUT_INVALID")
             }
-            .and_then(|()| validate_cell(id, value, previous, old.as_deref()))
-            .err();
-            if let Some(old) = &old
-                && old.error == error
-                && old.clock == clock
-                && value
-                    .get("deps")
-                    .and_then(Value::as_array)
-                    .is_some_and(|deps| {
-                        deps.len() == old.deps.len()
-                            && deps
-                                .iter()
-                                .zip(old.deps.iter())
-                                .all(|(value, dep)| value.as_str() == Some(dep.as_str()))
-                    })
-            {
-                return old.clone();
-            }
-            let deps: Arc<[String]> = value
-                .get("deps")
-                .and_then(Value::as_array)
-                .map(|deps| {
-                    deps.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-                .into();
-            // validate_cell rejected any scan dependency that does not parse.
-            let scans: Arc<[windows::Window]> = deps
-                .iter()
-                .filter(|dep| windows::Window::is_dependency(dep))
-                .filter_map(|dep| windows::Window::parse(dep))
-                .collect::<Vec<_>>()
-                .into();
-            let buckets: Arc<[(String, Vec<String>)]> = deps
-                .iter()
-                .filter_map(|dep| dependencies::bucket_spec(dep))
-                .collect::<Vec<_>>()
-                .into();
-            // Includes persistent depth certificates and pending append IDs,
-            // as well as the previous reverse-edge and traversal reservations.
-            let bytes = 384_usize
-                .saturating_add(id.len().saturating_mul(6))
-                .saturating_add(
-                    deps.iter()
-                        .map(|dep| 160 + id.len() + dep.len().saturating_mul(2))
-                        .sum::<usize>(),
-                );
-            Arc::new(Cell {
-                deps,
-                scans,
-                buckets,
-                error,
-                bytes,
-                clock,
+            .and_then(|()| {
+                validate_cell(id, value, previous, previous.is_some() && old_error.is_none())
             })
+            .err();
+            (Cell::parse(id, value), error)
         });
-        if let (Some(old), Some(new)) = (&old, &new)
-            && Arc::ptr_eq(old, new)
+        // An outcome change alone leaves every derived structure unchanged.
+        if let (Some(old), Some((new, error))) = (&old, &new)
+            && old_error == *error
+            && old.clock == new.clock
+            && old.deps == new.deps
         {
             return;
         }
         self.shape = Arc::new(());
         let topology_changed = match (&old, &new) {
-            (Some(old), Some(new)) => {
-                old.error.is_some()
-                    || new.error.is_some()
+            (Some(old), Some((new, error))) => {
+                old_error.is_some()
+                    || error.is_some()
                     || !old
                         .deps
                         .iter()
@@ -463,7 +444,7 @@ impl ReactiveIndex {
             _ => true,
         };
         if topology_changed {
-            if old.is_none() && new.as_ref().is_some_and(|cell| cell.error.is_none()) {
+            if old.is_none() && new.as_ref().is_some_and(|(_, error)| error.is_none()) {
                 self.append_topology(id, false);
             } else {
                 self.invalidate_topology();
@@ -473,39 +454,17 @@ impl ReactiveIndex {
             self.clock_readers -= usize::from(old.clock);
             self.change_scans(&old.scans, id, false);
             self.change_buckets(&old.buckets, false);
-            for dep in old.deps.iter() {
-                if windows::Window::is_dependency(dep) {
-                    continue;
-                }
-                if let Some(readers) = self.reverse.get_mut(dep) {
-                    readers.remove(id);
-                    if readers.is_empty() {
-                        self.reverse.remove(dep);
-                    }
-                }
-            }
+            self.cell_count -= 1;
         }
         self.invalid_cells.remove(id);
-        if let Some(new) = new {
+        if let Some((new, error)) = new {
             self.clock_readers += usize::from(new.clock);
             self.change_scans(&new.scans, id, true);
             self.change_buckets(&new.buckets, true);
-            for dep in new
-                .deps
-                .iter()
-                .filter(|dep| !windows::Window::is_dependency(dep))
-            {
-                self.reverse
-                    .entry(dep.clone())
-                    .or_default()
-                    .insert(id.into());
+            if let Some(error) = error {
+                self.invalid_cells.insert(id.into(), error);
             }
-            if let Some(error) = &new.error {
-                self.invalid_cells.insert(id.into(), error.clone());
-            }
-            self.cells.insert(id.into(), new);
-        } else {
-            self.cells.remove(id);
+            self.cell_count += 1;
         }
     }
 
@@ -571,11 +530,11 @@ fn validate_cell(
     id: &str,
     value: &Value,
     previous: Option<&Arc<Value>>,
-    old: Option<&Cell>,
+    previous_valid: bool,
 ) -> EngineResult<()> {
     record(value, "stored cell", "INPUT_INVALID")?;
     let name = string(&value["name"], "stored cell name", "INPUT_INVALID")?;
-    let same_identity = old.is_some_and(|old| old.error.is_none())
+    let same_identity = previous_valid
         && previous.is_some_and(|old| old["name"] == value["name"] && old["args"] == value["args"]);
     if value.get("args").is_none() || (!same_identity && cell_id(name, &value["args"]) != id) {
         return Err(EngineError::new(

@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
-use std::ops::{Index, RangeBounds};
+use std::ops::{Bound, Index, RangeBounds};
 use std::sync::Arc;
 
 use im::{OrdMap, OrdSet};
@@ -148,13 +148,47 @@ impl Records {
     /// Enumerate selected roots by logical identity, without scanning sources
     /// or any of the other graph generations retained in this snapshot.
     pub fn graph_roots(&self) -> impl DoubleEndedIterator<Item = (&str, &Value)> {
-        let prefix = self
-            .graph_generation()
-            .map_or_else(String::new, |generation| format!("graph:{generation}:"));
+        let prefix = self.graph_prefix();
         let offset = prefix.len();
         self.0
             .range(format!("{prefix}root:")..format!("{prefix}root;"))
             .map(move |(key, value)| (&key[offset..], value.as_ref()))
+    }
+
+    /// Stored cells of the selected graph by logical identity.
+    pub fn graph_cells(&self) -> impl DoubleEndedIterator<Item = (&str, &Value)> {
+        let prefix = self.graph_prefix();
+        let offset = prefix.len();
+        self.0
+            .range(format!("{prefix}cell:")..format!("{prefix}cell;"))
+            .map(move |(key, value)| (&key[offset..], value.as_ref()))
+    }
+
+    /// The durable key recording that `reader` depends on `dependency`. Keys
+    /// are grouped by dependency, so propagation seeks one dependency's
+    /// readers instead of holding a reverse index in memory. Dependency IDs are
+    /// generated from escaped JSON and never contain NUL.
+    pub fn reader_key(dependency: &str, reader: &str) -> String {
+        format!("reader:{dependency}\0{reader}")
+    }
+
+    /// Cells of the selected graph that read `dependency`, in key order.
+    pub fn readers<'a>(&'a self, dependency: &str) -> impl Iterator<Item = &'a str> + 'a {
+        let prefix = format!("{}reader:{dependency}\0", self.graph_prefix());
+        let upper = format!("{}\u{1}", &prefix[..prefix.len() - 1]);
+        let offset = prefix.len();
+        self.0
+            .range::<_, str>((Bound::Included(prefix.as_str()), Bound::Excluded(upper.as_str())))
+            .map(move |(key, _)| &key[offset..])
+    }
+
+    pub fn has_readers(&self, dependency: &str) -> bool {
+        self.readers(dependency).next().is_some()
+    }
+
+    fn graph_prefix(&self) -> String {
+        self.graph_generation()
+            .map_or_else(String::new, |generation| format!("graph:{generation}:"))
     }
 
     /// O(1) identity check useful for revision/cache comparisons.
@@ -189,6 +223,10 @@ impl Records {
     /// Return the old allocation without deep-copying it even when another
     /// application revision still owns that record.
     pub fn insert(&mut self, key: String, value: Value) -> Option<Arc<Value>> {
+        // Reader records carry no payload; they share one allocation.
+        if value.is_null() && is_reader_record(&key) {
+            return self.insert_shared(key, READER_VALUE.clone());
+        }
         self.insert_shared(key, Arc::new(value))
     }
 
@@ -365,7 +403,18 @@ fn valid_graph_generation(generation: &str) -> bool {
 }
 
 fn is_graph_record(key: &str) -> bool {
-    key == "clock" || key.starts_with("cell:") || key.starts_with("root:")
+    key == "clock"
+        || key.starts_with("cell:")
+        || key.starts_with("root:")
+        || key.starts_with("reader:")
+}
+
+static READER_VALUE: std::sync::LazyLock<Arc<Value>> =
+    std::sync::LazyLock::new(|| Arc::new(Value::Null));
+
+fn is_reader_record(key: &str) -> bool {
+    key.starts_with("reader:")
+        || split_graph_key(key).is_some_and(|(_, logical)| logical.starts_with("reader:"))
 }
 
 fn split_graph_key(key: &str) -> Option<(&str, &str)> {
@@ -525,10 +574,9 @@ mod tests {
     fn graph_pointer_switches_logical_reads_and_metadata_in_one_snapshot() {
         let mut records = graph_records();
         let legacy = records.clone();
-        let outcome = format!("outcome:{CELL}");
-        let legacy_outcome = legacy.reactive().generation(&outcome).unwrap();
+        let legacy_outcome = legacy.get_shared(CELL).unwrap();
         let candidate = records.graph_view(Some(GRAPH_A));
-        let candidate_outcome = candidate.reactive().generation(&outcome).unwrap();
+        let candidate_outcome = candidate.get_shared(CELL).unwrap();
         assert!(!Arc::ptr_eq(legacy_outcome, candidate_outcome));
         assert_eq!(records[CELL]["outcome"]["value"], 1);
         assert_eq!(records["clock"], 10);
@@ -547,7 +595,7 @@ mod tests {
             candidate.get_shared(CELL).unwrap()
         ));
         assert!(Arc::ptr_eq(
-            records.reactive().generation(&outcome).unwrap(),
+            records.get_shared(CELL).unwrap(),
             candidate_outcome
         ));
         assert_eq!(legacy[CELL]["outcome"]["value"], 1);
@@ -635,7 +683,7 @@ mod tests {
     fn graph_membership_indexes_cover_source_and_index_updates_in_every_generation() {
         let first = r#"source:["items","first"]"#;
         let second = r#"source:["items","second"]"#;
-        let bucket = r#"index-bucket:["items",["group"]]:"a""#;
+        let bucket = r#"index-entries:["items",["group"]]"#;
         let range = r#"index-range:["items",["group"]]"#;
         let index_entry = r#"index-entry:["items",["group"]]:"a":"first""#;
         let ordered_entry = r#"ordered-entry:["items",["group"]]:"a":"first""#;
@@ -715,11 +763,7 @@ mod tests {
             for generation in [None, Some(GRAPH_A), Some(GRAPH_B)] {
                 let view = restored.graph_view(generation);
                 assert_eq!(view.graph_roots().count(), 1);
-                assert!(
-                    view.reactive()
-                        .generation(&format!("outcome:{CELL}"))
-                        .is_some()
-                );
+                assert!(view.get_shared(CELL).is_some());
                 assert!(
                     view.reactive()
                         .generation(r#"collection:"items""#)
@@ -790,7 +834,6 @@ mod tests {
         let mut records = graph_records();
         let before = records.clone();
         let collection = r#"collection:"items""#;
-        let outcome = format!("outcome:{CELL}");
         let old_marker = before.reactive().generation(collection).unwrap();
         for generation in [None, Some(GRAPH_A), Some(GRAPH_B)] {
             assert!(Arc::ptr_eq(
@@ -813,15 +856,15 @@ mod tests {
                 current.reactive().generation(collection).unwrap()
             ));
             assert!(Arc::ptr_eq(
-                previous.reactive().generation(&outcome).unwrap(),
-                current.reactive().generation(&outcome).unwrap()
+                previous.get_shared(CELL).unwrap(),
+                current.get_shared(CELL).unwrap()
             ));
         }
         let a = records.graph_view(Some(GRAPH_A));
         let b = records.graph_view(Some(GRAPH_B));
         assert!(!Arc::ptr_eq(
-            a.reactive().generation(&outcome).unwrap(),
-            b.reactive().generation(&outcome).unwrap()
+            a.get_shared(CELL).unwrap(),
+            b.get_shared(CELL).unwrap()
         ));
         records.insert(format!("graph:{GRAPH_A}:{CELL}"), graph_cell(42));
         assert!(Arc::ptr_eq(
@@ -829,12 +872,8 @@ mod tests {
             before.reactive().generation(collection).unwrap()
         ));
         assert!(Arc::ptr_eq(
-            b.reactive().generation(&outcome).unwrap(),
-            records
-                .graph_view(Some(GRAPH_B))
-                .reactive()
-                .generation(&outcome)
-                .unwrap()
+            b.get_shared(CELL).unwrap(),
+            records.graph_view(Some(GRAPH_B)).get_shared(CELL).unwrap()
         ));
     }
 

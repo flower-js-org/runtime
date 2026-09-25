@@ -232,6 +232,23 @@ fn certificates_track_collection_and_index_phantoms_but_skip_unrelated_buckets()
     );
     assert!(!present.valid(&data));
     assert!(!range.valid(&data));
+    // Moving a row between buckets changes index entries, not the collection.
+    let (_, present) = query(&data, "indexed", json!("a"), &fixture);
+    deploy(
+        &mut data,
+        json!({"writes":[{"collection":"items","key":"other","value":{"group":"a","value":2}}]}),
+        &fixture,
+    );
+    assert!(!present.valid(&data), "a row moved into the bucket");
+    let (_, present) = query(&data, "indexed", json!("a"), &fixture);
+    let (_, other_bucket) = query(&data, "indexed", json!("c"), &fixture);
+    deploy(
+        &mut data,
+        json!({"writes":[{"collection":"items","key":"other","value":{"group":"b","value":2}}]}),
+        &fixture,
+    );
+    assert!(!present.valid(&data), "a row moved out of the bucket");
+    assert!(other_bucket.valid(&data), "an unrelated bucket is unchanged");
     let (_, present) = query(&data, "indexed", json!("a"), &fixture);
     deploy(
         &mut data,
@@ -290,18 +307,35 @@ fn markers_handle_delimiters_and_quoted_unicode_without_cross_bucket_collisions(
         canonical_json(&json!([collection, fields]))
     );
     let mut data = Records::new();
-    for value in [
+    let values = [
         json!(null),
         json!(false),
         json!(12),
         json!(":quote\""),
         json!([":",{"a:":1}]),
-    ] {
-        let id = format!("{prefix}{}:\"row\"", canonical_json(&value));
-        let marker = indexes::bucket_id(collection, &fields, &value);
+    ];
+    let entries: Vec<String> = values
+        .iter()
+        .map(|value| format!("{prefix}{}:\"row\"", canonical_json(value)))
+        .collect();
+    let marker = format!(
+        "index-entries:{}",
+        canonical_json(&json!([collection, fields]))
+    );
+    for (value, id) in values.iter().zip(&entries) {
+        // A bucket is stamped by the entries in its window, which must
+        // contain exactly that bucket's entries.
+        let bucket = indexes::bucket_id(collection, &fields, value);
+        let (window_marker, lower, upper) =
+            super::super::dependencies::bucket_window(&bucket).unwrap();
+        assert_eq!(window_marker, marker);
+        for other in &entries {
+            let inside = lower.as_str() <= other.as_str() && other.as_str() < upper.as_str();
+            assert_eq!(inside, other == id, "{bucket}: {other}");
+        }
         data.insert(id.clone(), json!("row"));
         assert!(data.reactive().generation(&marker).is_some(), "{id}");
-        data.remove(&id);
+        data.remove(id);
         assert!(data.reactive().generation(&marker).is_none());
     }
     let ordered = super::super::ranges::entry(&spec, "row", &json!({"x:[]":1})).unwrap();

@@ -1,5 +1,6 @@
 //! Compare the Rust coordinator against the original JavaScript state machine.
 use super::*;
+use std::collections::BTreeSet;
 
 const APPLICATION: &str = r#"
 let calls = 0;
@@ -40,9 +41,35 @@ for (const name of Object.keys(definitions)) {
 var __flowerBundle={default:{definitions,http}};
 "#;
 
+// Reader records are a physical index the oracle does not keep; compare the
+// logical patch, then check the index against every stored cell separately.
+fn is_reader(key: &str) -> bool {
+    key.starts_with("reader:")
+}
+
 fn representation(value: &Evaluation) -> Value {
-    json!({"puts":value.puts,"deletes":value.deletes,"value":value.value,"query_cacheable":value.query_cacheable,
+    let puts: BTreeMap<_, _> = value.puts.iter().filter(|(key, _)| !is_reader(key)).collect();
+    let deletes: Vec<_> = value.deletes.iter().filter(|key| !is_reader(key)).collect();
+    json!({"puts":puts,"deletes":deletes,"value":value.value,"query_cacheable":value.query_cacheable,
         "query_clock_polled":value.query_clock_polled,"query_changes_at":value.query_changes_at})
+}
+
+fn assert_readers_match_cells(data: &BTreeMap<String, Value>) {
+    let expected: BTreeSet<String> = data
+        .iter()
+        .filter(|(key, _)| key.starts_with("cell:"))
+        .flat_map(|(key, cell)| {
+            cell["deps"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|dep| !dep.starts_with("scan:"))
+                .map(move |dep| Records::reader_key(dep, key))
+        })
+        .collect();
+    let actual: BTreeSet<String> = data.keys().filter(|key| is_reader(key)).cloned().collect();
+    assert_eq!(actual, expected, "reader records must mirror cell dependencies");
 }
 
 fn compare(data: &mut BTreeMap<String, Value>, input: Value, mode: &str, now: u64) {
@@ -73,6 +100,7 @@ fn compare(data: &mut BTreeMap<String, Value>, input: Value, mode: &str, now: u6
                 data.remove(&key);
             }
             data.extend(actual.puts);
+            assert_readers_match_cells(data);
         }
         (Err(actual), Err(expected)) => {
             assert_eq!(
