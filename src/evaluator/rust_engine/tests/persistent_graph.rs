@@ -108,7 +108,40 @@ fn fixture() -> Fixture {
             }) as Callback,
         ),
         ("noop", (|_, _| Ok(Value::Null)) as Callback),
+        (
+            "batch",
+            (|args, host| {
+                let top = json!({"kind":"derived","name":"top"});
+                let mut observed = Vec::new();
+                for op in args.as_array().unwrap() {
+                    let tenant = op[1].as_str().unwrap();
+                    let result = match op[0].as_u64().unwrap() {
+                        0 => set(host, "input", tenant, op[2].clone()),
+                        1 => host("materialize", json!([top, tenant])),
+                        2 => host("unmaterialize", json!([top, tenant])),
+                        3 => get(host, "derived", "top", json!(tenant)),
+                        4 => get(host, "derived", "scratch", json!(tenant)),
+                        5 => set(
+                            host,
+                            "fail",
+                            tenant,
+                            op[2].as_u64().unwrap().is_multiple_of(3).into(),
+                        ),
+                        // Too deep for a root record: this preview fails, and
+                        // rolls back, before evaluating the temporary root.
+                        _ => get(host, "derived", "top", nested(tenant)),
+                    };
+                    observed.push(result.unwrap_or_else(|error| json!(error.code)));
+                }
+                Ok(Value::Array(observed))
+            }) as Callback,
+        ),
     ])
+}
+
+/// Valid arguments whose root record `{"name","args"}` exceeds 128 levels.
+fn nested(tenant: &str) -> Value {
+    (0..127).fold(json!(tenant), |value, _| json!([value]))
 }
 
 fn tenants(fixture: &Fixture, count: usize) -> Records {
@@ -211,6 +244,67 @@ fn randomized_previews_match_forced_full_traversal() {
             fast = serde_json::from_str(&serde_json::to_string(&fast).unwrap()).unwrap();
         }
     }
+}
+
+#[test]
+fn batched_root_edits_and_rollbacks_match_full_traversal() {
+    let fixture = fixture();
+    let mut fast = tenants(&fixture, 24);
+    let mut full = fast.clone();
+    let root = |tenant: &str| format!("root:{}", &cell_id("top", &json!(tenant))[5..]);
+    let mut roots: BTreeSet<String> = (0..24).map(|id| root(&id.to_string())).collect();
+    let mut state = 0x2007_5eed_u64;
+    let mut ops = |count: u64, kinds: &[u64]| -> Vec<Value> {
+        (0..count)
+            .map(|index| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let kind = kinds[(state >> 40) as usize % kinds.len()];
+                json!([kind, ((state >> 20) % 32).to_string(), index])
+            })
+            .collect()
+    };
+    for step in 0..96 {
+        // Tenants 24 to 31 start without roots. One transaction adds and
+        // removes roots, previews them temporarily and fails previews between.
+        let mutation = ops(1 + step % 9, &[0, 1, 2, 3, 4, 5, 6]);
+        let query = ops(1 + step % 5, &[3, 4, 6]);
+        for (batch, mode) in [(mutation, "mutation"), (query, "query")] {
+            let invocation = json!({"name":"batch","args":batch});
+            let actual = run(
+                fast.clone(),
+                invocation.clone(),
+                mode,
+                Some(step + 1),
+                &fixture,
+            );
+            let expected = graph::with_full_graph(|| {
+                run(full.clone(), invocation, mode, Some(step + 1), &fixture)
+            });
+            match (actual, expected) {
+                (Ok(actual), Ok(expected)) => {
+                    assert_eq!(comparable(&actual), comparable(&expected), "step {step}");
+                    apply(&mut fast, actual);
+                    apply(&mut full, expected);
+                    // Only the transaction's own materialization calls, in
+                    // order, decide which roots persist.
+                    for op in &batch {
+                        let id = root(op[1].as_str().unwrap());
+                        match op[0].as_u64().unwrap() {
+                            1 => roots.insert(id),
+                            2 => roots.remove(&id),
+                            _ => false,
+                        };
+                    }
+                }
+                (Err(actual), Err(expected)) => assert_eq!(actual, expected, "step {step}"),
+                (actual, expected) => panic!("step {step}: fast {actual:?}, full {expected:?}"),
+            }
+            assert_eq!(fast, full, "step {step}");
+            let stored: BTreeSet<String> = fast.graph_roots().map(|(id, _)| id.into()).collect();
+            assert_eq!(stored, roots, "step {step}");
+        }
+    }
+    assert!(roots.len() != 24, "batches changed the root set");
 }
 
 #[test]
