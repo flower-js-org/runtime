@@ -19,9 +19,22 @@ pub(super) struct Decision {
     pub mode: &'static str,
     pub reason: &'static str,
     pub count: usize,
+    // Hard ceiling on one group's requests, including a successor that
+    // continues past the adaptive targets while its predecessor commits.
+    pub limit: usize,
     pub budget: Duration,
     pub queued: usize,
     pub lag: Lag,
+}
+
+impl Decision {
+    /// Adaptive count and time targets bound work that could delay a group's
+    /// submission. A pipelined successor cannot be submitted before its
+    /// predecessor completes, so until then it keeps preparing arrivals, up
+    /// to `limit`. Fixed mode keeps its exact thresholds for comparisons.
+    pub fn work_conserving(&self) -> bool {
+        self.mode == "adaptive"
+    }
 }
 
 /// Log progress is a backpressure signal, not a read-consistency proof. Remote
@@ -129,10 +142,12 @@ impl Controller {
 
     pub fn decide(&self, queued: usize) -> Decision {
         if !self.adaptive() {
+            let count = self.cap.expect("fixed mode resolves a batch size");
             return Decision {
                 mode: "fixed",
                 reason: "fixed_count",
-                count: self.cap.expect("fixed mode resolves a batch size"),
+                count,
+                limit: count,
                 budget: self.maximum,
                 queued,
                 lag: Lag::default(),
@@ -163,6 +178,7 @@ impl Controller {
             mode: "adaptive",
             reason,
             count: self.bounded_count(count),
+            limit: self.bounded_count(usize::MAX),
             budget,
             queued,
             lag: Lag::default(),

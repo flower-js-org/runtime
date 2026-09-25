@@ -87,6 +87,7 @@ impl Drop for CancelOnDrop {
 }
 
 impl Batch {
+    #[allow(clippy::too_many_arguments)]
     pub async fn prepare(
         mut self,
         app: Arc<App>,
@@ -95,6 +96,8 @@ impl Batch {
         budget: Duration,
         prior_results: usize,
         maintaining_graph: bool,
+        // A pipelined successor's predecessor; see `Arrivals`.
+        predecessor_done: Option<Arc<AtomicBool>>,
     ) -> Self {
         let canceled = CancelOnDrop(Arc::new(Cancellation {
             stopped: AtomicBool::new(false),
@@ -139,9 +142,22 @@ impl Batch {
                         if cancellation.stopped.load(Ordering::Acquire) {
                             break;
                         }
-                        if prior_results + self.results.len() > 0 && preparing.elapsed() >= budget {
-                            self.stop_reason = Some("preparation_time");
-                            break;
+                        if prior_results + self.results.len() > 0 {
+                            // A successor keeps preparing while its predecessor
+                            // is durable-pending, then stops without delaying
+                            // its own submission. Other groups keep the budget.
+                            let stop = match &predecessor_done {
+                                Some(done) => done
+                                    .load(Ordering::Acquire)
+                                    .then_some("predecessor_completed"),
+                                None => {
+                                    (preparing.elapsed() >= budget).then_some("preparation_time")
+                                }
+                            };
+                            if stop.is_some() {
+                                self.stop_reason = stop;
+                                break;
+                            }
                         }
                         if authorization::required(&self.state) {
                             break;

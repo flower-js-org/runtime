@@ -1363,6 +1363,88 @@ async fn successor_fills_with_later_arrivals_during_the_same_commit() {
     fixture.close().await;
 }
 
+// A learned adaptive target of one call must not close a successor while its
+// predecessor is still committing. Stopping there would make every later
+// arrival wait for another whole durable round.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adaptive_successor_fills_past_its_targets_until_the_predecessor_completes() {
+    let mut fixture = Fixture::new(16, false).await;
+    let mut replies = ordered(
+        &fixture.app,
+        vec![(increment("predecessor", 1, None), false)],
+    )
+    .await;
+    let before = fixture.app.consensus.metrics().last_applied.unwrap().index;
+    let mut receiver = fixture.receiver.take().unwrap();
+    let (events, mut events_rx) = mpsc::unbounded_channel();
+    let app = fixture.app.clone();
+    let task = tokio::spawn(async move {
+        let hooks = Hooks { events };
+        let mut deferred = VecDeque::new();
+        let mut controller = Controller::new(tuning::settings().unwrap());
+        controller.adaptive_for_test(16, Duration::from_millis(50));
+        // One call already fills the learned preparation target.
+        controller.observe(1, Duration::from_millis(40), Duration::from_millis(1), true);
+        assert_eq!(controller.decide(1).count, 1);
+        pipeline_with_controller(
+            &app,
+            &mut receiver,
+            &mut deferred,
+            &mut controller,
+            Some(&hooks),
+        )
+        .await;
+        (receiver, deferred)
+    });
+    let Event::Prepared { proceed, .. } = next_event(&mut events_rx).await else {
+        panic!("expected predecessor")
+    };
+    proceed.send(()).unwrap();
+    let Event::Committing { proceed: commit } = next_event(&mut events_rx).await else {
+        panic!("expected held commit")
+    };
+    replies.extend(
+        ordered(
+            &fixture.app,
+            (0..3)
+                .map(|index| (increment(&format!("successor-{index}"), 1, None), false))
+                .collect(),
+        )
+        .await,
+    );
+    let Event::Prepared { requests, proceed } = next_event(&mut events_rx).await else {
+        panic!("expected successor prefix")
+    };
+    assert_eq!(requests, 1, "the adaptive count target collects one call");
+    proceed.send(()).unwrap();
+    for requests in [2, 3] {
+        let Event::Extended { requests: extended } = raw_event(&mut events_rx).await else {
+            panic!("expected the successor to keep filling")
+        };
+        assert_eq!(extended, requests);
+    }
+    commit.send(Decision::Apply).ok().unwrap();
+    let Event::Committing { proceed } = next_event(&mut events_rx).await else {
+        panic!("expected one successor commit")
+    };
+    proceed.send(Decision::Apply).ok().unwrap();
+    drop(events_rx);
+    let (receiver, deferred) = task.await.unwrap();
+    for (index, result) in responses(replies).await.into_iter().enumerate() {
+        let result = result.unwrap();
+        assert_eq!(result["revision"], index + 2);
+        assert_eq!(result["value"]["value"], index + 1);
+    }
+    assert!(deferred.is_empty());
+    assert_eq!(
+        fixture.app.consensus.metrics().last_applied.unwrap().index - before,
+        2,
+        "one predecessor and one successor Raft entry"
+    );
+    drop(receiver);
+    fixture.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn adaptive_backlog_preserves_fifo_cas_and_receipts_across_preparation_windows() {
     let mut fixture = Fixture::new(128, false).await;

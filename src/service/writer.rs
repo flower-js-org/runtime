@@ -13,6 +13,7 @@ use crate::consensus::{ApplyResult, Receipt, encoded_json_len};
 use batching::{Controller, Decision};
 use shared::SharedCommit;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::oneshot;
 use tracing::Instrument;
 
@@ -473,6 +474,7 @@ async fn pipeline_with_controller(
             return early_drain;
         }
         let (completed, completion) = oneshot::channel();
+        let predecessor_done = Arc::new(AtomicBool::new(false));
         let committing = async {
             let result = group
                 .commit_and_respond(
@@ -483,6 +485,7 @@ async fn pipeline_with_controller(
                 .await;
             // Both success and uncertainty close the successor's batching
             // window, after the predecessor's replies have been dispatched.
+            predecessor_done.store(true, Ordering::Release);
             let _ = completed.send(());
             result
         };
@@ -524,6 +527,7 @@ async fn pipeline_with_controller(
             receiver,
             deferred,
             completion,
+            predecessor_done: predecessor_done.clone(),
             deadline: started + window,
             stop_reason: "queue_empty",
         };
@@ -564,18 +568,25 @@ async fn pipeline_with_controller(
 
 /// Continue filling the successor during a real durability wait. Existing
 /// queued prefixes are prepared normally; late arrivals join only while the
-/// predecessor is outstanding, without an additional coalescing delay.
+/// predecessor is outstanding, without an additional coalescing delay. See
+/// `Decision::work_conserving` for the adaptive count and time targets.
 struct Arrivals<'a> {
     receiver: &'a mut mpsc::Receiver<Pending>,
     deferred: &'a mut VecDeque<Pending>,
     completion: oneshot::Receiver<()>,
+    // Set with `completion`; also readable from the blocking serial worker.
+    predecessor_done: Arc<AtomicBool>,
     deadline: Instant,
     stop_reason: &'static str,
 }
 
 impl Arrivals<'_> {
-    async fn next(&mut self, preparing: Instant, preparation_budget: Duration) -> Option<Pending> {
-        let deadline = self.deadline.min(preparing + preparation_budget);
+    fn overlapping(&self) -> bool {
+        !self.predecessor_done.load(Ordering::Acquire)
+    }
+
+    async fn next(&mut self, preparation_deadline: Option<Instant>) -> Option<Pending> {
+        let deadline = preparation_deadline.map_or(self.deadline, |at| at.min(self.deadline));
         if Instant::now() >= deadline {
             self.stop_reason = "preparation_time";
             return None;
@@ -587,11 +598,7 @@ impl Arrivals<'_> {
             self.stop_reason = "predecessor_completed";
             return None;
         }
-        let pending = match self
-            .deferred
-            .pop_front()
-            .or_else(|| self.receiver.try_recv().ok())
-        {
+        let pending = match self.ready_input() {
             Some(pending) => pending,
             None => tokio::select! {
                 biased;
@@ -600,6 +607,27 @@ impl Arrivals<'_> {
                 pending = self.receiver.recv() => pending?,
             },
         };
+        self.admit(pending)
+    }
+
+    /// Another already queued call, without waiting. Callers answered by the
+    /// same durable group tend to reply together; preparing them as one serial
+    /// job avoids a separate blocking dispatch for each.
+    fn ready(&mut self) -> Option<Pending> {
+        if !self.overlapping() || Instant::now() >= self.deadline {
+            return None;
+        }
+        let pending = self.ready_input()?;
+        self.admit(pending)
+    }
+
+    fn ready_input(&mut self) -> Option<Pending> {
+        self.deferred
+            .pop_front()
+            .or_else(|| self.receiver.try_recv().ok())
+    }
+
+    fn admit(&mut self, pending: Pending) -> Option<Pending> {
         if pending.deployment {
             self.stop_reason = "deployment_barrier";
             self.deferred.push_front(pending);
@@ -1233,11 +1261,26 @@ async fn prepare_group_inner(
     let mut serial_worker_jobs = 0;
     let mut serial_worker_requests = 0;
     loop {
-        if results.len() == decision.count {
+        let overlapping = decision.work_conserving()
+            && arrivals
+                .as_ref()
+                .is_some_and(|arrivals| arrivals.overlapping());
+        let limit = if overlapping {
+            decision.limit
+        } else {
+            decision.count
+        };
+        // Submit a work-conserving successor as soon as its predecessor
+        // completes; an unprepared suffix leads the next group instead.
+        if !overlapping && decision.work_conserving() && arrivals.is_some() && !results.is_empty() {
+            stop_reason = "predecessor_completed";
+            break;
+        }
+        if results.len() >= limit {
             stop_reason = "count_target";
             break;
         }
-        if !results.is_empty() && preparing.elapsed() >= preparation_budget {
+        if !overlapping && !results.is_empty() && preparing.elapsed() >= preparation_budget {
             stop_reason = "preparation_time";
             break;
         }
@@ -1247,16 +1290,26 @@ async fn prepare_group_inner(
             // client or for the predecessor's durability completion.
             drop(admission.take());
             let waiting = Instant::now();
-            let next = arrivals.next(preparing, preparation_budget).await;
+            let next = arrivals
+                .next((!decision.work_conserving()).then(|| preparing + preparation_budget))
+                .await;
             fill_wait_us += waiting.elapsed().as_micros() as u64;
             let Some(next) = next else {
                 stop_reason = arrivals.stop_reason;
                 break;
             };
-            if crate::telemetry::enabled() {
-                observability::link(&tracing::Span::current(), &next.input.trace);
-            }
             pending.push(next);
+            while overlapping
+                && pending.len() < decision.limit
+                && let Some(next) = arrivals.ready()
+            {
+                pending.push(next);
+            }
+            if crate::telemetry::enabled() {
+                for next in &pending[results.len()..] {
+                    observability::link(&tracing::Span::current(), &next.input.trace);
+                }
+            }
         }
         let maintaining_graph = evaluator::staging::maintaining_graph(&state.data);
         // Target graph replay does not issue reusable mutation certificates.
@@ -1269,7 +1322,7 @@ async fn prepare_group_inner(
         };
         let serial_count = serial_prefix
             .min(pending.len() - results.len())
-            .min(decision.count - results.len());
+            .min(limit - results.len());
         let eligible = wave.is_none()
             && !deployment
             && admission.is_some()
@@ -1297,6 +1350,10 @@ async fn prepare_group_inner(
                 preparation_budget,
                 results.len(),
                 maintaining_graph,
+                arrivals
+                    .as_ref()
+                    .filter(|_| decision.work_conserving())
+                    .map(|arrivals| arrivals.predecessor_done.clone()),
             )
             .await;
             *state = batch.state;
@@ -1327,7 +1384,7 @@ async fn prepare_group_inner(
             let end = pending
                 .len()
                 .min(results.len().saturating_add(width))
-                .min(decision.count);
+                .min(limit);
             if let Ok(now) = app.clock.sample(state) {
                 speculative_candidates += end - results.len();
                 observability::speculation("started", end - results.len());
