@@ -587,7 +587,8 @@ async fn dispatch(
         Err(error) => return Err(error),
     };
     // Recovery must continue after the catalog starts a move. Native freeze
-    // waits for durable transaction closure and ownership epochs still fence it.
+    // waits for prepared work and incomplete coordinators, and ownership epochs
+    // still fence it.
     if !matches!(
         invocation.operation.as_str(),
         "tx-status" | "tx-finish" | "tx-closure-status" | "tx-closure-ack"

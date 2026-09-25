@@ -1,4 +1,5 @@
-//! Blocking, durable two-phase commit between independent Raft groups.
+//! Blocking, durable two-phase commit between logical databases, whether they
+//! share a Raft group or not.
 //!
 //! The participant lock is itself replicated. No application state is published
 //! before a durable commit decision; ordinary reads and writes are barred while
@@ -26,6 +27,8 @@ pub(super) struct Runtime {
     groups: BTreeMap<String, Vec<String>>,
     client: reqwest::Client,
     coordinator: Mutex<BTreeMap<String, Weak<Mutex<()>>>>,
+    // Built on first use so catalog and partition RPCs share pooled connections.
+    partitions: std::sync::OnceLock<Arc<super::partitions::Runtime>>,
 }
 
 impl Runtime {
@@ -52,6 +55,7 @@ impl Runtime {
                 .no_proxy()
                 .build()?,
             coordinator: Mutex::new(BTreeMap::new()),
+            partitions: std::sync::OnceLock::new(),
         })
     }
 
@@ -1143,9 +1147,15 @@ async fn finish_coordinator(
         return Err(conflict("coordinator has not decided"));
     }
     if !decision.complete {
+        // Participants apply the decision independently, so a slow or
+        // unavailable one must not keep the others locked.
+        let responses =
+            futures_util::future::join_all(participants(decision).into_iter().map(
+                |group| async move { Box::pin(contact(app, &group, "finish", reference)).await },
+            ))
+            .await;
         let mut failure = None;
-        for group in participants(decision) {
-            let response = Box::pin(contact(app, &group, "finish", reference)).await;
+        for response in responses {
             match response.and_then(|value| decode::<Done>(&value)) {
                 Ok(done) if done.transaction == *reference && done.phase == decision.phase => {}
                 Ok(_) => {
@@ -1343,6 +1353,9 @@ pub(super) async fn execute(app: Arc<App>, input: Value) -> Result<Value, ApiErr
         let mut ordered: Vec<Option<Value>> = vec![None; initial.calls.len()];
         let mut failure = None;
         let mut detail = None;
+        // Prepare one target at a time in target order. Conflicts abort rather
+        // than wait, so two conflicting transactions first meet at their first
+        // shared target, and its winner cannot then be aborted by the loser.
         for group in participants(&initial) {
             let response = contact(&app, &group, "prepare", &reference).await;
             match response.and_then(|value| decode::<Vec<IndexedResult>>(&value)) {

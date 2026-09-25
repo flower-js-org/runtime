@@ -50,7 +50,10 @@ pub(super) fn is_local(app: &App, target: &Target) -> Result<bool, ApiError> {
     Ok(target.same_location(&local_target(app)?))
 }
 fn runtime(app: &App) -> Result<Arc<partitions::Runtime>, ApiError> {
-    partitions::Runtime::new(
+    if let Some(runtime) = app.cross_group.partitions.get() {
+        return Ok(runtime.clone());
+    }
+    let runtime = partitions::Runtime::new(
         app.consensus.physical(),
         app.admin_token.clone(),
         app.admission.clone(),
@@ -60,49 +63,59 @@ fn runtime(app: &App) -> Result<Arc<partitions::Runtime>, ApiError> {
         invalid(anyhow::anyhow!(
             "logical transaction targets require FLOWER_CATALOG_GROUP"
         ))
-    })
+    })?;
+    Ok(app.cross_group.partitions.get_or_init(|| runtime).clone())
+}
+fn placed(partition: &str, placement: catalog::Placement) -> Target {
+    Target {
+        group: placement.owner.id,
+        partition: Some(partition.into()),
+        epoch: placement.epoch,
+        addresses: placement.owner.addresses,
+    }
 }
 pub(super) async fn resolve(app: &App, record: &mut Coordinator) -> Result<(), ApiError> {
-    if record.coordinator.partition.is_none()
-        && !record
-            .calls
-            .iter()
-            .any(|call| call.group.partition.is_some())
-    {
+    let partitions: BTreeSet<&str> = record
+        .calls
+        .iter()
+        .filter_map(|call| call.group.partition.as_deref())
+        .collect();
+    if record.coordinator.partition.is_none() && partitions.is_empty() {
         return Ok(());
     }
     let runtime = runtime(app)?;
-    let mut pinned = BTreeMap::<String, Target>::new();
-    for call in &mut record.calls {
-        let Some(partition) = &call.group.partition else {
-            continue;
-        };
-        let target = if let Some(target) = pinned.get(partition) {
-            target.clone()
-        } else {
+    // The caller holds its writer lock, so look up every placement at once.
+    let targets = futures_util::future::try_join_all(partitions.into_iter().map(|partition| {
+        let runtime = &runtime;
+        async move {
             let placement = runtime.resolve(partition).await.map_err(unavailable)?;
             if !catalog::serving(&placement) {
                 return Err(conflict(
                     "transaction target is moving; retry after cutover",
                 ));
             }
-            let target = Target {
-                group: placement.owner.id,
-                partition: Some(partition.clone()),
-                epoch: placement.epoch,
-                addresses: placement.owner.addresses,
-            };
-            pinned.insert(partition.clone(), target.clone());
-            target
-        };
-        call.group = target;
+            Ok((partition.to_owned(), placed(partition, placement)))
+        }
+    }));
+    let own = async {
+        match record.coordinator.partition.as_deref() {
+            Some(partition) => runtime
+                .resolve(partition)
+                .await
+                .map(Some)
+                .map_err(unavailable),
+            None => Ok(None),
+        }
+    };
+    let (targets, own) = tokio::try_join!(targets, own)?;
+    let pinned: BTreeMap<String, Target> = targets.into_iter().collect();
+    for call in &mut record.calls {
+        if let Some(partition) = &call.group.partition {
+            call.group = pinned[partition].clone();
+        }
     }
     // Give the coordinator's own stable identity the same durable seed list.
-    if record.coordinator.partition.is_some() {
-        let placement = runtime
-            .resolve(record.coordinator.partition.as_deref().unwrap())
-            .await
-            .map_err(unavailable)?;
+    if let Some(placement) = own {
         if !catalog::serving(&placement)
             || placement.epoch != record.coordinator.epoch
             || placement.owner.id != record.coordinator.group
@@ -167,10 +180,5 @@ pub(super) async fn current(app: &App, target: &Target) -> Result<Target, ApiErr
     if !catalog::serving(&placement) {
         return Err(conflict("closure target is moving; retry after cutover"));
     }
-    Ok(Target {
-        group: placement.owner.id,
-        partition: Some(partition.clone()),
-        epoch: placement.epoch,
-        addresses: placement.owner.addresses,
-    })
+    Ok(placed(partition, placement))
 }

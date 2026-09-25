@@ -77,6 +77,7 @@ async fn application() -> (tempfile::TempDir, Arc<App>) {
                 .build()
                 .unwrap(),
             coordinator: Mutex::new(BTreeMap::new()),
+            partitions: std::sync::OnceLock::new(),
         },
     });
     (directory, app)
@@ -643,6 +644,96 @@ async fn remote_participant_stays_locked_without_coordinator_then_recovers_durab
     server_b.abort();
     a.consensus.shutdown().await.unwrap();
     b.consensus.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn decisions_reach_participants_concurrently() {
+    let (_directory_a, mut a) = application().await;
+    let (_directory_b, mut b) = application().await;
+    let (_directory_c, mut c) = application().await;
+    let listener_a = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener_b = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener_c = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let groups = BTreeMap::from([
+        (
+            "a".to_owned(),
+            vec![listener_a.local_addr().unwrap().to_string()],
+        ),
+        (
+            "b".to_owned(),
+            vec![listener_b.local_addr().unwrap().to_string()],
+        ),
+        (
+            "c".to_owned(),
+            vec![listener_c.local_addr().unwrap().to_string()],
+        ),
+    ]);
+    for (app, name) in [(&mut a, "a"), (&mut b, "b"), (&mut c, "c")] {
+        let runtime = &mut Arc::get_mut(app).unwrap().cross_group;
+        runtime.group = Some(name.into());
+        runtime.groups = groups.clone();
+    }
+    // Participant a, first in target order, receives its decision only once
+    // the test releases it.
+    let release = Arc::new(Semaphore::new(0));
+    let held = release.clone();
+    let router_a = router()
+        .with_state(a.clone())
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let held = held.clone();
+                async move {
+                    if request.uri().path() == "/raft/transactions/finish" {
+                        held.acquire().await.unwrap().forget();
+                    }
+                    next.run(request).await
+                }
+            },
+        ));
+    let mut servers = Vec::new();
+    for (listener, router) in [
+        (listener_a, router_a),
+        (listener_b, router().with_state(b.clone())),
+        (listener_c, router().with_state(c.clone())),
+    ] {
+        servers.push(tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        }));
+    }
+    let execution = tokio::spawn(execute(
+        b.clone(),
+        json!({"name":"tx","requestId":"fanout","args":{"calls":[
+            {"group":"a","method":"add","args":4},
+            {"group":"c","method":"add","args":5}
+        ]}}),
+    ));
+    // c commits and unlocks while a still awaits the same decision.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while read(&c).await != json!(5)
+            || ensure_unlocked(&c.consensus.read_for_writer().await.unwrap()).is_err()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a held decision must not delay other participants");
+    assert!(ensure_unlocked(&a.consensus.read_for_writer().await.unwrap()).is_err());
+    assert_eq!(read(&a).await, 0);
+    release.add_permits(1);
+    let response = tokio::time::timeout(Duration::from_secs(5), execution)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(response["value"]["results"], json!([4, 5]));
+    assert_eq!(read(&a).await, 4);
+    assert!(ensure_unlocked(&a.consensus.read_for_writer().await.unwrap()).is_ok());
+    for server in servers {
+        server.abort();
+    }
+    for app in [a, b, c] {
+        app.consensus.shutdown().await.unwrap();
+    }
 }
 
 #[test]
