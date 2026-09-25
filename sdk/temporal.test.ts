@@ -330,7 +330,7 @@ test("queue() and its methods validate configuration and inputs", () => {
   assert.throws(() => snap.claim({} as MutationContext, "w", { leaseMs: 11 }), { code: "LEASE_TOO_LONG" });
   assert.throws(() => snap.claim({} as MutationContext, ""), /nonempty/);
   assert.throws(() => snap.claim({} as MutationContext, "w", { leaseMs: 1, other: 1 } as never), /does not accept "other"/);
-  const clock = { now: () => 0 } as unknown as MutationContext;
+  const clock = { now: () => 0, clock: () => 0, changesAt: () => {} } as unknown as MutationContext;
   assert.throws(() => snap.enqueue(clock, "x", undefined as never), TypeError);
   assert.throws(() => snap.enqueue(clock, "x", null, { delayMs: 1, at: 1 }), /delayMs or at, not both/);
   assert.throws(() => snap.enqueue(clock, "x", null, { delayMs: -1 }), TypeError);
@@ -394,7 +394,7 @@ test("expiration policies, values and names are validated", async () => {
   const db = await testDatabase(cacheApp);
   assert.deepEqual(rejected(() => db.mutate("setCache", { key: "k", value: "far too long" })).failure,
     { code: "INVALID_ARGUMENT", message: "Value must contain at most 10 characters", details: { path: [] } });
-  const fake = (now: number) => ({ now: () => now, get: () => null, set: () => {} }) as unknown as MutationContext;
+  const fake = (now: number) => ({ now: () => now, clock: () => now, changesAt: () => {}, get: () => null, set: () => {} }) as unknown as MutationContext;
   for (const expiration of [{}, [], { at: Number.NaN }, { at: Infinity }, { at: -1 }, { at: 1.5 }, { afterCreationMs: -1 }, { afterUpdateMs: "10" },
     { at: 1, afterUpdateMs: 2 }, { unknown: 10 }]) {
     assert.throws(() => cache.set(fake(0), "k", "v", expiration as never), TypeError, JSON.stringify(expiration));

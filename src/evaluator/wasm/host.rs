@@ -1,6 +1,6 @@
-use super::{Host, failure_parts, max_json_bytes};
+use super::{failure_parts, max_json_bytes, Host};
 use crate::evaluator::wire;
-use anyhow::{Result, bail, ensure};
+use anyhow::{bail, ensure, Result};
 use serde_json::Value;
 use wasmtime::{Caller, Engine, Linker};
 
@@ -48,6 +48,8 @@ fn operation(op: i32) -> Result<&'static str> {
         9 => "delete",
         10 => "materialize",
         11 => "unmaterialize",
+        12 => "clock",
+        13 => "changesAt",
         _ => bail!("unknown host operation {op}"),
     })
 }
@@ -109,7 +111,9 @@ mod tests {
     fn only_numbered_operations_reach_the_database() {
         assert_eq!(super::operation(4).unwrap(), "get");
         assert_eq!(super::operation(11).unwrap(), "unmaterialize");
-        for op in [0, 12, -1, i32::MAX] {
+        assert_eq!(super::operation(12).unwrap(), "clock");
+        assert_eq!(super::operation(13).unwrap(), "changesAt");
+        for op in [0, 14, -1, i32::MAX] {
             assert!(super::operation(op).is_err(), "{op}");
         }
     }

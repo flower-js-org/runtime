@@ -62,7 +62,8 @@ const app = define({
     authenticate: (ctx, credentials) =&gt; {
       if (credentials === null) return null;
       const session = typeof credentials === "string" ? ctx.get(sessions, credentials) : null;
-      if (!session || session.expiresAt &lt;= ctx.now()) fail("UNAUTHENTICATED", "Sign in again");
+      if (!session || session.expiresAt &lt;= ctx.clock()) fail("UNAUTHENTICATED", "Sign in again");
+      ctx.changesAt(session.expiresAt); // Idle watches close exactly at expiry.
       return { subject: session.subject };
     },
   },

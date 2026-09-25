@@ -223,20 +223,22 @@ async fn run_actor(
     let automatic_maintenance = true;
     let mut deferred = VecDeque::new();
     let mut controller = Controller::new(tuning::settings().expect("validated writer settings"));
-    let mut maintenance = tokio::time::interval(
+    let mut schedule = Schedule::new(
         tuning::settings()
             .expect("validated maintenance cadence")
             .maintenance_interval,
     );
-    maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Applied writes and leadership changes can move a task's due time.
+    let mut progress = weak.upgrade().map(|app| app.consensus.progress());
     let mut maintenance_due = false;
     loop {
         // There is only one mutation owner. Drain the pipeline before timer
-        // callbacks, and prioritize an overdue tick over another customer burst.
+        // callbacks, and prioritize overdue maintenance over another customer burst.
         let first = match next_work(
             &mut receiver,
             &mut deferred,
-            &mut maintenance,
+            &mut progress,
+            schedule.next,
             maintenance_due,
             automatic_maintenance,
         )
@@ -244,16 +246,25 @@ async fn run_actor(
         {
             Work::Maintenance => {
                 let Some(app) = weak.upgrade() else { return };
-                if app.consensus.metrics().state == openraft::ServerState::Leader
-                    && let Err(error) = maintain(&app).await
-                {
-                    tracing::warn!(%error, "application maintenance did not commit");
+                let outcome = if app.consensus.metrics().state == openraft::ServerState::Leader {
+                    let outcome = maintain(&app).await;
+                    if let Err(error) = &outcome {
+                        tracing::warn!(%error, "application maintenance did not commit");
+                    }
+                    Some(outcome)
+                } else {
+                    None
+                };
+                schedule.ran(&app, outcome);
+                // The run's hint already covers its own commits.
+                if let Some(progress) = progress.as_mut() {
+                    progress.borrow_and_update();
                 }
-                // A slow callback/quorum failure may overrun the interval. Give
-                // customers a fresh window instead of repeatedly winning the
-                // biased select with already-overdue maintenance ticks.
-                maintenance.reset();
                 maintenance_due = false;
+                continue;
+            }
+            Work::Changed => {
+                schedule.soon();
                 continue;
             }
             Work::Request(first) => first,
@@ -276,8 +287,55 @@ async fn run_actor(
     }
 }
 
+/// Maintenance has no timer of its own. It runs when a task is due, as the
+/// last run reported, or soon after a write or leadership change that may have
+/// moved a due time, but never twice within `spacing`.
+struct Schedule {
+    next: Option<Instant>,
+    last: Option<Instant>,
+    spacing: Duration,
+}
+
+impl Schedule {
+    fn new(spacing: Duration) -> Self {
+        Self {
+            next: Some(Instant::now()),
+            last: None,
+            spacing,
+        }
+    }
+
+    fn paced(&self, at: Instant) -> Instant {
+        self.last.map_or(at, |last| at.max(last + self.spacing))
+    }
+
+    fn soon(&mut self) {
+        let at = self.paced(Instant::now());
+        self.next = Some(self.next.map_or(at, |next| next.min(at)));
+    }
+
+    fn ran(&mut self, app: &App, outcome: Option<anyhow::Result<NextRun>>) {
+        let now = Instant::now();
+        self.last = Some(now);
+        self.next = match outcome {
+            // A follower runs nothing until it leads.
+            None | Some(Ok(NextRun::Idle)) => None,
+            Some(Ok(NextRun::Now)) => Some(self.paced(now)),
+            Some(Ok(NextRun::At(time))) => {
+                let current = app.clock.sample_after(0).unwrap_or(time);
+                // One more millisecond: the clock samples whole milliseconds.
+                let delay = Duration::from_millis(time.saturating_sub(current).saturating_add(1));
+                Some(self.paced(now.checked_add(delay).unwrap_or(now + self.spacing)))
+            }
+            // Failures retry, and handlers that give no hint are polled.
+            Some(Ok(NextRun::Unknown)) | Some(Err(_)) => Some(now + self.spacing),
+        };
+    }
+}
+
 enum Work {
     Maintenance,
+    Changed,
     Request(Pending),
     Closed,
 }
@@ -285,20 +343,34 @@ enum Work {
 async fn next_work(
     receiver: &mut mpsc::Receiver<Pending>,
     deferred: &mut VecDeque<Pending>,
-    maintenance: &mut tokio::time::Interval,
+    progress: &mut Option<tokio::sync::watch::Receiver<crate::consensus::Progress>>,
+    next_maintenance: Option<Instant>,
     maintenance_due: bool,
     automatic_maintenance: bool,
 ) -> Work {
     tokio::select! {
         biased;
         _ = async {
-            // An explicit drain must be immediately ready. Resetting the timer
-            // to now can still poll Pending until its next clock tick; a busy
-            // customer queue could then repeatedly reset it and starve timers.
-            if !maintenance_due {
-                maintenance.tick().await;
+            // An explicit drain must be immediately ready, so a busy customer
+            // queue cannot starve due maintenance.
+            if !maintenance_due && let Some(next) = next_maintenance {
+                tokio::time::sleep_until(next.into()).await;
             }
-        }, if automatic_maintenance => Work::Maintenance,
+        }, if automatic_maintenance && (maintenance_due || next_maintenance.is_some()) => Work::Maintenance,
+        changed = async {
+            match progress.as_mut() {
+                Some(progress) => progress.changed().await,
+                None => std::future::pending().await,
+            }
+        }, if automatic_maintenance => {
+            match changed {
+                Ok(()) => {
+                    progress.as_mut().expect("subscribed").borrow_and_update();
+                }
+                Err(_) => *progress = None,
+            }
+            Work::Changed
+        }
         first = async {
             if let Some(first) = deferred.pop_front() {
                 Some(first)

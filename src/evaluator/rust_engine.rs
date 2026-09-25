@@ -157,6 +157,10 @@ struct Engine<'a> {
     evaluated: Vec<String>,
     fatal: Option<EngineError>,
     query_cacheable: bool,
+    /// Read time through ctx.now(), which promises no change time.
+    clock_polled: bool,
+    /// The earliest declared future instant at which the result may change.
+    changes_at: Option<u64>,
     speculative: bool,
     certificate: Option<DependencyCertificate>,
     retained_costs: HashMap<String, usize>,
@@ -336,6 +340,8 @@ fn run_with_limit_and_schema(
         evaluated: Vec::new(),
         fatal: None,
         query_cacheable,
+        clock_polled: false,
+        changes_at: None,
         speculative,
         certificate: (query_cacheable || speculative).then(DependencyCertificate::default),
         retained_costs: HashMap::new(),
@@ -405,6 +411,12 @@ fn run_with_limit_and_schema(
         depth(&value, 2, "INPUT_INVALID")?;
         engine.finish(value)
     }
+}
+
+/// The reference engine appends these fields only when set:
+/// `,"query_clock_polled":true` and `,"query_changes_at":<ms>`.
+fn time_fields_len(polled: bool, changes_at: Option<u64>) -> usize {
+    usize::from(polled) * 26 + changes_at.map_or(0, |time| 20 + time.to_string().len())
 }
 
 fn safe_time(value: &Value, label: &str) -> EngineResult<u64> {
@@ -881,7 +893,16 @@ impl Engine<'_> {
             "managedKey" => self.managed_key(argument(0)),
             "now" => {
                 self.query_cacheable = false;
+                self.clock_polled = true;
                 Ok(json!(self.now))
+            }
+            "clock" => {
+                self.query_cacheable = false;
+                Ok(json!(self.now))
+            }
+            "changesAt" => {
+                self.declare_change(argument(0))?;
+                Ok(Value::Null)
             }
             "get" => {
                 let reference = argument(0);
@@ -1030,8 +1051,28 @@ impl Engine<'_> {
         Ok(())
     }
 
+    /// ctx.changesAt(time): the result may change when the clock reaches time.
+    /// Past instants and null declare nothing; the earliest future one wins.
+    pub(super) fn declare_change(&mut self, time: &Value) -> EngineResult<()> {
+        if time.is_null() {
+            return Ok(());
+        }
+        let Some(time) = time.as_f64().filter(|time| time.is_finite()) else {
+            return Err(EngineError::new(
+                "INVALID_VALUE",
+                "changesAt takes a finite number of milliseconds or null",
+            ));
+        };
+        if time > self.now as f64 && self.mode != "deployment" {
+            let time = time.ceil().min(9_007_199_254_740_991.0) as u64;
+            self.changes_at = Some(self.changes_at.map_or(time, |earlier| earlier.min(time)));
+        }
+        Ok(())
+    }
+
     fn managed_key(&mut self, request: &Value) -> EngineResult<Value> {
         self.query_cacheable = false;
+        self.clock_polled = true;
         record(request, "managed key request", "KEY_INVALID")?;
         let declaration = &request["key"];
         let declared = self
@@ -1208,6 +1249,7 @@ impl Engine<'_> {
         };
         let evaluated = std::mem::take(&mut self.evaluated);
         let query_cacheable = self.query_cacheable && certificate.is_some();
+        let (query_clock_polled, query_changes_at) = (self.clock_polled, self.changes_at);
         let mode = self.mode;
         let output_limit = self.output_limit;
         // Newly staged values normally belong only to this private engine.
@@ -1224,6 +1266,8 @@ impl Engine<'_> {
             evaluated,
             value,
             query_cacheable,
+            query_clock_polled,
+            query_changes_at,
             query_certificate: certificate,
             mutation_certificate,
         };
@@ -1233,6 +1277,7 @@ impl Engine<'_> {
             } else {
                 // Both properties include their leading comma, key and colon.
                 9 + encoded_len(&result.value) + 19 + if result.query_cacheable { 4 } else { 5 }
+                    + time_fields_len(result.query_clock_polled, result.query_changes_at)
             };
         if bytes > output_limit {
             return Err(EngineError::new(

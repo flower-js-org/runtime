@@ -114,6 +114,8 @@ malformed arguments; unknown operations and resource failures trap instead.
 | 9 | delete | collection, key | null | mutations |
 | 10 | materialize | derived, args | null | mutations |
 | 11 | unmaterialize | derived, args | null | mutations |
+| 12 | clock | none | milliseconds | all |
+| 13 | changesAt | milliseconds or null | null | all |
 
 A `target` is a collection name, `{"kind": "collection", "name": string}` or
 `{"kind": "derived", "name": string}`. Scan options, range and query shapes are

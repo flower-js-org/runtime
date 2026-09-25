@@ -67,25 +67,21 @@ fn policy_updates_repair_errors_invalidate_dependents_and_persist_revocation() {
         )
         .unwrap();
         assert!(result.puts.contains_key("managedKeys"));
-        assert!(
-            !fixture
-                .calls
-                .borrow()
-                .iter()
-                .any(|name| name == "unrelated")
-        );
+        assert!(!fixture
+            .calls
+            .borrow()
+            .iter()
+            .any(|name| name == "unrelated"));
         apply(&mut data, result);
         assert_eq!(data[&child]["outcome"]["ok"], !revoked);
         assert_eq!(data[&parent]["outcome"]["ok"], !revoked);
         if !revoked {
             assert_eq!(data[&parent]["outcome"]["value"], version);
         } else {
-            assert!(
-                data[&parent]["outcome"]["error"]["message"]
-                    .as_str()
-                    .unwrap()
-                    .contains("revoked")
-            );
+            assert!(data[&parent]["outcome"]["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("revoked"));
         }
     }
 }

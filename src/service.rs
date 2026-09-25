@@ -689,7 +689,38 @@ async fn mutation_hint_response(
 struct QueryResult {
     revision: u64,
     value: Value,
-    cacheable: bool,
+    validity: Validity,
+}
+
+/// How long a result stays exact at its revision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Validity {
+    /// Only a new revision can change it.
+    Stable,
+    /// Time can change it, first at this server millisecond.
+    Until(u64),
+    /// It read the clock through ctx.now(), which says nothing about when.
+    Polled,
+}
+
+impl Validity {
+    fn of(evaluation: &evaluator::Evaluation) -> Self {
+        match (evaluation.query_clock_polled, evaluation.query_changes_at) {
+            (true, _) => Self::Polled,
+            (false, Some(time)) => Self::Until(time),
+            (false, None) => Self::Stable,
+        }
+    }
+
+    /// Whichever changes first.
+    fn and(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Polled, _) | (_, Self::Polled) => Self::Polled,
+            (Self::Until(a), Self::Until(b)) => Self::Until(a.min(b)),
+            (Self::Until(time), Self::Stable) | (Self::Stable, Self::Until(time)) => Self::Until(time),
+            (Self::Stable, Self::Stable) => Self::Stable,
+        }
+    }
 }
 
 enum QueryEvaluation {
@@ -764,7 +795,6 @@ async fn evaluate_query_authorized(
     principal: Value,
 ) -> Result<QueryEvaluation, ApiError> {
     let QueryAdmission { permit, coalesce } = admission;
-    let authorization_required = authorization::required(&state);
     let key = query_cache::key(
         &method.name,
         input.get("args").unwrap_or(&Value::Null),
@@ -776,7 +806,7 @@ async fn evaluate_query_authorized(
             QueryResult {
                 revision: state.revision,
                 value,
-                cacheable: !authorization_required,
+                validity: Validity::Stable,
             },
             permit,
         ));
@@ -819,7 +849,7 @@ async fn evaluate_query_authorized(
             QueryResult {
                 revision: state.revision,
                 value,
-                cacheable: !authorization_required,
+                validity: Validity::Stable,
             },
             permit,
         ));
@@ -864,6 +894,7 @@ async fn evaluate_query_authorized(
         **pending = false;
     }
     let result = result?;
+    let validity = Validity::of(&result);
     if let Some(certificate) = result.query_certificate {
         app.query_cache
             .insert(state.revision, key, result.value.clone(), certificate);
@@ -872,7 +903,7 @@ async fn evaluate_query_authorized(
         QueryResult {
             revision: state.revision,
             value: result.value,
-            cacheable: result.query_cacheable && !authorization_required,
+            validity,
         },
         permit,
     ))
@@ -880,7 +911,39 @@ async fn evaluate_query_authorized(
 
 /// The writer actor runs optional application maintenance between pipeline
 /// windows. Scheduling/expiration policy remains in the deployed TypeScript.
-async fn maintain(app: &Arc<App>) -> anyhow::Result<()> {
+/// When maintenance should run again, as its last evaluation reported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum NextRun {
+    /// More work is due already.
+    Now,
+    /// Nothing is due before this server millisecond.
+    At(u64),
+    /// Nothing is scheduled; only a write can change that.
+    Idle,
+    /// The handler didn't say, as hand-written handlers may not: poll.
+    Unknown,
+}
+
+impl NextRun {
+    /// `{"$flower":{"continue":bool,"next":ms|null}}` from the SDK's handler.
+    fn of(value: &Value, now: u64) -> Self {
+        let hint = value.get("$flower");
+        if hint.and_then(|hint| hint.get("continue")) == Some(&Value::Bool(true)) {
+            return Self::Now;
+        }
+        match hint.and_then(|hint| hint.get("next")) {
+            Some(Value::Null) => Self::Idle,
+            Some(next) => match next.as_f64().filter(|next| next.is_finite()) {
+                Some(next) if next <= now as f64 => Self::Now,
+                Some(next) => Self::At(next.ceil().min(9_007_199_254_740_991.0) as u64),
+                None => Self::Unknown,
+            },
+            None => Self::Unknown,
+        }
+    }
+}
+
+async fn maintain(app: &Arc<App>) -> anyhow::Result<NextRun> {
     let _guard = app.writer.lock().await;
     let admission = admission::acquire(app, admission::Class::Control, &Value::Null)
         .await
@@ -890,12 +953,14 @@ async fn maintain(app: &Arc<App>) -> anyhow::Result<()> {
     let mut commands = Vec::new();
     let mut bytes = 0;
     let mut failure = None;
+    let mut next = NextRun::Unknown;
     // Each callback has its own rollback boundary and logical revision. Flush
     // their successful patches together, keeping earlier work if a later
     // callback fails. Bound the burst so customer methods make progress too.
     loop {
         match prepare_maintenance(app, &state, &admission).await {
-            Ok(Some((command, again))) => {
+            Ok((Some((command, again)), hint)) => {
+                next = hint;
                 let size = serde_json::to_vec(&command)?.len();
                 if !app
                     .consensus
@@ -917,7 +982,10 @@ async fn maintain(app: &Arc<App>) -> anyhow::Result<()> {
                     break;
                 }
             }
-            Ok(None) => break,
+            Ok((None, hint)) => {
+                next = hint;
+                break;
+            }
             Err(error) => {
                 failure = Some(error);
                 break;
@@ -930,7 +998,7 @@ async fn maintain(app: &Arc<App>) -> anyhow::Result<()> {
     if let Some(error) = failure {
         return Err(error);
     }
-    Ok(())
+    Ok(next)
 }
 
 #[cfg(test)]
@@ -939,7 +1007,7 @@ async fn maintain_one(app: &Arc<App>) -> anyhow::Result<bool> {
         .await
         .map_err(|error| anyhow::anyhow!(error.message))?;
     let state = app.consensus.read_for(None).await?;
-    let Some((command, again)) = prepare_maintenance(app, &state, &admission).await? else {
+    let (Some((command, again)), _) = prepare_maintenance(app, &state, &admission).await? else {
         return Ok(false);
     };
     app.consensus.commit(command).await?;
@@ -950,16 +1018,17 @@ async fn prepare_maintenance(
     app: &Arc<App>,
     state: &Snapshot,
     admission: &admission::Permit,
-) -> anyhow::Result<Option<(Commit, bool)>> {
+) -> anyhow::Result<(Option<(Commit, bool)>, NextRun)> {
     if transactions::ensure_unlocked(state).is_err() {
-        return Ok(None);
+        // The lock's release is a commit, which schedules maintenance again.
+        return Ok((None, NextRun::Idle));
     }
     let Some(entry) = state
         .data
         .get("maintenanceMethod")
         .filter(|value| !value.is_null())
     else {
-        return Ok(None);
+        return Ok((None, NextRun::Idle));
     };
     let method: MaintenanceMethod = serde_json::from_value(entry.clone())?;
     anyhow::ensure!(
@@ -1008,10 +1077,11 @@ async fn prepare_maintenance(
                 .await?
         }
     };
+    let next = NextRun::of(&evaluation.value, now);
     // Idle maintenance need not replicate a clock tick. Actual cleanup or a
     // changed reactive outcome commits the sampled clock with its changes.
     if evaluation.puts.keys().all(|key| key == "clock") && evaluation.deletes.is_empty() {
-        return Ok(None);
+        return Ok((None, next));
     }
     transactions::ensure_write_capacity(state)
         .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
@@ -1020,18 +1090,21 @@ async fn prepare_maintenance(
         .get("$flower")
         .and_then(|hint| hint.get("continue"))
         == Some(&Value::Bool(true));
-    Ok(Some((
-        Commit {
-            internal: true,
-            request_id,
-            fingerprint: String::new(),
-            expected_revision: state.revision,
-            puts: evaluation.puts,
-            deletes: evaluation.deletes,
-            result: Value::Null,
-        },
-        again,
-    )))
+    Ok((
+        Some((
+            Commit {
+                internal: true,
+                request_id,
+                fingerprint: String::new(),
+                expected_revision: state.revision,
+                puts: evaluation.puts,
+                deletes: evaluation.deletes,
+                result: Value::Null,
+            },
+            again,
+        )),
+        next,
+    ))
 }
 
 async fn evaluate_maintenance(

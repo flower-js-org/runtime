@@ -25,6 +25,17 @@ pub(super) async fn authorize_admitted(
     input: &Value,
     permit: &admission::Permit,
 ) -> Result<Value, ApiError> {
+    Ok(authorize_inner(app, state, input, Value::Null, permit).await?.0)
+}
+
+/// Also says how long the decision holds without a new revision, so an idle
+/// watch rechecks access exactly when a token expires rather than on a timer.
+pub(super) async fn authorize_watch(
+    app: &App,
+    state: &Snapshot,
+    input: &Value,
+    permit: &admission::Permit,
+) -> Result<(Value, Validity), ApiError> {
     authorize_inner(app, state, input, Value::Null, permit).await
 }
 
@@ -35,7 +46,7 @@ pub(super) async fn authorize_delegated_admitted(
     delegation: Value,
     permit: &admission::Permit,
 ) -> Result<Value, ApiError> {
-    authorize_inner(app, state, input, delegation, permit).await
+    Ok(authorize_inner(app, state, input, delegation, permit).await?.0)
 }
 
 async fn authorize_inner(
@@ -44,13 +55,16 @@ async fn authorize_inner(
     input: &Value,
     delegation: Value,
     admission: &admission::Permit,
-) -> Result<Value, ApiError> {
+) -> Result<(Value, Validity), ApiError> {
     let Some(method) = state
         .data
         .get("authorizationMethod")
         .filter(|value| !value.is_null())
     else {
-        return Ok(delegation.get("principal").cloned().unwrap_or(Value::Null));
+        return Ok((
+            delegation.get("principal").cloned().unwrap_or(Value::Null),
+            Validity::Stable,
+        ));
     };
     let name = method["name"]
         .as_str()
@@ -86,6 +100,7 @@ async fn authorize_inner(
         Some(failure) => denied("Authorization denied").with_failure(failure),
         None => denied("Authorization denied"),
     })?;
+    let validity = Validity::of(&result);
     let principal = result.value;
     let Some(object) = principal.as_object() else {
         return Err(denied("Authorization denied"));
@@ -107,7 +122,7 @@ async fn authorize_inner(
     {
         return Err(denied("Principal is not authorized for this partition"));
     }
-    Ok(principal)
+    Ok((principal, validity))
 }
 
 pub(super) fn business_input(input: &Value) -> Value {

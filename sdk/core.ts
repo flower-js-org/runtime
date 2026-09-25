@@ -229,8 +229,21 @@ export interface AuthorizationRequest {
 export interface HistoryIdentity { readonly database: string; readonly incarnation: string }
 
 export interface Context {
-  /** Trusted server milliseconds, fixed for the invocation; creates a time dependency. */
+  /**
+   * Trusted server milliseconds, fixed for the invocation; creates a time dependency.
+   * Flower can't tell when a result that reads it changes, so watches poll it.
+   */
   now(): number;
+  /**
+   * The same milliseconds as now(), for code that reports every future time at which
+   * its result can change through changesAt(). Watches then wake exactly at those times.
+   */
+  clock(): number;
+  /**
+   * The result may change when the clock reaches time, even without a write. Pass every
+   * such instant after reading clock(); the earliest counts. Past times and null declare nothing.
+   */
+  changesAt(time: number | null): void;
   get<T, K extends Json>(collection: Collection<T, K, any>, key: K): T | null;
   get<V>(derived: Derived<null, V>): V;
   get<A, V>(derived: Derived<A, V>, args: A): V;

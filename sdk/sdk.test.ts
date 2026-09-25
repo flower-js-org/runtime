@@ -542,7 +542,7 @@ function authenticate(_ctx: QueryContext, credentials: Json): Principal | null {
   if (credentials === "expired") fail("TOKEN_EXPIRED", "Token expired", { at: 1 });
   return users[credentials as string] ?? fail("UNKNOWN_USER", "Unknown user");
 }
-const host = { now: () => 0, history: () => null, principal: () => null, get: () => null, scan: () => [], query: () => [], range: () => ({ rows: [], cursor: null }) };
+const host = { now: () => 0, clock: () => 0, changesAt: () => null, history: () => null, principal: () => null, get: () => null, scan: () => [], query: () => [], range: () => ({ rows: [], cursor: null }) };
 function hookOf(app: { definitions: Readonly<Record<string, unknown>> }) {
   const hook = app.definitions["$flower.authorize"] as QueryMethod<AuthorizationRequest, Principal>;
   return (method: string, request: Partial<AuthorizationRequest> = {}) =>

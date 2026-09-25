@@ -304,17 +304,15 @@ fn markers_handle_delimiters_and_quoted_unicode_without_cross_bucket_collisions(
     }
     let ordered = super::super::ranges::entry(&spec, "row", &json!({"x:[]":1})).unwrap();
     data.insert(ordered.clone(), json!("row"));
-    assert!(
-        data.reactive()
-            .generation(&super::super::ranges::dependency(collection, &fields))
-            .is_some()
-    );
+    assert!(data
+        .reactive()
+        .generation(&super::super::ranges::dependency(collection, &fields))
+        .is_some());
     data.insert(source_id(collection, "row"), json!(1));
-    assert!(
-        data.reactive()
-            .generation(&collection_id(collection))
-            .is_some()
-    );
+    assert!(data
+        .reactive()
+        .generation(&collection_id(collection))
+        .is_some());
 }
 
 fn optimistic(data: &Records, name: &str, args: Value, fixture: &Fixture) -> Evaluation {

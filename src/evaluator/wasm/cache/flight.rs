@@ -1,5 +1,5 @@
 //! Coalesce cold image preparation without sharing invocation budgets or errors.
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use std::{
     collections::HashMap,
     sync::{Arc, Condvar, Mutex},
@@ -174,12 +174,10 @@ mod tests {
             } else {
                 drop(leader);
             }
-            assert!(
-                pending
-                    .wait(Instant::now() + Duration::from_secs(1), || Ok(()))
-                    .unwrap()
-                    .is_none()
-            );
+            assert!(pending
+                .wait(Instant::now() + Duration::from_secs(1), || Ok(()))
+                .unwrap()
+                .is_none());
             assert!(matches!(flights.join([1; 32]).unwrap(), Attempt::Lead(_)));
         }
     }
@@ -194,21 +192,17 @@ mod tests {
             unreachable!()
         };
         let deadline = Instant::now() + Duration::from_millis(1);
-        assert!(
-            pending
-                .wait(deadline, || {
-                    anyhow::ensure!(Instant::now() < deadline, "local deadline exhausted");
-                    Ok(())
-                })
-                .is_err()
-        );
+        assert!(pending
+            .wait(deadline, || {
+                anyhow::ensure!(Instant::now() < deadline, "local deadline exhausted");
+                Ok(())
+            })
+            .is_err());
         assert!(matches!(flights.join([1; 32]).unwrap(), Attempt::Wait(_)));
         leader.publish(Arc::new(3));
-        assert!(
-            pending
-                .wait(deadline, || Err(anyhow!("sticky local failure")))
-                .is_err()
-        );
+        assert!(pending
+            .wait(deadline, || Err(anyhow!("sticky local failure")))
+            .is_err());
         assert_eq!(
             *pending
                 .wait(Instant::now() + Duration::from_secs(1), || Ok(()))

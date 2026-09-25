@@ -48,4 +48,5 @@ done</code></pre></div></li>
   console.log(`oldest ready job has waited ${Math.round(waitingMs / 1000)} s`);
 }</code></pre></div>
 <p>If that wait keeps growing, add workers, as long as the services they call can take the extra load. If it stays near zero, you have enough. <code>nextAvailableAt</code> says when a delayed job or running lease next makes work available.</p>
+<p>Some jobs need their own workers, or one Raft group can't keep up with the claims? See <a href="workers.html#shard">Shard the work</a>.</p>
 </section>

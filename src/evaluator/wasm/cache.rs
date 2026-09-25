@@ -1,5 +1,5 @@
-use super::{Abi, Host, Limits, STATIC_INIT_MARKER, host, store};
-use anyhow::{Context, Result, ensure};
+use super::{host, store, Abi, Host, Limits, STATIC_INIT_MARKER};
+use anyhow::{ensure, Context, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
@@ -226,11 +226,9 @@ impl Runtime {
         let clock = engine.clone();
         std::thread::Builder::new()
             .name("flower-wasm-epoch".into())
-            .spawn(move || {
-                loop {
-                    std::thread::sleep(Duration::from_millis(5));
-                    clock.increment_epoch();
-                }
+            .spawn(move || loop {
+                std::thread::sleep(Duration::from_millis(5));
+                clock.increment_epoch();
             })?;
         let mut wizer = Wizer::new();
         wizer.init_func("_initialize");

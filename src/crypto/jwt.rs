@@ -4,22 +4,22 @@
 //! RFC 6979 implementation. This module never obtains a clock or a nonce.
 use std::fmt;
 
-use anyhow::{Context, Result, bail, ensure};
-use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
+use anyhow::{bail, ensure, Context, Result};
+use aws_lc_rs::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
 use base64::{
-    Engine,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine,
 };
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use p256::{
-    ecdsa::{Signature, SigningKey, signature::Signer},
+    ecdsa::{signature::Signer, Signature, SigningKey},
     pkcs8::DecodePrivateKey,
 };
 use serde::{
-    Deserialize, Deserializer, Serialize,
     de::{self, MapAccess, SeqAccess, Visitor},
+    Deserialize, Deserializer, Serialize,
 };
-use serde_json::{Map, Number, Value, json};
+use serde_json::{json, Map, Number, Value};
 use zeroize::Zeroizing;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -422,6 +422,28 @@ fn validate(claims: &Value, protected: &Value, options: Validation<'_>, now_ms: 
     Ok(())
 }
 
+/// When time alone next changes the outcome of verifying token at now_ms: a
+/// token that is valid expires at exp + tolerance, and one not active yet
+/// activates at nbf - tolerance. Reads the claims without verifying them: a
+/// forged token's outcome never changes, so a bogus time costs one extra wake.
+pub fn changes_at(token: &str, tolerance_seconds: f64, now_ms: u64) -> Option<u64> {
+    let claims = parse_json(&decode_segment(token.split('.').nth(1)?).ok()?).ok()?;
+    let claim = |name: &str| claims.get(name)?.as_f64().filter(|value| value.is_finite());
+    let tolerance = if tolerance_seconds.is_finite() {
+        tolerance_seconds.max(0.0)
+    } else {
+        0.0
+    };
+    let now = now_ms as f64 / 1000.0;
+    let boundary = match (claim("nbf"), claim("exp")) {
+        (Some(nbf), _) if now + tolerance < nbf => nbf - tolerance,
+        (_, Some(exp)) if now - tolerance < exp => exp + tolerance,
+        _ => return None,
+    };
+    let ms = (boundary * 1000.0).ceil();
+    (ms > now_ms as f64).then(|| ms.min(9_007_199_254_740_991.0) as u64)
+}
+
 pub fn verify(token: &str, key: &[u8], options: &VerifyOptions, now_ms: u64) -> Result<Verified> {
     verify_with(token, options, now_ms, |algorithm, message, _signature| {
         let key = verifying_key(key, algorithm, options.key_format)?;
@@ -616,6 +638,51 @@ pub(crate) fn decrypt_with(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn outcomes_change_at_expiry_or_activation_only() {
+        let token = |claims: serde_json::Value| {
+            format!(
+                "e30.{}.sig",
+                super::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap())
+            )
+        };
+        let window = token(serde_json::json!({"nbf": 10, "exp": 20}));
+        assert_eq!(
+            super::changes_at(&window, 0.0, 5_000),
+            Some(10_000),
+            "activates at nbf"
+        );
+        assert_eq!(
+            super::changes_at(&window, 2.0, 5_000),
+            Some(8_000),
+            "tolerance moves activation earlier"
+        );
+        assert_eq!(
+            super::changes_at(&window, 0.0, 10_000),
+            Some(20_000),
+            "a valid token expires"
+        );
+        assert_eq!(
+            super::changes_at(&window, 1.5, 19_000),
+            Some(21_500),
+            "tolerance moves expiry later"
+        );
+        assert_eq!(
+            super::changes_at(&window, 0.0, 20_000),
+            None,
+            "an expired token stays expired"
+        );
+        assert_eq!(
+            super::changes_at(&token(serde_json::json!({"sub": "a"})), 0.0, 0),
+            None
+        );
+        assert_eq!(
+            super::changes_at(&token(serde_json::json!({"exp": 1.0005})), 0.0, 1_000),
+            Some(1_001)
+        );
+        assert_eq!(super::changes_at("not a token", 0.0, 0), None);
+    }
+
     use super::*;
     // Independent fixtures generated with Node's built-in OpenSSL-backed crypto.
     // These private keys are public test material, never production secrets.
@@ -752,15 +819,13 @@ mod tests {
             );
             let mut verify_der = verify_options.clone();
             verify_der.key_format = KeyFormat::Der;
-            assert!(
-                verify(
-                    token,
-                    &decode_segment(public_der).unwrap(),
-                    &verify_der,
-                    1_000_000
-                )
-                .is_ok()
-            );
+            assert!(verify(
+                token,
+                &decode_segment(public_der).unwrap(),
+                &verify_der,
+                1_000_000
+            )
+            .is_ok());
         }
     }
 
@@ -787,15 +852,13 @@ mod tests {
             assert!(decrypt(&parts.join("."), &[7; 32], &decryption(), 1_000_000).is_err());
         }
         assert!(decrypt(JWE, &[8; 32], &decryption(), 1_000_000).is_err());
-        assert!(
-            decrypt(
-                &JWE.replacen("..", ".AA.", 1),
-                &[7; 32],
-                &decryption(),
-                1_000_000
-            )
-            .is_err()
-        );
+        assert!(decrypt(
+            &JWE.replacen("..", ".AA.", 1),
+            &[7; 32],
+            &decryption(),
+            1_000_000
+        )
+        .is_err());
         assert!(encrypt(&claims(), &[7; 31], &[3; 12], &EncryptOptions::default()).is_err());
         assert!(encrypt(&claims(), &[7; 32], &[3; 11], &EncryptOptions::default()).is_err());
         assert!(decrypt(JWE, &[7; 32], &decryption(), 2_000_000).is_err());
@@ -894,32 +957,28 @@ mod tests {
             r#"{"alg":"HS256","jwk":{}}"#,
             r#"{"alg":"HS256","typ":3}"#,
         ] {
-            assert!(
-                verify(
-                    &hs_raw(header, &claims().to_string()),
-                    &[7; 32],
-                    &opts,
-                    1_000_000
-                )
-                .is_err()
-            );
+            assert!(verify(
+                &hs_raw(header, &claims().to_string()),
+                &[7; 32],
+                &opts,
+                1_000_000
+            )
+            .is_err());
         }
         assert!(sign(&claims(), &[7; 31], &hs_options()).is_err());
         let mut invalid_pem = KEYS[0].1.as_bytes().to_vec();
         invalid_pem.push(0xff);
-        assert!(
-            sign(
-                &claims(),
-                &invalid_pem,
-                &SignOptions {
-                    algorithm: Algorithm::RS256,
-                    key_format: KeyFormat::Pem,
-                    kid: None,
-                    typ: None
-                }
-            )
-            .is_err()
-        );
+        assert!(sign(
+            &claims(),
+            &invalid_pem,
+            &SignOptions {
+                algorithm: Algorithm::RS256,
+                key_format: KeyFormat::Pem,
+                kid: None,
+                typ: None
+            }
+        )
+        .is_err());
         let mutated = HS.replacen("eyJhdWQi", "eyJhdWQj", 1);
         assert!(verify(&mutated, &[7; 32], &opts, 1_000_000).is_err());
         assert!(verify(&format!("{HS}.extra"), &[7; 32], &opts, 1_000_000).is_err());
@@ -945,25 +1004,21 @@ mod tests {
             "7",
             "\"text\"",
         ] {
-            assert!(
-                verify(
-                    &hs_raw(r#"{"alg":"HS256","typ":"JWT"}"#, payload),
-                    &[7; 32],
-                    &opts,
-                    1_000_000
-                )
-                .is_err()
-            );
-        }
-        assert!(
-            verify(
-                &hs_raw(r#"{"alg":"HS256","alg":"HS256"}"#, &claims().to_string()),
+            assert!(verify(
+                &hs_raw(r#"{"alg":"HS256","typ":"JWT"}"#, payload),
                 &[7; 32],
                 &opts,
                 1_000_000
             )
-            .is_err()
-        );
+            .is_err());
+        }
+        assert!(verify(
+            &hs_raw(r#"{"alg":"HS256","alg":"HS256"}"#, &claims().to_string()),
+            &[7; 32],
+            &opts,
+            1_000_000
+        )
+        .is_err());
         assert!(verify(&format!("{HS}="), &[7; 32], &opts, 1_000_000).is_err());
         assert!(sign(&json!([]), &[7; 32], &hs_options()).is_err());
         assert!(encrypt(&Value::Null, &[7; 32], &[3; 12], &EncryptOptions::default()).is_err());
@@ -973,10 +1028,10 @@ mod tests {
     fn strict_options_have_explicit_algorithms_and_key_formats() {
         assert!(serde_json::from_value::<VerifyOptions>(json!({"keyFormat":"raw"})).is_err());
         assert!(serde_json::from_value::<SignOptions>(json!({"algorithm":"HS256"})).is_err());
-        assert!(
-            serde_json::from_value::<SignOptions>(json!({"algorithm":"none","keyFormat":"raw"}))
-                .is_err()
-        );
+        assert!(serde_json::from_value::<SignOptions>(
+            json!({"algorithm":"none","keyFormat":"raw"})
+        )
+        .is_err());
         assert!(
             serde_json::from_value::<DecryptOptions>(json!({"ignoreExpiration":true})).is_err()
         );

@@ -1,5 +1,5 @@
 use super::*;
-use crate::service::QueryResult;
+use crate::service::{QueryResult, Validity};
 use futures_util::StreamExt;
 use hubs::prepare_sync;
 
@@ -10,10 +10,18 @@ fn bundle() -> String {
       stable:{name:'stable',kind:'derived',compute:(ctx)=>ctx.get(records,'value') * 2},
       read:{name:'read',kind:'queryMethod',compute:(ctx)=>({value:ctx.get(records,'value'),padding:'x'.repeat(300)})},
       clock:{name:'clock',kind:'queryMethod',compute:(ctx)=>ctx.now()},
+      due:{name:'due',kind:'queryMethod',compute:(ctx)=>{
+        const now=ctx.clock(), at=ctx.get(records,'deadline');
+        if(at===null) return null;
+        ctx.changesAt(at);
+        return now>=at;
+      }},
+      schedule:{name:'schedule',kind:'mutationMethod',compute:(ctx,at)=>{ctx.set(records,'deadline',at);return at;}},
       write:{name:'write',kind:'mutationMethod',compute:(ctx,args)=>{ctx.set(records,'value',args);return args;}},
       fail:{name:'fail',kind:'queryMethod',compute:()=>{throw new Error('query failure');}}
     },http:{
-      read:{name:'read',kind:'query'},clock:{name:'clock',kind:'query'},
+      read:{name:'read',kind:'query'},clock:{name:'clock',kind:'query'},due:{name:'due',kind:'query'},
+      schedule:{name:'schedule',kind:'mutation'},
       write:{name:'write',kind:'mutation'},fail:{name:'fail',kind:'query'}
     }}};
     "#.into()
@@ -27,7 +35,7 @@ fn query_result(value: Value, revision: u64) -> QueryResult {
     QueryResult {
         value,
         revision,
-        cacheable: true,
+        validity: Validity::Stable,
     }
 }
 
@@ -323,10 +331,10 @@ async fn stable_clock_ticks_do_not_acquire_evaluation_permits_and_shutdown_is_te
 #[tokio::test]
 async fn commits_between_subscription_and_producer_start_are_not_lost() {
     let (_directory, app) = fixture().await;
-    let mut metrics = app.consensus.subscribe();
-    let observed = metrics.borrow_and_update().clone();
+    let mut progress = app.consensus.progress();
+    let observed = progress.borrow_and_update().clone();
     let input = json!({"name":"read"});
-    let (hub, frame) = refresh(&app, &input, None, Some(Instant::now()))
+    let Refreshed { hub, frame, wake } = refresh(&app, &input, None, Some(Instant::now()))
         .await
         .unwrap();
     let _ = super::super::commit_method(
@@ -344,8 +352,9 @@ async fn commits_between_subscription_and_producer_start_are_not_lost() {
             input,
             hub,
             frame.sequence,
+            wake,
             observed,
-            metrics,
+            progress,
             &sender,
         )
         .await
@@ -371,9 +380,9 @@ async fn queued_producer(
     tokio::task::JoinHandle<Result<(), ApiError>>,
 ) {
     let input = json!({"name":"read"});
-    let mut metrics = app.consensus.subscribe();
-    let observed = metrics.borrow_and_update().clone();
-    let (hub, frame) = refresh(app, &input, None, Some(Instant::now()))
+    let mut progress = app.consensus.progress();
+    let observed = progress.borrow_and_update().clone();
+    let Refreshed { hub, frame, wake } = refresh(app, &input, None, Some(Instant::now()))
         .await
         .unwrap();
     let sequence = frame.sequence;
@@ -387,8 +396,9 @@ async fn queued_producer(
             input,
             producer_hub,
             sequence,
+            wake,
             observed,
-            metrics,
+            progress,
             &sender,
         )
         .await
@@ -425,7 +435,7 @@ async fn backpressure_batches_to_the_latest_value_and_resumes_contiguous_patches
         // The initial snapshot fills the queue, so the next frame must wait.
         wait_for_evaluations(&hub, 2).await;
         let input = json!({"name":"read"});
-        let (_, blocked) = refresh(&app, &input, Some(&hub.scope), None).await.unwrap();
+        let blocked = refresh(&app, &input, Some(&hub.scope), None).await.unwrap().frame;
         assert_eq!(Arc::strong_count(&blocked), 2, "no unsent frame retained");
         let abandoned = Arc::downgrade(&blocked);
         drop(blocked);
@@ -527,7 +537,7 @@ async fn backpressured_subscriber_rechecks_access_before_sending() {
 async fn identical_subscribers_share_one_value_diff_and_immutable_wire_buffer() {
     let (_directory, app) = fixture().await;
     let input = json!({"name":"read"});
-    let (hub, first) = refresh(&app, &input, None, Some(Instant::now()))
+    let Refreshed { hub, frame: first, .. } = refresh(&app, &input, None, Some(Instant::now()))
         .await
         .unwrap();
     assert_eq!(hub.evaluations().await, 1);
@@ -549,9 +559,9 @@ async fn identical_subscribers_share_one_value_diff_and_immutable_wire_buffer() 
         "one producer encodes the committed change"
     );
     assert_eq!(app.watch_hubs.len(), 1);
-    let frame = &updates[0].1;
+    let frame = &updates[0].frame;
     let bytes = frame.bytes_after(Some(first.sequence)).unwrap();
-    for (producer, update) in &updates {
+    for Refreshed { hub: producer, frame: update, .. } in &updates {
         assert!(Arc::ptr_eq(&hub, producer));
         assert!(Arc::ptr_eq(frame, update));
         assert_eq!(
@@ -560,9 +570,10 @@ async fn identical_subscribers_share_one_value_diff_and_immutable_wire_buffer() 
         );
     }
     // Joining a warm producer is a complete snapshot at its current sequence.
-    let (_, joined) = refresh(&app, &input, None, Some(Instant::now()))
+    let joined = refresh(&app, &input, None, Some(Instant::now()))
         .await
-        .unwrap();
+        .unwrap()
+        .frame;
     assert_eq!(joined.sequence, 1);
     assert!(
         std::str::from_utf8(&joined.bytes_after(None).unwrap())
@@ -693,5 +704,93 @@ async fn shared_credentials_expire_independently_and_full_claims_isolate_hubs() 
     drop(first);
     drop(second);
     drop(separate);
+    app.consensus.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn declared_changes_wake_the_watch_exactly_then_and_not_before() {
+    let (_directory, app) = fixture().await;
+    let now = app
+        .clock
+        .sample(&app.consensus.read_query().await.unwrap())
+        .unwrap();
+    let _ = super::super::commit_method(
+        app.clone(),
+        json!({"name":"schedule","args":now + 600,"requestId":"deadline"}),
+        false,
+    )
+    .await
+    .unwrap();
+    let input = json!({"name":"due"});
+    let response = watch(State(app.clone()), Json(input.clone())).await.unwrap();
+    let started = Instant::now();
+    let mut body = response.into_body().into_data_stream();
+    let first = body.next().await.unwrap().unwrap();
+    assert_eq!(payload(std::str::from_utf8(&first).unwrap())["value"], false);
+    let Refreshed { hub, wake, .. } = refresh(&app, &input, None, None).await.unwrap();
+    assert!(wake.is_some(), "the declared time is the only wake-up");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(hub.evaluations().await, 1, "no evaluation before the declared time");
+    let next = tokio::time::timeout(Duration::from_secs(2), body.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(payload(std::str::from_utf8(&next).unwrap())["value"], true);
+    assert!(elapsed >= Duration::from_millis(550), "woke after {elapsed:?}");
+    assert!(elapsed < Duration::from_millis(900), "woke after {elapsed:?}");
+    assert_eq!(hub.evaluations().await, 2);
+    drop(body);
+    app.consensus.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn idle_authorized_watches_keep_stable_results_without_reevaluating() {
+    let (_directory, app) = crate::service::tests::application(authorized_bundle()).await;
+    let now = app
+        .clock
+        .sample(&app.consensus.read_query().await.unwrap())
+        .unwrap();
+    let input = json!({"name":"read","credentials":{"subject":"alice","role":"reader","expires":now+60_000}});
+    let response = watch(State(app.clone()), Json(input.clone())).await.unwrap();
+    let mut body = response.into_body().into_data_stream();
+    let _ = body.next().await.unwrap().unwrap();
+    // This authorize reads ctx.now(), so access is polled; the result is not.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let Refreshed { hub, .. } = refresh(&app, &input, None, None).await.unwrap();
+    assert_eq!(hub.evaluations().await, 1);
+    drop(body);
+    app.consensus.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn declared_credential_expiry_is_the_access_deadline() {
+    let javascript = authorized_bundle().replace(
+        "if(!c || c.expires<=ctx.now())return null;",
+        "const now=ctx.clock();if(!c || c.expires<=now)return null;ctx.changesAt(c.expires);",
+    );
+    let (_directory, app) = crate::service::tests::application(javascript).await;
+    let state = app.consensus.read_query().await.unwrap();
+    let now = app.clock.sample(&state).unwrap();
+    let input = json!({"name":"read","credentials":{"subject":"alice","role":"reader","expires":now+400}});
+    let permit = admission::acquire(&app, admission::Class::User, &input).await.unwrap();
+    let (_, access) = authorization::authorize_watch(&app, &state, &input, &permit).await.unwrap();
+    assert_eq!(access, Validity::Until(now + 400));
+    drop(permit);
+    let response = watch(State(app.clone()), Json(input)).await.unwrap();
+    let started = Instant::now();
+    let mut body = response.into_body().into_data_stream();
+    let _ = body.next().await.unwrap().unwrap();
+    let terminal = tokio::time::timeout(Duration::from_secs(2), body.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        payload(std::str::from_utf8(&terminal).unwrap())["error"]["code"],
+        "FORBIDDEN"
+    );
+    assert!(started.elapsed() < Duration::from_millis(700), "{:?}", started.elapsed());
     app.consensus.shutdown().await.unwrap();
 }

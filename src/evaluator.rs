@@ -39,6 +39,13 @@ pub struct Evaluation {
     pub value: Value,
     #[serde(default)]
     pub query_cacheable: bool,
+    /// The result read the clock without saying when it changes (ctx.now()).
+    #[serde(default)]
+    pub query_clock_polled: bool,
+    /// The earliest future time at which the result may change without a new
+    /// revision, as declared through ctx.changesAt().
+    #[serde(default)]
+    pub query_changes_at: Option<u64>,
     #[serde(skip)]
     pub query_certificate: Option<DependencyCertificate>,
     #[serde(skip)]
@@ -698,6 +705,8 @@ const CELL_RUNNER: &str = r#"
     }
     const readers = {
         now: () => host(1),
+        clock: () => host(12),
+        changesAt: (time) => host(13, time),
         principal: () => host(2),
         history: () => host(3),
         get: (target, args = null) => host(4, ref(target), args),

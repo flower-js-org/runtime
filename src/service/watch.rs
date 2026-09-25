@@ -18,15 +18,15 @@ use axum::{
     response::Response,
 };
 use futures_util::stream;
-use openraft::{BasicNode, RaftMetrics, ServerState};
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot, watch as notifications};
 
-use super::{ApiError, App, admission, authorization, invalid, query_snapshot, unavailable};
+use super::{
+    ApiError, App, Validity, admission, authorization, clock, invalid, query_snapshot, unavailable,
+};
+use crate::consensus::Progress;
 use crate::evaluator::MethodKind;
 use hubs::{Authorized, Frame, Hub};
-
-type Metrics = RaftMetrics<u64, BasicNode>;
 
 fn query_timeout(app: &App) -> Result<Duration, ApiError> {
     super::tuning::watch_timeout(
@@ -48,8 +48,8 @@ fn error_event(error: ApiError) -> Bytes {
     Bytes::from(format!("event: error\ndata: {body}\n\n"))
 }
 
-fn ensure_running(metrics: &Metrics) -> Result<(), ApiError> {
-    if metrics.running_state.is_err() || metrics.state == ServerState::Shutdown {
+fn ensure_running(progress: &Progress) -> Result<(), ApiError> {
+    if !progress.running {
         return Err(failure(
             "UNAVAILABLE",
             "watch replica stopped; reconnect for a fresh snapshot",
@@ -78,18 +78,44 @@ fn wire(frame: Arc<Frame>, previous: Option<u64>) -> Option<Wire> {
     })
 }
 
+/// A subscriber's current frame, and when it must look again with no Raft event.
+struct Refreshed {
+    hub: Arc<Hub>,
+    frame: Arc<Frame>,
+    wake: Option<tokio::time::Instant>,
+}
+
+/// Idle watches have no timer. Commits and freshness doubts arrive as Raft
+/// progress; time changes a result or an access decision only at the instant
+/// its evaluation declared. Only a bare ctx.now() read makes a watch poll.
+fn wake_at(app: &App, validity: Validity, committed: u64) -> Result<Option<tokio::time::Instant>, ApiError> {
+    Ok(match validity {
+        Validity::Stable => None,
+        Validity::Polled => Some(
+            tokio::time::Instant::now() + super::tuning::settings().map_err(unavailable)?.watch_refresh,
+        ),
+        Validity::Until(time) => {
+            let now = app.clock.sample_after(committed).map_err(unavailable)?;
+            // One more millisecond: the clock samples whole milliseconds.
+            let delay = Duration::from_millis(time.saturating_sub(now).saturating_add(1));
+            tokio::time::Instant::now().checked_add(delay)
+        }
+    })
+}
+
 async fn refresh(
     app: &App,
     input: &Value,
     expected_scope: Option<&str>,
     joined: Option<Instant>,
-) -> Result<(Arc<Hub>, Arc<Frame>), ApiError> {
+) -> Result<Refreshed, ApiError> {
     let mut coalesce = true;
     loop {
         // Every subscriber independently enters admission before capturing a
-        // root, proves its consistency fence, and authorizes even while idle.
+        // root, proves its consistency fence, and authorizes on every wake.
         let (state, method, permit) = query_snapshot(app, input, Some(MethodKind::Query)).await?;
-        let principal = authorization::authorize_admitted(app, &state, input, &permit).await?;
+        let (principal, access) = authorization::authorize_watch(app, &state, input, &permit).await?;
+        let committed = clock::committed(&state);
         let authorized = Authorized {
             state,
             method,
@@ -106,7 +132,8 @@ async fn refresh(
         }
         let hub = app.watch_hubs.get(app, &scope)?;
         if let Some(frame) = hub.refresh(app, authorized, joined, coalesce).await? {
-            return Ok((hub, frame));
+            let wake = wake_at(app, frame.query.validity.and(access), committed)?;
+            return Ok(Refreshed { hub, frame, wake });
         }
         coalesce = false;
         // A concurrently admitted subscriber advanced beyond our policy view.
@@ -127,15 +154,15 @@ pub(super) async fn watch(
     let retained = app
         .admission
         .retain(admission::Class::User, admission::input_bytes(&input))?;
-    let mut metrics = app.consensus.subscribe();
-    let initial_metrics = metrics.borrow_and_update().clone();
-    let (hub, frame) = tokio::time::timeout(
+    let mut progress = app.consensus.progress();
+    let initial = progress.borrow_and_update().clone();
+    let Refreshed { hub, frame, wake } = tokio::time::timeout(
         query_timeout(&app)?,
         refresh(&app, &input, None, Some(Instant::now())),
     )
     .await
     .map_err(|_| failure("UNAVAILABLE", "initial watch query timed out"))??;
-    ensure_running(&metrics.borrow())?;
+    ensure_running(&progress.borrow())?;
     let sequence = frame.sequence;
     let (sender, receiver) = mpsc::channel(1);
     sender
@@ -145,7 +172,7 @@ pub(super) async fn watch(
     tokio::spawn(async move {
         let _retained = retained;
         if let Err(error) =
-            produce(app, input, hub, sequence, initial_metrics, metrics, &sender).await
+            produce(app, input, hub, sequence, wake, initial, progress, &sender).await
         {
             let _ = terminal.send(error_event(error));
         }
@@ -211,6 +238,24 @@ fn events(
     )
 }
 
+async fn lapsed(lapse: &mut Option<notifications::Receiver<()>>) {
+    match lapse {
+        Some(receiver) => {
+            if receiver.changed().await.is_err() {
+                *lapse = None;
+            }
+        }
+        None => std::future::pending().await,
+    }
+}
+
+async fn sleep_until(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn reserve(
     sender: &mpsc::Sender<Wire>,
     timeout: Duration,
@@ -230,45 +275,49 @@ async fn reserve(
         .map_err(|_| failure("WATCH_CLOSED", "watch consumer disconnected"))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn produce(
     app: Arc<App>,
     input: Value,
     hub: Arc<Hub>,
     mut sequence: u64,
-    mut observed: Metrics,
-    mut metrics: notifications::Receiver<Metrics>,
+    mut wake: Option<tokio::time::Instant>,
+    mut observed: Progress,
+    mut progress: notifications::Receiver<Progress>,
     sender: &mpsc::Sender<Wire>,
 ) -> Result<(), ApiError> {
     let settings = super::tuning::settings().map_err(unavailable)?;
-    let refresh_interval = settings.watch_refresh;
-    let mut timer = tokio::time::interval_at(
-        tokio::time::Instant::now() + refresh_interval,
-        refresh_interval,
-    );
-    timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut lapse = None;
     loop {
+        if lapse.is_none() {
+            lapse = app.partition_gate.as_ref().map(|gate| gate.lapses());
+        }
         tokio::select! {
             biased;
             _ = sender.closed() => return Ok(()),
-            changed = metrics.changed() => {
+            changed = progress.changed() => {
                 changed.map_err(|_| failure("UNAVAILABLE", "Raft notifications stopped"))?;
-                let latest = metrics.borrow_and_update().clone();
+                let latest = progress.borrow_and_update().clone();
                 ensure_running(&latest)?;
-                let applied = latest.last_applied != observed.last_applied;
+                let relevant = latest.applied != observed.applied || latest.suspicion != observed.suspicion;
                 observed = latest;
-                if !applied { continue; }
+                if !relevant { continue; }
             }
-            _ = timer.tick() => {},
+            _ = sleep_until(wake) => {},
+            // A partition's owner lost its claim: the next refresh fails its gate.
+            _ = lapsed(&mut lapse) => {},
         };
         let mut capacity = None;
         loop {
-            let (_, frame) = tokio::select! {
+            let refreshed = tokio::select! {
                 biased;
                 _ = sender.closed() => return Ok(()),
                 result = tokio::time::timeout(query_timeout(&app)?, refresh(&app, &input, Some(&hub.scope), None)) =>
                     result.map_err(|_| failure("UNAVAILABLE", "watch query timed out"))??,
             };
-            ensure_running(&metrics.borrow())?;
+            wake = refreshed.wake;
+            let frame = refreshed.frame;
+            ensure_running(&progress.borrow())?;
             if frame.sequence <= sequence {
                 break;
             }

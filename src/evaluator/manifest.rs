@@ -2,10 +2,10 @@
 //! maintenance and authorization methods, key declarations and index schema
 //! Flower stores. Every guest kind goes through these same checks.
 use super::{
-    AuthorizationMethod, HttpMethod, MaintenanceMethod, Manifest, MethodKind, QueryConsistency,
     rust_engine::{IndexSpec, Schema},
+    AuthorizationMethod, HttpMethod, MaintenanceMethod, Manifest, MethodKind, QueryConsistency,
 };
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{anyhow, bail, ensure, Result};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 

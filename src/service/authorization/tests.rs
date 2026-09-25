@@ -128,7 +128,8 @@ async fn cached_queries_still_authorize_and_scope_principals() {
     let mut input = json!({"name":"read","credentials":credentials("alice","one")});
     let first = read_query(&app, input.clone()).await.unwrap();
     assert_eq!(first.value["subject"], "alice");
-    assert!(!first.cacheable, "watches must reauthorize while idle");
+    // Access has its own validity; the result itself holds at its revision.
+    assert_eq!(first.validity, Validity::Stable);
     input["credentials"] = credentials("bob", "two");
     assert_eq!(
         read_query(&app, input.clone()).await.unwrap().value["subject"],

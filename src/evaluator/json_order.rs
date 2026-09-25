@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 
 use serde::{
-    Serialize, Serializer,
     ser::{SerializeMap, SerializeSeq},
+    Serialize, Serializer,
 };
 use serde_json::Value;
 

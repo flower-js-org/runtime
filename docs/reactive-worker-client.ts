@@ -7,11 +7,12 @@ import type app from "./reactive-worker.ts";
 type Input = { recipe: string; text: string };
 
 // Keep every document's digest current, or only one when id is given. Several
-// processes may run at once: publication keeps the first result for an input.
+// processes may run at once: without an id they lease documents, so each digest
+// is computed once; either way, publication keeps the first result for an input.
 export async function runWorker(client: FlowerClient<typeof app>, signal: AbortSignal, id?: string) {
   await reconcile<string, Input, string>(client, {
     external: "digest",
-    ...(id === undefined ? {} : { args: id }),
+    ...(id === undefined ? { lease: true } : { args: id }),
     signal,
     async compute(input) {
       if (input.recipe !== "sha256-v1") throw new Error("Unsupported worker recipe");

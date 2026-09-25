@@ -108,7 +108,7 @@ fn opaque_shared_bridge_rejects_numeric_copied_and_proxy_handles_without_resolut
 
 #[test]
 fn managed_jwt_routing_extracts_only_a_scoped_selector() {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"EdDSA","kid":"flower.key-a.3"}"#);
     let args = json!({"operation":"jwt.verify","key":{"kind":"key","name":"sessions","algorithm":"Ed25519","usages":["verify"]}});
     let code = bundle(
@@ -174,12 +174,10 @@ fn entropy_is_mutation_only_and_not_frozen_in_snapshots() {
     let query = bundle(compute, true);
     let rejected = run(&query, Value::Null).unwrap();
     assert_eq!(rejected["ok"], false);
-    assert!(
-        rejected["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("only in mutations")
-    );
+    assert!(rejected["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("only in mutations"));
     let mutation = query
         .replace("kind:'queryMethod'", "kind:'mutationMethod'")
         .replace("kind:'query'", "kind:'mutation'");
@@ -216,12 +214,10 @@ fn entropy_is_mutation_only_and_not_frozen_in_snapshots() {
         )
         .unwrap();
         assert_eq!(rejected["ok"], false);
-        assert!(
-            rejected["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("only in mutations")
-        );
+        assert!(rejected["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("only in mutations"));
     }
     for marker in ["", STATIC_INIT_MARKER] {
         let code = format!("{marker}const secret=__flowerCrypto(0,32);{mutation}");
@@ -269,12 +265,10 @@ fn nested_derived_callback_does_not_inherit_mutation_entropy_rights() {
     .unwrap();
     assert_eq!(result["ok"], true);
     assert_eq!(result["value"]["ok"], false);
-    assert!(
-        result["value"]["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("only in mutations")
-    );
+    assert!(result["value"]["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("only in mutations"));
 }
 
 #[test]
@@ -292,23 +286,34 @@ fn jwt_bridge_uses_tracked_invocation_clock_and_standard_tokens() {
     }"#,
         true,
     );
-    let mut clocks = 0;
+    let mut calls = Vec::new();
     let result = execute(
         &code,
         "test",
         &Value::Null,
         "query",
         &mut |method, args| {
-            assert_eq!(method, "now");
-            assert_eq!(args, json!([]));
-            clocks += 1;
-            Ok(json!(99_999))
+            calls.push((method.to_owned(), args));
+            Ok(if method == "changesAt" {
+                Value::Null
+            } else {
+                json!(99_999)
+            })
         },
         limits(),
     )
     .unwrap();
     assert_eq!(result["ok"], true, "{result}");
-    assert_eq!(clocks, 2);
+    // Verification declares its expiry (exp 100 s) instead of polling; encrypted
+    // claims stay hidden until decryption, so that read time plainly.
+    assert_eq!(
+        calls,
+        [
+            ("clock".to_owned(), json!([])),
+            ("changesAt".to_owned(), json!([100_000])),
+            ("now".to_owned(), json!([])),
+        ]
+    );
     assert_eq!(result["value"]["verified"]["claims"]["sub"], "🌻");
     assert_eq!(
         result["value"]["decrypted"]["claims"],
@@ -324,12 +329,10 @@ fn jwt_bridge_uses_tracked_invocation_clock_and_standard_tokens() {
     )
     .unwrap();
     assert_eq!(expired["ok"], false);
-    assert!(
-        expired["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("JWT expired")
-    );
+    assert!(expired["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("JWT expired"));
 }
 
 #[test]

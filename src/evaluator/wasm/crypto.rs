@@ -106,6 +106,20 @@ fn dispatch(op: u32, args: &[&[u8]], now: u64) -> Result<Output> {
     Ok(Output::bytes(6, result.into_bytes()))
 }
 
+/// Watches of a verified token wake when it expires or activates, not on a timer.
+fn declare_verification_change(caller: &Caller<'_, Host>, token: &[u8], options: &[u8], now: u64) -> Result<()> {
+    let tolerance = jwt::parse_json(options)
+        .ok()
+        .and_then(|options| options.get("clockToleranceSeconds").and_then(Value::as_f64))
+        .unwrap_or(0.0);
+    let token = std::str::from_utf8(token).unwrap_or_default();
+    if let (Some(time), Some(callback)) = (jwt::changes_at(token, tolerance, now), caller.data().callback) {
+        // SAFETY: same synchronous scoped lifetime as host_call.
+        unsafe { callback.invoke("changesAt", json!([time]))? };
+    }
+    Ok(())
+}
+
 fn bounded_range(pointer: u32, length: usize, size: usize) -> Result<std::ops::Range<usize>> {
     let start = pointer as usize;
     let end = start.checked_add(length).context("crypto span overflow")?;
@@ -146,7 +160,9 @@ pub(super) fn call(
                     .context("JWT validation requires an invocation clock")?;
                 // SAFETY: same synchronous scoped lifetime as host_call. This
                 // also records a time dependency, preventing stale query caching.
-                unsafe { callback.invoke("now", Value::Array(Vec::new()))? }
+                // Verification reports when its outcome changes; decryption
+                // can't read the claims before the key opens them.
+                unsafe { callback.invoke(if op == 101 { "clock" } else { "now" }, Value::Array(Vec::new()))? }
                     .as_u64()
                     .context("invalid invocation clock")?
             } else {
@@ -203,6 +219,9 @@ pub(super) fn call(
                 output.saturating_mul(2)
             };
             budget(workspace, settings.rust_memory_bytes, &shared)?;
+            if op == 101 {
+                declare_verification_change(&caller, args[0], args[2], now)?;
+            }
             dispatch(op, args, now)
         })();
         // Native calls cannot be interrupted midway by Wasmtime epochs. A late

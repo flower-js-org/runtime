@@ -35,7 +35,7 @@ export function tally(name: string) {
 </tbody></table></div>
 <p><code>define</code> compiles every task, including those of components and of <code>materialize</code> policies, into one maintenance handler pair, <code>$flower.maintenance</code> and <code>$flower.maintenance.error</code>, named in <code>FlowerModule.maintenance</code>.</p>
 <ul>
-<li>Each run picks the task with the earliest due time and runs it in its own commit. The leader runs maintenance every <code>FLOWER_MAINTENANCE_INTERVAL_MS</code> (250 ms), in bursts of up to <code>FLOWER_MAINTENANCE_BURST_MS</code> (50 ms) while work remains.</li>
+<li>Each run picks the task with the earliest due time and runs it in its own commit. The handler reports when the next task is due, and the leader runs maintenance then, or after a write or leadership change, starting at most one run every <code>FLOWER_MAINTENANCE_INTERVAL_MS</code> (250 ms), in bursts of up to <code>FLOWER_MAINTENANCE_BURST_MS</code> (50 ms) while work remains.</li>
 <li>A failure without <code>onError</code> delays only that task: 1 s after the first failure, doubling up to 60 s. The next success clears it. Backoff state lives in the <code>$flower.tasks</code> collection.</li>
 <li>A run may be evaluated more than once before it commits. Keep external side effects out of tasks.</li>
 </ul>

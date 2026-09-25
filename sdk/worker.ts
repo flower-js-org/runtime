@@ -1,6 +1,6 @@
 import { backoff, FlowerClient, FlowerError, isTransient } from "./client.ts";
 import type { RetryPolicy } from "./client.ts";
-import type { ExternalWork } from "./external.ts";
+import type { ExternalClaim, ExternalWork } from "./external.ts";
 import type { Json } from "./json.ts";
 import type { Claim } from "./temporal.ts";
 
@@ -147,8 +147,10 @@ export async function runQueueWorker<P = Json, R = Json>(client: FlowerClient<an
 }
 
 export type ReconcileEvent =
+  | { readonly type: "claimed"; readonly key: string; readonly attempt: number }
   | { readonly type: "published"; readonly key: string; readonly accepted: boolean }
   | { readonly type: "failed"; readonly key: string; readonly error: string }
+  | { readonly type: "lost"; readonly key: string }
   | { readonly type: "waiting"; readonly error: string };
 
 export interface ReconcileOptions<A = Json, I = Json, R = Json> {
@@ -165,6 +167,14 @@ export interface ReconcileOptions<A = Json, I = Json, R = Json> {
   readonly concurrency?: number;
   /** Pool mode: keys fetched per round. Default 16. */
   readonly batch?: number;
+  /** Pool mode: lease keys, so each is computed by one process at a time and taken over when that process stops. */
+  readonly lease?: boolean;
+  /** Lease mode: unique per process. Defaults to a random identifier. */
+  readonly owner?: string;
+  /** Lease mode: lease length requested per claim and renewal. Default 30000. */
+  readonly leaseMs?: number;
+  /** Lease mode: abort compute this long before a lease ends. Default a fifth of leaseMs. */
+  readonly marginMs?: number;
   readonly retry?: RetryPolicy;
   readonly onEvent?: (event: ReconcileEvent) => void;
 }
@@ -178,6 +188,13 @@ export async function reconcile<A = Json, I = Json, R = Json>(client: FlowerClie
   const { external, compute, signal, onEvent = () => {} } = options;
   const concurrency = options.concurrency ?? 1;
   if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw new TypeError("concurrency must be a positive safe integer");
+  if (options.lease) {
+    if (options.args !== undefined || options.shard !== undefined) throw new TypeError("Lease mode spreads the whole pool: omit args and shard");
+    return leasedPool(untyped, options, concurrency);
+  }
+  if (options.owner !== undefined || options.leaseMs !== undefined || options.marginMs !== undefined) {
+    throw new TypeError("owner, leaseMs and marginMs need lease: true");
+  }
   const failures = new Map<string, number>();
 
   async function failed(key: string, error: unknown, stop: AbortSignal): Promise<void> {
@@ -236,4 +253,127 @@ export async function reconcile<A = Json, I = Json, R = Json>(client: FlowerClie
       await pause(backoff(attempt++), signal);
     }
   }
+}
+
+// Claim only as many keys as there are free computations, so no process hoards work;
+// one renewal covers every held lease, and held keys are handed back on the way out.
+async function leasedPool<A, I, R>(client: FlowerClient, options: ReconcileOptions<A, I, R>, concurrency: number): Promise<void> {
+  const { external, compute, onEvent = () => {} } = options;
+  const owner = options.owner ?? `reconciler-${crypto.randomUUID()}`;
+  const leaseMs = options.leaseMs ?? 30_000;
+  const marginMs = options.marginMs ?? Math.floor(leaseMs / 5);
+  const batch = options.batch ?? 16;
+  if (!Number.isSafeInteger(leaseMs) || !Number.isSafeInteger(marginMs) || leaseMs <= marginMs || marginMs < 0) throw new TypeError("leaseMs must exceed marginMs");
+  if (!Number.isSafeInteger(batch) || batch < 1) throw new TypeError("batch must be a positive safe integer");
+  if (concurrency > 1024) throw new TypeError("Lease mode runs at most 1024 computations at once");
+  // Shutdown or a permanent error stops claiming and aborts held computations.
+  const halt = new AbortController();
+  const signal = AbortSignal.any([options.signal, halt.signal]);
+  let failed: { error: unknown } | undefined;
+  const send = async <T>(method: string, args: unknown, until: number, abort?: AbortSignal): Promise<T> =>
+    (await client.mutate(`${external}.${method}`, args as Json, { retry: { ...options.retry, until }, ...(abort ? { signal: abort } : {}) })).value as T;
+  type Held = { readonly claim: ExternalClaim<A, I>; readonly lost: AbortController; deadline: number; timer?: ReturnType<typeof setTimeout> };
+  const held = new Set<Held>();
+  const identity = ({ claim: { args, key, owner, attempt } }: Held) => ({ args, key, owner, attempt });
+  const arm = (entry: Held, deadline: number) => {
+    entry.deadline = deadline;
+    clearTimeout(entry.timer);
+    entry.timer = setTimeout(() => entry.lost.abort(new Error("The lease ran out")), Math.max(0, deadline - Date.now()));
+  };
+  const renewal = setInterval(async () => {
+    const entries = [...held];
+    if (!entries.length) return;
+    const renewedAt = Date.now();
+    try {
+      const expiries = await send<(number | null)[]>("renew", { leases: entries.map(identity), leaseMs }, Math.min(...entries.map((entry) => entry.deadline)), signal);
+      entries.forEach((entry, index) => {
+        if (!held.has(entry) || entry.lost.signal.aborted) return;
+        if (expiries[index] === null) entry.lost.abort(new Error("The lease was lost"));
+        else arm(entry, renewedAt + leaseMs - marginMs);
+      });
+    } catch {
+      // Each lease's deadline aborts its computation if renewals stop landing.
+    }
+  }, Math.max(1, Math.floor((leaseMs - marginMs) / 3)));
+
+  async function release(entry: Held, delayMs: number): Promise<void> {
+    // While running, retry until the lease would end anyway; on the way out, try once.
+    try { await send("release", { ...identity(entry), delayMs }, signal.aborted ? Date.now() : entry.deadline + marginMs); }
+    catch { /* The lease runs out on its own. */ }
+  }
+
+  async function run(entry: Held): Promise<void> {
+    const { claim } = entry;
+    const stop = AbortSignal.any([signal, entry.lost.signal]);
+    let value: R;
+    try {
+      value = await compute(claim.input, claim, stop);
+      if (stop.aborted) throw stop.reason;
+    } catch (error) {
+      if (entry.lost.signal.aborted) return onEvent({ type: "lost", key: claim.key });
+      if (signal.aborted) return release(entry, 0);
+      onEvent({ type: "failed", key: claim.key, error: message(error) });
+      // The delay applies to every process, and attempt counts across them.
+      return release(entry, backoff(claim.attempt - 1));
+    }
+    let receipt: Json;
+    try {
+      ({ value: receipt } = await client.mutate(`${external}.publish`, { args: claim.args, key: claim.key, value } as unknown as Json,
+        { retry: options.retry ?? true, signal }));
+    } catch (error) {
+      if (signal.aborted) return release(entry, 0);
+      if (error instanceof FlowerError && error.code === "EVALUATION_FAILED") {
+        onEvent({ type: "failed", key: claim.key, error: message(error) });
+        return release(entry, backoff(claim.attempt - 1));
+      }
+      // Once the lease runs out, another process computes the key again.
+      if (isTransient(error)) return onEvent({ type: "waiting", error: message(error) });
+      throw error;
+    }
+    const { accepted } = receipt as { accepted: boolean };
+    onEvent({ type: "published", key: claim.key, accepted });
+    // A rejected result was computed for an older input: hand the key back for the current one.
+    if (!accepted) await release(entry, 0);
+  }
+
+  const running = new Set<Promise<void>>();
+  const start = (claim: ExternalClaim<A, I>, sentAt: number) => {
+    const entry: Held = { claim, lost: new AbortController(), deadline: 0 };
+    arm(entry, sentAt + leaseMs - marginMs);
+    held.add(entry);
+    onEvent({ type: "claimed", key: claim.key, attempt: claim.attempt });
+    const task: Promise<void> = run(entry)
+      .catch((error) => { failed ??= { error }; halt.abort(); })
+      .finally(() => { held.delete(entry); clearTimeout(entry.timer); running.delete(task); });
+    running.add(task);
+  };
+  try {
+    for (let attempt = 0; !signal.aborted;) {
+      if (running.size >= concurrency) {
+        await Promise.race(running);
+        continue;
+      }
+      try {
+        const sentAt = Date.now();
+        const limit = Math.min(batch, concurrency - running.size);
+        const claims = await send<ExternalClaim<A, I>[]>("claim", { owner, leaseMs, limit }, sentAt + leaseMs);
+        attempt = 0;
+        for (const claim of claims) start(claim, sentAt);
+        // A short batch means the backlog is drained; claim again once more work is ready.
+        if (claims.length < limit) await client.waitUntil(`${external}.ready`, null, Boolean, { signal });
+      } catch (error) {
+        if (signal.aborted) break;
+        if (!isTransient(error)) throw error;
+        onEvent({ type: "waiting", error: message(error) });
+        await pause(backoff(attempt++), signal);
+      }
+    }
+  } catch (error) {
+    failed ??= { error };
+    halt.abort();
+  } finally {
+    await Promise.all(running);
+    clearInterval(renewal);
+  }
+  if (failed) throw failed.error;
 }

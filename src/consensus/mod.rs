@@ -6,6 +6,7 @@ mod limits;
 mod membership;
 mod network;
 mod partitions;
+mod progress;
 mod read;
 mod receipts;
 mod records;
@@ -45,6 +46,7 @@ pub use partitions::{
     ExportKind, PartitionBinding, PartitionCommand, PartitionImage, PartitionInfo, PartitionPhase,
     PartitionTransfer, partition_image_digest,
 };
+pub use progress::Progress;
 pub use receipts::Receipts;
 pub use records::Records;
 pub use store::SnapshotData;
@@ -402,6 +404,8 @@ pub struct Consensus {
     token: Arc<str>,
     peer_token: Arc<str>,
     _snapshot_scheduler: Arc<tokio::sync::watch::Sender<()>>,
+    progress: tokio::sync::watch::Receiver<Progress>,
+    _progress: Arc<tokio::sync::watch::Sender<()>>,
 }
 
 impl Consensus {
@@ -466,6 +470,9 @@ impl Consensus {
             .max();
         limits.validate_log_index(last_index)?;
         let (raft_store, storage_drained) = store.raft_storage();
+        // OpenRaft's leader lease is election_timeout_max: past it without a
+        // quorum acknowledgement, followers may already follow someone else.
+        let lease = std::time::Duration::from_millis(config.election_timeout_max);
         let raft = FlowerRaft::new(
             id,
             Arc::new(config),
@@ -477,6 +484,7 @@ impl Consensus {
         .context("start Raft")?;
         let snapshot_scheduler =
             snapshot_policy::spawn(raft.clone(), store.snapshot_accounting(), limits.clone());
+        let (progress_lifetime, progress) = progress::spawn(raft.clone(), lease);
         let reads = read::Dispatchers::new(
             id,
             raft.clone(),
@@ -501,6 +509,8 @@ impl Consensus {
             token: token.into(),
             peer_token: peer_token.into(),
             _snapshot_scheduler: snapshot_scheduler,
+            progress,
+            _progress: progress_lifetime,
         })
     }
 
@@ -780,6 +790,13 @@ impl Consensus {
     /// be lost. Consumers filter/coalesce metrics; this allocates no state copy.
     pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<RaftMetrics<u64, BasicNode>> {
         self.raft.metrics()
+    }
+
+    /// Subscribe before a watch's initial read so an intervening commit cannot
+    /// be lost. Changes only when applied state moves, freshness becomes
+    /// suspect, or the replica stops.
+    pub(crate) fn progress(&self) -> tokio::sync::watch::Receiver<Progress> {
+        self.progress.clone()
     }
 
     pub async fn shutdown(&self) -> anyhow::Result<()> {

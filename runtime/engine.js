@@ -16,6 +16,13 @@
     return error;
   }
 
+  // ctx.changesAt(time): null declares nothing; otherwise whole milliseconds.
+  function changeTime(time) {
+    if (time === null) return null;
+    if (typeof time !== "number" || !isFinite(time)) throw failure("INVALID_VALUE", "changesAt takes a finite number of milliseconds or null");
+    return Math.min(Math.ceil(time), 9007199254740991);
+  }
+
   function orderedTextKey(value) {
     var out = "";
     for (var i = 0; i < value.length; i++) out += value.charCodeAt(i).toString(16).padStart(4, "0");
@@ -527,6 +534,18 @@
           observed.add("clock");
           return now;
         },
+        clock: function () {
+          checkContext();
+          countRead(1);
+          observed.add("clock");
+          return now;
+        },
+        changesAt: function (time) {
+          checkContext();
+          countRead(1);
+          changeTime(time);
+          return null;
+        },
         get: function (ref, keyOrArgs) {
           checkContext();
           countRead(1);
@@ -708,13 +727,23 @@
     var previewUnchecked = new Set();
     var previewChanged = new Set();
     var queryCacheable = call.kind === "query";
+    // ctx.now() promises no change time; ctx.changesAt() declares one.
+    var queryClockPolled = false;
+    var queryChangesAt = null;
+    // A stored cell may read the clock unseen by this invocation.
+    var graphReadsClock = false;
 
     base.forEach(function (value, id) {
       if (id.indexOf("root:") === 0) durableRoots.set(id, value);
       if (trusted && id.indexOf("cell:") === 0 && (!value || !Array.isArray(value.deps) || value.deps.indexOf("clock") !== -1)) {
         queryCacheable = false;
+        graphReadsClock = true;
       }
     });
+    function declareChange(time) {
+      var at = changeTime(time);
+      if (at !== null && at > fixedNow) queryChangesAt = queryChangesAt === null ? at : Math.min(queryChangesAt, at);
+    }
     function abort(code, message) {
       if (!fatal) fatal = failure(code, message);
       throw fatal;
@@ -754,7 +783,9 @@
       evaluations++;
       if (evaluations > MAX_EVALUATIONS) abort("EVALUATION_BUDGET", "Method cell evaluation budget exceeds 10000");
       var tracked = Object.freeze({
-        now: function () { queryCacheable = false; countOperations(1); return ctx.now(); },
+        now: function () { queryCacheable = false; queryClockPolled = true; countOperations(1); return ctx.now(); },
+        clock: function () { queryCacheable = false; countOperations(1); return ctx.clock(); },
+        changesAt: function (time) { countOperations(1); ctx.changesAt(time); declareChange(time); return null; },
         get: function (ref, key) { countOperations(1); return ctx.get(ref, key); },
         scan: function (ref, options) {
           countOperations(1);
@@ -847,7 +878,9 @@
     }
     var context = Object.freeze({
       history: function () { checkContext(); var value=input["$flower.retention"]; return value ? {database:value.database,incarnation:value.incarnation} : null; },
-      now: function () { queryCacheable = false; checkContext(); return fixedNow; },
+      now: function () { queryCacheable = false; queryClockPolled = true; checkContext(); return fixedNow; },
+      clock: function () { queryCacheable = false; checkContext(); return fixedNow; },
+      changesAt: function (time) { checkContext(); declareChange(time); return null; },
       get: function (ref, keyOrArgs) {
         checkContext();
         requireRecord(ref, "reference", "INVALID_REFERENCE");
@@ -866,6 +899,7 @@
         temporaryRoots.clear();
         temporaryRoots.set(root, { name: name, args: cellArgs });
         runPreview(false);
+        if (graphReadsClock) queryClockPolled = true;
         var outcome = preview.get(cellId(name, cellArgs)).outcome;
         if (!outcome.ok) throw failure(outcome.error.code, outcome.error.message);
         return clone(outcome.value);
@@ -957,6 +991,8 @@
     }
     var result = { puts: puts, deletes: deletes, evaluated: evaluated, value: value };
     if (trusted) result.query_cacheable = queryCacheable;
+    if (trusted && queryClockPolled) result.query_clock_polled = true;
+    if (trusted && queryChangesAt !== null) result.query_changes_at = queryChangesAt;
     if (utf8Size(JSON.stringify(result)) > MAX_OUTPUT_BYTES) abort("EVALUATION_BUDGET", "Output exceeds 16 MiB");
     return result;
   };

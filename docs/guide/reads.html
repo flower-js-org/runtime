@@ -96,7 +96,7 @@ const { value } = await client.waitUntil("counter.get", "visits", (counter) =&gt
 <li><code>waitUntil</code> resolves with the first value that passes your test, reconnecting as needed.</li>
 <li>Each subscriber is authorized on its own, and the stream closes if its credentials expire or are revoked.</li>
 <li>A deploy or principal change ends a stream with <code>WATCH_SCOPE_CHANGED</code>. <code>subscribe</code> reconnects and delivers a fresh snapshot.</li>
-<li>Fresh watches recheck on a timer as well as on commits: <code>FLOWER_WATCH_REFRESH_MS</code>, default 250 ms.</li>
+<li>An idle watch has no timer. Commits wake it, and so do leadership changes, which make fresh watches prove a new read fence. For queries that read the clock, see <a href="#time">Watch the clock</a>.</li>
 <li>A client that can't accept an update within the send timeout (5 s by default) is disconnected.</li>
 </ul>
 <p><code>client.watch</code> is the single-connection version: it yields <code>{ revision, value }</code> and ends at the first disconnect. <code>watchPoll(alias, args, { intervalMs, signal })</code> polls instead.</p>
@@ -112,4 +112,23 @@ const { value } = await client.waitUntil("counter.get", "visits", (counter) =&gt
 <p><code>watchDeltas</code> gives you those events with a <code>type</code> field. Snapshots carry <code>sequence, revision, value</code>. Patches carry <code>sequence, baseSequence, revision, patch</code>. A patch applies only to the event whose sequence matches its <code>baseSequence</code>. Sequences can start above zero and skip after a reset. A value that depends on time can change without a new revision. Error events carry the method's <code>failure</code>, like HTTP errors.</p>
 </div></details>
 <p>For error codes, see <a href="methods.html#failures">Handle failures</a>.</p>
+</section>
+<section id="time" data-toc="Watch the clock">
+<h2>Watch the clock without polling</h2>
+<p class="section-intro">Flower can't see a comparison against the clock, so it can't tell when time changes a result. Tell it, and watches sleep until exactly then.</p>
+<div class="code-block"><div class="code-head"><span>reminders.ts</span><button class="copy-button" type="button" aria-label="Copy reminders.ts">Copy</button></div><pre tabindex="0"><code class="language-ts">const due = query("reminder.due", { args: v.string() }, (ctx, id) =&gt; {
+  const reminder = ctx.get(reminders, id);
+  if (!reminder) return false;
+  const now = ctx.clock();
+  ctx.changesAt(reminder.at); // Until then, only a write can change the answer.
+  return now &gt;= reminder.at;
+});</code></pre></div>
+<ul>
+<li><code>ctx.clock()</code> reads the same time as <code>ctx.now()</code>. Use it when you call <code>ctx.changesAt(time)</code> for every later instant at which a comparison flips. Watches wake at the earliest one; past times and <code>null</code> declare nothing.</li>
+<li>A query that reads <code>ctx.now()</code> could change at any moment as far as Flower knows. Its watches re-evaluate every <code>FLOWER_WATCH_REFRESH_MS</code> (250 ms).</li>
+<li><strong>A forgotten time is a missed update.</strong> The watch then sees the change only at the next write. When in doubt, use <code>ctx.now()</code>.</li>
+<li>Queues, external values and expiring collections declare their times already. A worker's <code>ready</code> watch wakes the moment a lease or delay ends.</li>
+<li><code>authenticate</code> can declare too, and <code>jwt.verify</code> declares a token's expiry itself. An idle stream then closes when its credentials expire, not on a timer.</li>
+<li>Materialized values can't declare yet. While any of them reads the clock, watches of queries that read derived values re-evaluate every 250 ms too.</li>
+</ul>
 </section>

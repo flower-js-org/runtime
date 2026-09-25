@@ -84,6 +84,19 @@ async fn application_with_admission(
     javascript: String,
     pool: Option<Arc<admission::Pool>>,
 ) -> (TempDir, Arc<App>) {
+    build_application(javascript, pool, false).await
+}
+
+/// The production writer actor, which schedules maintenance on its own.
+pub(super) async fn application_with_maintenance(javascript: String) -> (TempDir, Arc<App>) {
+    build_application(javascript, None, true).await
+}
+
+async fn build_application(
+    javascript: String,
+    pool: Option<Arc<admission::Pool>>,
+    automatic_maintenance: bool,
+) -> (TempDir, Arc<App>) {
     let directory = tempfile::tempdir().unwrap();
     let address = "127.0.0.1:7101".to_owned();
     let consensus = Consensus::open(
@@ -149,11 +162,75 @@ async fn application_with_admission(
         cross_group: transactions::Runtime::new().unwrap(),
         partition_gate: None,
     });
-    tokio::spawn(writer::run_without_maintenance(
-        Arc::downgrade(&app),
-        receiver,
-    ));
+    if automatic_maintenance {
+        tokio::spawn(writer::run(Arc::downgrade(&app), receiver));
+    } else {
+        tokio::spawn(writer::run_without_maintenance(
+            Arc::downgrade(&app),
+            receiver,
+        ));
+    }
     (directory, app)
+}
+
+#[test]
+fn maintenance_hints_say_when_to_run_again() {
+    for (value, next) in [
+        (json!({"$flower":{"continue":true,"next":5_000}}), NextRun::Now),
+        (json!({"$flower":{"continue":false,"next":null}}), NextRun::Idle),
+        (json!({"$flower":{"next":2_000}}), NextRun::At(2_000)),
+        (json!({"$flower":{"next":1_500.2}}), NextRun::At(1_501)),
+        (json!({"$flower":{"next":1_000}}), NextRun::Now),
+        (json!({"$flower":{"next":"soon"}}), NextRun::Unknown),
+        (json!({"task":"x"}), NextRun::Unknown),
+        (Value::Null, NextRun::Unknown),
+    ] {
+        assert_eq!(NextRun::of(&value, 1_000), next, "{value}");
+    }
+}
+
+#[tokio::test]
+async fn maintenance_sleeps_until_the_declared_due_time() {
+    // Runs only once records.due has passed, and says when that is.
+    let javascript = bundle(
+        r#"
+        const now=ctx.now(), due=ctx.get(records,'due');
+        if(due===null || ctx.get(records,'ran')!==null) return {$flower:{next:null}};
+        if(now<due) return {$flower:{next:due}};
+        ctx.set(records,'ran',now);
+        return {$flower:{next:null}};
+        "#,
+        None,
+    );
+    let (_directory, app) = application_with_maintenance(javascript).await;
+    let state = app.consensus.read().await.unwrap();
+    let due = app.clock.sample(&state).unwrap() + 700;
+    app.consensus
+        .commit(Commit {
+            internal: true,
+            request_id: "due".into(),
+            fingerprint: String::new(),
+            expected_revision: state.revision,
+            puts: BTreeMap::from([("source:[\"records\",\"due\"]".to_owned(), json!(due))]),
+            deletes: vec![],
+            result: Value::Null,
+        })
+        .await
+        .unwrap();
+    let ran = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let state = app.consensus.read().await.unwrap();
+            if let Some(ran) = state.data.get("source:[\"records\",\"ran\"]") {
+                return ran.as_u64().unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(ran >= due, "ran at {ran}, due {due}");
+    assert!(ran < due + 150, "ran {} ms late", ran - due);
+    app.consensus.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -538,7 +615,7 @@ async fn coalesced_clock_queries_resample_after_reacquiring_the_snapshot() {
             observed == now || observed > 1017,
             "A retried query uses a fresh host-sampled clock, never another waiter's clock"
         );
-        assert!(!result.cacheable);
+        assert_eq!(result.validity, Validity::Polled, "ctx.now() promises no change time");
     }
     app.consensus.shutdown().await.unwrap();
 }

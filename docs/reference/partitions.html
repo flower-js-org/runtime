@@ -60,7 +60,7 @@ console.log(await admin.layout()); // Durable progress; resize continues after t
 <li>Other partitions on the same group keep working but share CPU, disk and the Raft log.</li>
 </ul>
 <div class="table-wrap"><table><thead><tr><th>Setting</th><th>Effect</th></tr></thead><tbody>
-<tr><th><code>FLOWER_ROUTE_CACHE_MS</code></th><td>How long a server trusts a cached owner. Default 1,000 ms. If the catalog is down when an entry expires, requests to that partition fail.</td></tr>
+<tr><th><code>FLOWER_ROUTE_CACHE_MS</code></th><td>How long a server trusts a cached owner. Default 1,000 ms. If the catalog is down when an entry expires, requests to that partition fail. While watches are open, the server renews the entry once per partition as it expires, and ends them if the partition moved or the catalog can't confirm it.</td></tr>
 <tr><th><code>FLOWER_PARTITION_TAIL_MAX_BYTES</code></th><td>If the final change set is bigger than this, send a full copy instead. Unset by default.</td></tr>
 <tr><th><code>FLOWER_PARTITION_BASE_MAX_BYTES</code></th><td>Maximum size of the initial copy. Unset by default.</td></tr>
 </tbody></table></div>

@@ -104,6 +104,12 @@ impl Routes {
     async fn invalidate(&self, partition: &str) {
         self.entries.lock().await.remove(partition);
     }
+    /// When the cached ownership observation expires, if one is cached.
+    async fn expiry(&self, partition: &str) -> Option<Instant> {
+        let slot = self.entries.lock().await.get(partition)?.clone();
+        let cached = slot.lock().await;
+        cached.as_ref().map(|(at, _)| *at + self.ttl)
+    }
 }
 
 pub(in crate::service) struct Gate {
@@ -111,8 +117,43 @@ pub(in crate::service) struct Gate {
     partition: String,
     epoch: u64,
     owner: String,
+    /// Notifies watches when this owner's claim lapses; see lapses().
+    monitor: std::sync::Mutex<Option<tokio::sync::watch::Receiver<()>>>,
 }
 impl Gate {
+    /// Changes once this owner's claim lapses: the partition moved away, or its
+    /// cached route expired and could not be renewed. Watches wait on it instead
+    /// of rechecking ownership on a timer. One monitor serves every watch of the
+    /// partition, runs only while some watch listens, and renews the route
+    /// exactly when its cached observation expires.
+    pub(in crate::service) fn lapses(self: &Arc<Self>) -> tokio::sync::watch::Receiver<()> {
+        let mut monitor = self.monitor.lock().expect("partition gate monitor");
+        if let Some(receiver) = monitor.as_ref().filter(|receiver| receiver.has_changed().is_ok()) {
+            return receiver.clone();
+        }
+        let (sender, receiver) = tokio::sync::watch::channel(());
+        *monitor = Some(receiver.clone());
+        let gate = Arc::downgrade(self);
+        tokio::spawn(async move {
+            loop {
+                let Some(current) = gate.upgrade() else { return };
+                let expires = current.routes.expiry(&current.partition).await.unwrap_or_else(Instant::now);
+                drop(current);
+                tokio::time::sleep_until(expires.into()).await;
+                // The gate keeps one receiver of its own; nobody else listens.
+                if sender.receiver_count() <= 1 {
+                    return;
+                }
+                let Some(current) = gate.upgrade() else { return };
+                if current.check().await.is_err() {
+                    sender.send_replace(());
+                    return;
+                }
+            }
+        });
+        receiver
+    }
+
     pub(in crate::service) async fn check(&self) -> Result<(), ApiError> {
         let placement = self.routes.get(&self.partition).await?;
         if placement.epoch != self.epoch || placement.owner.id != self.owner {
@@ -159,6 +200,7 @@ impl Registry {
             partition: partition.into(),
             epoch,
             owner: self.runtime.config.local_group.clone(),
+            monitor: std::sync::Mutex::new(None),
         });
         let app = service::make_app(
             bound,

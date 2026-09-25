@@ -24,7 +24,7 @@ test("increments, doubles and rejects bad input", async () =&gt; {
 </section>
 <section id="time">
 <h2>Control time and maintenance</h2>
-<p><code>db.now</code> is the server clock that <code>ctx.now()</code> reads. Nothing moves it but you.</p>
+<p><code>db.now</code> is the server clock that <code>ctx.now()</code> and <code>ctx.clock()</code> read. Nothing moves it but you.</p>
 <div class="code-block"><div class="code-head"><span>invoices.test.ts</span><button type="button" class="copy-button" aria-label="Copy invoices.test.ts">Copy</button></div><pre tabindex="0"><code class="language-ts">import assert from "node:assert/strict";
 import test from "node:test";
 import { testDatabase } from "@flower-js/sdk/testing";

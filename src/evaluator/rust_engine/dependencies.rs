@@ -115,6 +115,11 @@ impl Engine<'_> {
         self.certificate_stamp(id.as_ref(), true);
     }
     pub(super) fn derived_read(&mut self, id: String) {
+        // A stored cell may read the clock without this query noticing: only
+        // a graph without clock readers proves the read is time-independent.
+        if !self.base.reactive().cacheable() {
+            self.clock_polled = true;
+        }
         if self.speculative {
             self.record_read(id);
             return;
@@ -142,6 +147,7 @@ impl Engine<'_> {
             }
             if id == "clock" || id == "managedKeys" {
                 self.query_cacheable = false;
+                self.clock_polled = true;
                 return;
             }
             if id.starts_with("source:") {

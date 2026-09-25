@@ -218,15 +218,13 @@ async fn early_drain_runs_maintenance_before_saturated_queues_without_a_timer_wa
         .try_send(pending("queued-second"))
         .unwrap_or_else(|_| panic!("test queue has sufficient capacity"));
     let mut deferred = VecDeque::from([pending("deferred-first")]);
-    // Exercise the production actor's selection with a timer that cannot be
-    // ready. Early drains must not rely on another poll or a clock tick.
-    let mut maintenance = tokio::time::interval_at(
-        tokio::time::Instant::now() + Duration::from_secs(60),
-        Duration::from_secs(60),
-    );
+    // Exercise the production actor's selection with maintenance scheduled a
+    // minute out. Early drains must not rely on another poll or a clock tick.
+    let mut progress = None;
+    let later = Some(Instant::now() + Duration::from_secs(60));
     for _ in 0..3 {
         assert!(matches!(
-            next_work(&mut receiver, &mut deferred, &mut maintenance, true, true).now_or_never(),
+            next_work(&mut receiver, &mut deferred, &mut progress, later, true, true).now_or_never(),
             Some(Work::Maintenance)
         ));
         assert_eq!(receiver.len(), 2);
@@ -240,7 +238,7 @@ async fn early_drain_runs_maintenance_before_saturated_queues_without_a_timer_wa
         ("queued-second", true, false),
     ] {
         let Some(Work::Request(request)) =
-            next_work(&mut receiver, &mut deferred, &mut maintenance, due, enabled).now_or_never()
+            next_work(&mut receiver, &mut deferred, &mut progress, later, due, enabled).now_or_never()
         else {
             panic!("queued customer work must be ready after maintenance");
         };
@@ -248,7 +246,7 @@ async fn early_drain_runs_maintenance_before_saturated_queues_without_a_timer_wa
     }
     drop(sender);
     assert!(matches!(
-        next_work(&mut receiver, &mut deferred, &mut maintenance, false, true).now_or_never(),
+        next_work(&mut receiver, &mut deferred, &mut progress, later, false, true).now_or_never(),
         Some(Work::Closed)
     ));
 }
@@ -2577,4 +2575,30 @@ async fn salvaged_wave_rechecks_authorization_cas_and_exact_replays() {
         );
         app.consensus.shutdown().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn maintenance_schedule_follows_hints_and_never_runs_twice_within_its_spacing() {
+    let (_directory, app) = crate::service::tests::application("var __flowerBundle={default:{definitions:{},http:{}}};".into()).await;
+    let spacing = Duration::from_millis(250);
+    let mut schedule = Schedule::new(spacing);
+    assert!(schedule.next.unwrap() <= Instant::now(), "the first run is immediate");
+    schedule.ran(&app, Some(Ok(NextRun::Idle)));
+    let last = schedule.last.unwrap();
+    assert_eq!(schedule.next, None, "idle maintenance has no timer");
+    schedule.soon();
+    assert_eq!(schedule.next, Some(last + spacing), "a write reschedules, paced");
+    schedule.ran(&app, Some(Ok(NextRun::Now)));
+    assert_eq!(schedule.next, Some(schedule.last.unwrap() + spacing), "more work waits one spacing");
+    for outcome in [Some(Ok(NextRun::Unknown)), Some(Err(anyhow::anyhow!("no quorum")))] {
+        schedule.ran(&app, outcome);
+        assert_eq!(schedule.next, Some(schedule.last.unwrap() + spacing), "polled and retried");
+    }
+    schedule.ran(&app, None);
+    assert_eq!(schedule.next, None, "followers wait to lead");
+    let now = app.clock.sample_after(0).unwrap();
+    schedule.ran(&app, Some(Ok(NextRun::At(now + 10_000))));
+    let delay = schedule.next.unwrap() - schedule.last.unwrap();
+    assert!(delay > Duration::from_millis(9_900) && delay < Duration::from_millis(10_100), "{delay:?}");
+    app.consensus.shutdown().await.unwrap();
 }

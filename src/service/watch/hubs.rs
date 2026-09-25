@@ -15,7 +15,7 @@ use crate::{
     consensus::Snapshot,
     evaluator::HttpMethod,
     service::{
-        ApiError, App, QueryAdmission, QueryEvaluation, QueryResult, admission,
+        ApiError, App, QueryAdmission, QueryEvaluation, QueryResult, Validity, admission,
         evaluate_query_authorized, unavailable,
     },
 };
@@ -133,9 +133,16 @@ impl Hub {
                 .map_err(unavailable)?
                 .watch_refresh;
             let fresh_join = joined.is_none_or(|joined| refreshed >= joined);
-            if current.query.revision == authorized.state.revision
-                && (current.query.cacheable || (fresh_join && refreshed.elapsed() < refresh))
-            {
+            let reusable = current.query.revision == authorized.state.revision
+                && match current.query.validity {
+                    Validity::Stable => true,
+                    // Exact until then, for newly joined subscribers too.
+                    Validity::Until(time) => {
+                        app.clock.sample(&authorized.state).map_err(unavailable)? < time
+                    }
+                    Validity::Polled => fresh_join && refreshed.elapsed() < refresh,
+                };
+            if reusable {
                 return Ok(Some(current.clone()));
             }
         }

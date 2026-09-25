@@ -139,7 +139,7 @@ Introduce the certificate for reads first. It is easier to prove and measure the
 
 Named logical partitions already have independent application writers; use that concurrency through the fair global pool before speculating within one partition. Consider physically batching independent partition proposals into one durable Raft entry without implying new cross-partition transaction semantics. Hot-key lanes may gain nothing from speculation: measure invalidation rate and fall back adaptively to ordered preparation.
 
-Time remains explicit. An HLC/logical clock can order events but cannot prove real elapsed lease time. An optional `invalidateAt`-style dependency could eventually replace repeated polling for known thresholds, but arbitrary `ctx.now()` calls must retain their current time-sensitive semantics.
+Time remains explicit. An HLC/logical clock can order events but cannot prove real elapsed lease time. `ctx.changesAt()` now replaces repeated polling for declared thresholds: watches and maintenance sleep until the earliest one. Arbitrary `ctx.now()` calls retain their time-sensitive, polled semantics.
 
 **Validation:** use a serial reference evaluator and randomized histories with negative reads, range phantoms, branch changes, errors, topology changes, key revocation, deployments, and hot-key contention. An unchecked larger semaphore is not a concurrent-writer implementation.
 

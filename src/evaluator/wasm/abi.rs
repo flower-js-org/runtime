@@ -1,6 +1,6 @@
 use super::Host;
 use crate::evaluator::wire;
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 #[cfg(test)]
 use std::sync::Arc;
 use wasmtime::{AsContextMut, Instance, Memory, Module, ModuleExport, Store, TypedFunc};
@@ -531,21 +531,19 @@ mod tests {
                 wire::Outcome::Failure { code, .. } if code == "INVALID_VALUE"
             ));
         }
-        assert!(
-            abi.outcome(&store, packed(i32::MAX, 1))
-                .unwrap_err()
-                .to_string()
-                .contains("bounds")
-        );
-        assert!(
-            abi.outcome(
+        assert!(abi
+            .outcome(&store, packed(i32::MAX, 1))
+            .unwrap_err()
+            .to_string()
+            .contains("bounds"));
+        assert!(abi
+            .outcome(
                 &store,
                 packed(pointer, super::super::max_json_bytes().unwrap() + 1)
             )
             .unwrap_err()
             .to_string()
-            .contains("exceeds")
-        );
+            .contains("exceeds"));
 
         // All invocation buffers are discarded together; decoded strings must
         // remain valid after the Store and its entire linear memory disappear.
@@ -581,12 +579,11 @@ mod tests {
             wire::Invalid("unknown tag"),
             "malformed arguments are a business error"
         );
-        assert!(
-            abi.arguments(&store, pointer, 0)
-                .unwrap()
-                .unwrap()
-                .is_empty()
-        );
+        assert!(abi
+            .arguments(&store, pointer, 0)
+            .unwrap()
+            .unwrap()
+            .is_empty());
         assert!(
             abi.arguments(&store, i32::MAX, 1).is_err(),
             "out-of-bounds pointer"

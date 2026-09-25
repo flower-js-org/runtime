@@ -19,7 +19,7 @@ export type { ModuleConfig, AuthConfig, Authenticate, Authenticator } from "./de
 export { aggregate } from "./indexing.ts";
 export type { Aggregate, AggregateOptions } from "./indexing.ts";
 export { external } from "./external.ts";
-export type { External, ExternalState, ExternalWork, ExternalNextOptions, ExternalHttp } from "./external.ts";
+export type { External, ExternalState, ExternalWork, ExternalNextOptions, ExternalLease, ExternalClaim, ExternalClaimOptions, ExternalStats, ExternalHttp } from "./external.ts";
 export { jwtBearer } from "./auth.ts";
 export type { JwtBearerOptions } from "./auth.ts";
 export { key } from "./keys.ts";

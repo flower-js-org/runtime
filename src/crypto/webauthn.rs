@@ -5,11 +5,12 @@
 //! Attestation statements are not evaluated. Passkeys use "none" attestation,
 //! so trust rests on the ceremony itself: the challenge and origin in the
 //! client data, and the RP ID hash, flags and counter in authenticator data.
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 use aws_lc_rs::signature::{self, ParsedPublicKey, RsaPublicKeyComponents};
 use base64::{
-    Engine, alphabet,
+    alphabet,
     engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig},
+    Engine,
 };
 use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};

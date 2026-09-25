@@ -39,6 +39,8 @@ fn deploy_schema(
             evaluated: vec![],
             value: Value::Null,
             query_cacheable: false,
+            query_clock_polled: false,
+            query_changes_at: None,
             query_certificate: None,
             mutation_certificate: None,
         },
@@ -213,11 +215,10 @@ fn indexed_methods_overlay_pending_writes_and_remove_old_entries() {
             .count(),
         2
     );
-    assert!(
-        data.keys()
-            .filter(|id| id.starts_with("index-entry:"))
-            .all(|id| !id.ends_with("\"deleted\""))
-    );
+    assert!(data
+        .keys()
+        .filter(|id| id.starts_with("index-entry:"))
+        .all(|id| !id.ends_with("\"deleted\"")));
     deploy_schema(&mut data, json!({}), Schema::default(), &fixture);
     assert!(!data.keys().any(|id| id.starts_with("index-entry:")));
     assert!(data.get("schema").is_none());

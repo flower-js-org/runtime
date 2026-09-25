@@ -140,6 +140,8 @@ function bind(host: Host, runtime: Runtime): Session {
   }
   const ctx: MutationContext = Object.freeze({
     now: () => host.now(),
+    clock: () => host.clock(),
+    changesAt: (time: number | null) => { host.changesAt(time); },
     history: () => host.history(),
     principal() {
       const principal = host.principal();
@@ -243,21 +245,28 @@ interface TaskState { failures: number; retryAt: number; error: Failure }
 const taskStates = collection<Record<string, TaskState>>("$flower.tasks");
 
 function maintenance(tasks: readonly Task[]) {
-  function select(ctx: QueryContext, now: number): Task | null {
+  /** The task due earliest by now, and when any task is next due, retry delays included. */
+  function plan(ctx: QueryContext, now: number): { chosen: Task | null; next: number | null } {
     const states = ctx.get(taskStates, "state") ?? {};
-    let chosen: Task | null = null, earliest = Infinity;
+    let chosen: Task | null = null, earliest = Infinity, next = Infinity;
     for (const candidate of tasks) {
       const due = candidate.due(ctx);
       if (due === null) continue;
       if (typeof due !== "number" || !Number.isFinite(due)) throw new TypeError(`Task ${candidate.name} returned an invalid due time`);
       const at = Object.hasOwn(states, candidate.name) ? Math.max(due, states[candidate.name].retryAt) : due;
       if (at <= now && at < earliest) { chosen = candidate; earliest = at; }
+      next = Math.min(next, at);
     }
-    return chosen;
+    return { chosen, next: next === Infinity ? null : next };
   }
+  // The host sleeps until next (null: until a write) instead of polling.
+  const hint = (ctx: QueryContext, now: number) => {
+    const { chosen, next } = plan(ctx, now);
+    return { continue: chosen !== null, next };
+  };
   const run = mutation("$flower.maintenance", (ctx) => {
-    const selected = select(ctx, ctx.now());
-    if (!selected) return null;
+    const { chosen: selected, next } = plan(ctx, ctx.now());
+    if (!selected) return { $flower: { continue: false, next } };
     const result = selected.run(ctx);
     settleTriggers(ctx);
     const states = ctx.get(taskStates, "state");
@@ -266,7 +275,7 @@ function maintenance(tasks: readonly Task[]) {
       if (Object.keys(rest).length) ctx.set(taskStates, "state", rest);
       else ctx.delete(taskStates, "state");
     }
-    return { task: selected.name, result, $flower: { continue: select(ctx, ctx.now()) !== null } };
+    return { task: selected.name, result, $flower: hint(ctx, ctx.now()) };
   });
   const onError = mutation("$flower.maintenance.error", (ctx, failure: TaskFailure) => {
     const info = plainObject(failure, "Maintenance failure", ["error", "failedAt"]);
@@ -275,19 +284,19 @@ function maintenance(tasks: readonly Task[]) {
       throw new TypeError("Invalid maintenance failure");
     }
     const now = ctx.now();
-    const selected = select(ctx, now);
-    if (!selected) return null;
+    const { chosen: selected, next } = plan(ctx, now);
+    if (!selected) return { $flower: { continue: false, next } };
     const failedAt = Math.max(info.failedAt as number, now);
     if (selected.onError) {
       const result = selected.onError(ctx, Object.freeze({ error, failedAt }));
       settleTriggers(ctx);
-      return { task: selected.name, result, $flower: { continue: select(ctx, now) !== null } };
+      return { task: selected.name, result, $flower: hint(ctx, now) };
     }
     const states = ctx.get(taskStates, "state") ?? {};
     const failures = (states[selected.name]?.failures ?? 0) + 1;
     const retryAt = failedAt + Math.min(60_000, 1_000 * 2 ** Math.min(failures - 1, 6));
     ctx.set(taskStates, "state", { ...states, [selected.name]: { failures, retryAt, error } });
-    return { task: selected.name, failures, retryAt, $flower: { continue: select(ctx, now) !== null } };
+    return { task: selected.name, failures, retryAt, $flower: hint(ctx, now) };
   });
   return { run, onError };
 }

@@ -37,6 +37,9 @@ function failure(run: () => unknown) {
   assert.fail("expected a FlowerError");
 }
 
+/** The identity HTTP lease methods take: a claim without its input and expiry. */
+const lease = ({ args, key, owner, attempt }: { args: any; key: string; owner: string; attempt: number }) => ({ args, key, owner, attempt });
+
 function keys(db: TestDatabase<any>, name: string): string[] {
   return Object.keys(db.data).filter((id) => id.startsWith("source:")).map((id) => JSON.parse(id.slice(7)) as [string, string])
     .filter(([collection]) => collection === name).map(([, key]) => key);
@@ -147,7 +150,7 @@ test("http() exposes pending and publish, next only with each, and forwards acce
   assert.deepEqual(Object.keys(words.http("w")), ["w.pending", "w.publish"]);
   assert.equal(words.http("w"), words.http("w"));
   assert.throws(() => words.http("w", { access: "public" }), /External methods for "w" were already generated differently/);
-  assert.deepEqual(Object.keys(tracked.http("t")).sort(), ["t.next", "t.pending", "t.publish"]);
+  assert.deepEqual(Object.keys(tracked.http("t")).sort(), ["t.claim", "t.next", "t.pending", "t.publish", "t.ready", "t.release", "t.renew", "t.stats"]);
   assert.deepEqual(app.http["tracked.next"], { name: "tracked.next", kind: "query" });
   assert.deepEqual(app.http["words.publish"], { name: "words.publish", kind: "mutation" });
   assert.equal(Object.hasOwn(app.http, "words.next"), false);
@@ -162,10 +165,105 @@ test("http() exposes pending and publish, next only with each, and forwards acce
   assert.equal(db.query("open.pending", "a")!.args, "a");
 });
 
+test("claims lease the longest-waiting keys to one owner until the lease ends", async () => {
+  const db = await testDatabase(app);
+  for (const id of ["c", "a", "b"]) { db.mutate("put", { id, text: id }); db.now++; }
+  assert.equal(db.query("tracked.ready", null), true);
+  const start = db.now;
+  const first = db.mutate("tracked.claim", { owner: "w1", limit: 2, leaseMs: 1_000 });
+  assert.deepEqual(first, [
+    { args: "c", key: canonicalJson(["c", "c"]), input: "c", owner: "w1", attempt: 1, expiresAt: start + 1_000 },
+    { args: "a", key: canonicalJson(["a", "a"]), input: "a", owner: "w1", attempt: 1, expiresAt: start + 1_000 },
+  ]);
+  assert.deepEqual(db.mutate("tracked.claim", { owner: "w2" }).map((work) => work.args), ["b"], "leased keys are skipped");
+  assert.deepEqual(db.mutate("tracked.claim", { owner: "w3" }), []);
+  assert.equal(db.query("tracked.ready", null), false);
+  assert.deepEqual(db.query("tracked.stats", null), { ready: false, oldestReadyAt: null, nextAvailableAt: start + 1_000 });
+  assert.equal(db.query("tracked.next", null).length, 3, "next still lists leased keys");
+
+  db.advance(1_000);
+  assert.deepEqual(db.query("tracked.stats", null), { ready: true, oldestReadyAt: start + 1_000, nextAvailableAt: start + 30_000 });
+  const again = db.mutate("tracked.claim", { owner: "w3" });
+  assert.deepEqual(again.map((work) => [work.args, work.owner, work.attempt]), [["a", "w3", 2], ["c", "w3", 2]],
+    "expired leases go back in line; equal expiries follow key order");
+  assert.deepEqual(db.mutate("tracked.renew", { leases: [lease(first[0]), lease(again[1])] }), [null, db.now + 30_000], "renew skips lost leases");
+  assert.equal(failure(() => db.mutate("tracked.renew", { leases: [again[1]] as never })).failure!.code, "INVALID_ARGUMENT",
+    "HTTP methods take the lease identity, not the whole claim");
+
+  // publish needs no lease: the input key decides. It also retires the lease.
+  assert.deepEqual(db.mutate("tracked.publish", { args: "a", key: first[1].key, value: "A" }), { accepted: true });
+  assert.deepEqual(db.mutate("tracked.renew", { leases: [lease(again[0])] }), [null]);
+  assert.equal(db.mutate("tracked.release", lease(again[0])), false);
+  assert.deepEqual(db.query("readTracked", "a"), { status: "ready", value: "A" });
+});
+
+test("release hands a key back at once or after a delay, and a changed input voids its lease", async () => {
+  const db = await testDatabase(app);
+  db.mutate("put", { id: "a", text: "one" });
+  const [claim] = db.mutate("tracked.claim", { owner: "w1" });
+  assert.equal(db.mutate("tracked.release", { ...lease(claim), owner: "w2" }), false, "only the owner can release");
+  assert.equal(db.mutate("tracked.release", { ...lease(claim), delayMs: 500 }), true);
+  assert.equal(db.mutate("tracked.release", lease(claim)), false, "a released lease is gone");
+  assert.deepEqual(db.mutate("tracked.claim", { owner: "w2" }), []);
+  assert.deepEqual(db.query("tracked.stats", null), { ready: false, oldestReadyAt: null, nextAvailableAt: db.now + 500 });
+  db.advance(500);
+  const [retry] = db.mutate("tracked.claim", { owner: "w2" });
+  assert.deepEqual([retry.owner, retry.attempt], ["w2", 2], "attempts count claims of one input");
+  assert.equal(db.mutate("tracked.release", lease(retry)), true);
+
+  const [held] = db.mutate("tracked.claim", { owner: "w1" });
+  assert.equal(held.attempt, 3);
+  db.mutate("put", { id: "a", text: "one" });
+  assert.deepEqual(db.mutate("tracked.renew", { leases: [lease(held)] }), [db.now + 30_000], "rewriting the same input keeps the lease");
+  db.mutate("put", { id: "a", text: "two" });
+  assert.deepEqual(db.mutate("tracked.renew", { leases: [lease(held)] }), [null], "a new input voids the lease");
+  const [fresh] = db.mutate("tracked.claim", { owner: "w2" });
+  assert.deepEqual([fresh.input, fresh.attempt], ["two", 1], "and is claimable at once, with a fresh attempt count");
+  assert.equal(db.mutate("tracked.release", { ...lease(fresh), delayMs: 60_000 }), true);
+  db.mutate("put", { id: "a", text: "three" });
+  assert.equal(db.mutate("tracked.claim", { owner: "w3" })[0].input, "three", "a new input also skips a retry delay");
+});
+
+test("claims drop keys that are no longer pending and respect lease limits", async () => {
+  const flags = collection("flags", v.boolean());
+  const gated = external("gated", {
+    input: (ctx, id: string) => ctx.get(flags, "on") ? ctx.get(docs, id)?.text || null : null,
+    each: docs,
+    lease: { defaultMs: 100, maxMs: 1_000 },
+  });
+  const flag = mutation("flag", { args: v.boolean() }, (ctx, on) => { ctx.set(flags, "on", on); return null; });
+  const db = await testDatabase(define({ uses: [gated], http: { put, flag, ...gated.http("g") } }));
+  db.mutate("flag", true);
+  db.mutate("put", { id: "a", text: "x" });
+  const [claim] = db.mutate("g.claim", { owner: "w1" });
+  assert.equal(claim.expiresAt, db.now + 100, "lease.defaultMs applies");
+  assert.equal(failure(() => db.mutate("g.claim", { owner: "w1", leaseMs: 1_001 })).failure!.code, "LEASE_TOO_LONG");
+  assert.equal(failure(() => db.mutate("g.renew", { leases: [lease(claim)], leaseMs: 1_001 })).failure!.code, "LEASE_TOO_LONG");
+  assert.equal(failure(() => db.mutate("g.claim", { owner: "w1", limit: 1_025 })).failure!.code, "INVALID_ARGUMENT");
+  assert.equal(failure(() => db.mutate("g.release", { ...lease(claim), delayMs: -1 })).failure!.code, "INVALID_ARGUMENT");
+  assert.equal(failure(() => db.mutate("g.claim", { owner: "" })).failure!.code, "INVALID_ARGUMENT");
+
+  // Turning the flag off ends the work without writing the tracked row, so its marker lingers until a claim reads it.
+  db.mutate("put", { id: "b", text: "y" });
+  db.mutate("flag", false);
+  assert.equal(db.query("g.ready", null), true);
+  assert.deepEqual(db.mutate("g.claim", { owner: "w2" }), []);
+  assert.equal(db.query("g.ready", null), false);
+  assert.deepEqual(keys(db, "gated.stale"), ['"a"'], "the leased marker waits for its lease");
+  db.advance(100);
+  assert.deepEqual(db.mutate("g.claim", { owner: "w2" }), []);
+  assert.deepEqual(keys(db, "gated.stale"), []);
+});
+
 test("external() validates its configuration and next() options", () => {
   assert.throws(() => external("", { input: () => null }), /nonempty/);
   assert.throws(() => external("x", {} as never), /input function/);
   assert.throws(() => external("x", { input: () => null, extra: true } as never), /does not accept "extra"/);
+  assert.throws(() => external("x", { input: () => null, lease: {} } as never), /Leases need an external value that tracks a collection/);
+  assert.throws(() => external("x", { input: () => null, each: docs, lease: { defaultMs: 10, maxMs: 5 } }), /default lease exceeds/);
+  assert.throws(() => external("x", { input: () => null, each: docs, lease: { maxMs: 0 } }), /lease.maxMs must be a positive safe integer/);
+  assert.throws(() => external("x", { input: () => null, each: docs, lease: { other: 1 } as never }), /does not accept "other"/);
+  assert.throws(() => words.claim({} as never, "w"), /does not track a collection/);
   assert.throws(() => words.next({} as never), /does not track a collection/);
   for (const options of [{ limit: 0 }, { limit: 1.5 }, { shard: [1, 1] }, { shard: [0] }, { shard: [-1, 2] }]) {
     assert.throws(() => tracked.next({} as never, options as never), (error: any) => error.code === "INVALID_ARGUMENT");

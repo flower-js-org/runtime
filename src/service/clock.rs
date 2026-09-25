@@ -25,14 +25,15 @@ impl Clock {
     }
 
     pub(super) fn sample(&self, state: &Snapshot) -> anyhow::Result<u64> {
+        self.sample_after(committed(state))
+    }
+
+    /// A sample no earlier than a snapshot's committed clock, taken later.
+    pub(super) fn sample_after(&self, committed: u64) -> anyhow::Result<u64> {
         let elapsed_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let sampled = wall_ms().max(self.epoch_ms.saturating_add(elapsed_ms)).max(
-            state
-                .data
-                .get("clock")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0),
-        );
+        let sampled = wall_ms()
+            .max(self.epoch_ms.saturating_add(elapsed_ms))
+            .max(committed);
         anyhow::ensure!(
             sampled <= MAX_SAFE_INTEGER,
             "server clock exceeds the safe integer range"
@@ -42,6 +43,14 @@ impl Clock {
             .fetch_max(sampled, Ordering::Relaxed)
             .max(sampled))
     }
+}
+
+pub(super) fn committed(state: &Snapshot) -> u64 {
+    state
+        .data
+        .get("clock")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
 }
 
 fn wall_ms() -> u64 {

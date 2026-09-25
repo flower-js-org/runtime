@@ -5,7 +5,7 @@
 <ul>
 <li>Encode BigInt, Date, Map, Set and typed arrays as JSON yourself. Use safe integers (such as cents) when you need exact math.</li>
 <li>Return a JSON value, never a Promise or undefined. Use <code>null</code> for “nothing”.</li>
-<li>Callbacks have no filesystem, network, timers or wall clock. Use <code>ctx.now()</code> for time and external workers for side effects.</li>
+<li>Callbacks have no filesystem, network, timers or wall clock. Use <code>ctx.now()</code> or <code>ctx.clock()</code> for time and external workers for side effects.</li>
 <li>Each callback starts from a copy of your initialized module. Changes to module globals don’t persist between calls.</li>
 </ul>
 </section>

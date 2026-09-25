@@ -58,6 +58,6 @@ export default define({ uses: [oven], http: { place } });</code></pre></div>
 <li>If it fails, its writes roll back and it retries with doubling delay, up to <code>maxAttempts</code>. Then it stays as a failed timer, with the error, that you can inspect and retry.</li>
 <li>A timer whose handler is no longer deployed fails with <code>SCHEDULER_HANDLER_MISSING</code>.</li>
 <li>A handler can run more than once before it commits. Put external side effects in a queue.</li>
-<li>By default the leader checks for due timers every 250 ms. That’s an operator setting.</li>
+<li>The leader runs timers when the earliest one is due, starting at most one run every 250 ms by default. That’s an operator setting.</li>
 </ul>
 </section>

@@ -702,11 +702,18 @@ impl Engine<'_> {
                 self.observe(observed, "managedKeys".into())?;
                 self.managed_key(argument(0))
             }
-            "now" => {
+            "now" | "clock" => {
                 self.count_reads(1)?;
                 self.query_cacheable = false;
+                // Deployments build cells; only queries and mutations report time use.
+                self.clock_polled |= operation == "now" && self.mode != "deployment";
                 self.observe(observed, "clock".into())?;
                 Ok(json!(self.now))
+            }
+            "changesAt" => {
+                self.count_reads(1)?;
+                self.declare_change(argument(0))?;
+                Ok(Value::Null)
             }
             "get" => {
                 self.count_reads(1)?;

@@ -38,7 +38,7 @@ export default app;</code></pre></div>
 <li>Unmaterialized values can still be read; they're computed on the spot.</li>
 <li>A mutation sees its own earlier writes, including through derived values. Record changes, updated values and the result commit together.</li>
 </ul>
-<p>The background steps run as <a href="components.html">maintenance tasks</a>, which the leader checks every 250 ms. Until they finish, reads compute the value on the spot.</p>
+<p>The background steps run as <a href="components.html">maintenance tasks</a>, which the leader runs as soon as they're due. Until they finish, reads compute the value on the spot.</p>
 </section>
 <section id="choose-useful-dependency-boundaries">
 <h2>Keep dependencies narrow</h2>

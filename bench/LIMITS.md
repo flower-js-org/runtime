@@ -166,9 +166,9 @@ These settings work in ordinary builds. Sizes and durations must be positive pla
 | `FLOWER_WRITER_BATCH_MS` | 50 | Maximum preparation window. Adaptive mode considers observed durability cost, backlog, oldest request age, and time until the writer must yield for maintenance. Overdue-backlog recovery targets all queued work within those bounds; healthy queues retain partial-backlog sizing. Near a maintenance boundary, it drains instead of starting a tiny successor. A successor cannot be submitted before its predecessor completes, so this window does not close it early while that predecessor commits. Local unapplied-log and voting-quorum replication backlogs gate speculative successor preparation; they do not force singleton commits. Stops between methods; one slow callback can overrun this soft window. |
 | `FLOWER_DEPLOYMENT_PAGE_MS` | 200 | Soft preparation target for adaptive staged graph pages, capped by `FLOWER_EVALUATION_TIMEOUT_MS`. Independent of ordinary writer batching. Lower values favor more, smaller pages and shorter competing write stalls; larger values favor fewer pages and rebuild throughput. A failed multi-root candidate may retry one root with the full normal evaluation timeout. |
 | `FLOWER_WRITER_WINDOW_MS` | 250 | Yield the writer turn between methods/groups so maintenance can run. |
-| `FLOWER_MAINTENANCE_INTERVAL_MS` | 250 | Poll cadence for due TypeScript work. |
+| `FLOWER_MAINTENANCE_INTERVAL_MS` | 250 | Shortest gap between maintenance runs; they start when TypeScript work is due, or after a write, not on a timer. Handlers without a `next` hint are polled at this interval. |
 | `FLOWER_MAINTENANCE_BURST_MS` | 50 | Stop a catch-up burst after a callback takes it past this duration. No independent callback-count ceiling. |
-| `FLOWER_WATCH_REFRESH_MS` | 250 | Re-evaluate clock-sensitive watches and recheck fresh-watch availability. Commits also wake watches. |
+| `FLOWER_WATCH_REFRESH_MS` | 250 | Re-evaluate watches whose result or authorization read `ctx.now()` without declaring a change time. Commits, Raft role changes and declared times wake the rest. |
 | `FLOWER_WATCH_KEEPALIVE_MS` | 15000 | SSE heartbeat cadence. |
 | `FLOWER_WATCH_SEND_TIMEOUT_MS` | 5000 | Maximum wait for room to send a changed update in a slow consumer’s one-item output queue. |
 

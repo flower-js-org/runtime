@@ -42,7 +42,7 @@ node sdk/cli.ts watch invoice.get '"inv-1"'</code></pre></div>
 <li>Handlers don't need to be public. To repeat, have a handler reschedule itself under the same ID.</li>
 <li>A failed handler's changes are discarded, then it is retried: three attempts, 1,000 ms first backoff, doubling up to 60,000 ms. Change these with <code>scheduler(name, handlers, { maxAttempts, retryDelayMs, maxRetryDelayMs })</code>.</li>
 <li>After the last attempt, the timer stays <code>failed</code> with its error, until <code>timers.retry(ctx, id)</code> requeues it.</li>
-<li>Timers run as a <a href="components.html#tasks">maintenance task</a>. The leader checks every 250 ms (<code>FLOWER_MAINTENANCE_INTERVAL_MS</code>).</li>
+<li>Timers run as a <a href="components.html#tasks">maintenance task</a>. The leader wakes when the next timer is due, but starts at most one run every 250 ms (<code>FLOWER_MAINTENANCE_INTERVAL_MS</code>), so a crowd of timers runs in batches.</li>
 </ul>
 <div class="note"><span class="note-mark" aria-hidden="true">◷</span><p><strong>A deadline means “not before.”</strong> Load, elections or lost quorum can delay it. Its changes commit once, but it may be evaluated more than once, so send external side effects through a <a href="leases.html">queue</a>.</p></div>
 <p>In tests, <code>db.advance(5_000)</code> moves the clock and runs due timers; see <a href="testing.html#time">Testing</a>. For background work that isn't tied to one deadline, write a <a href="components.html#tasks">task</a>. <a href="https://github.com/xmit-dev/flower/blob/main/examples/scheduling.ts"><code>examples/scheduling.ts</code></a> is a fuller timer app.</p>

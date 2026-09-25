@@ -3,7 +3,7 @@
 //! and null. Tags, floats, indefinite lengths and repeated map keys are
 //! rejected. Containers are small and shallow, which bounds the work a native
 //! call spends on hostile input; it cannot be interrupted midway.
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 
 const MAX_DEPTH: usize = 16;
 const MAX_ENTRIES: u64 = 64;

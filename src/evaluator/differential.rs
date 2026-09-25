@@ -41,7 +41,8 @@ var __flowerBundle={default:{definitions,http}};
 "#;
 
 fn representation(value: &Evaluation) -> Value {
-    json!({"puts":value.puts,"deletes":value.deletes,"value":value.value,"query_cacheable":value.query_cacheable})
+    json!({"puts":value.puts,"deletes":value.deletes,"value":value.value,"query_cacheable":value.query_cacheable,
+        "query_clock_polled":value.query_clock_polled,"query_changes_at":value.query_changes_at})
 }
 
 fn compare(data: &mut BTreeMap<String, Value>, input: Value, mode: &str, now: u64) {

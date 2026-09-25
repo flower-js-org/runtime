@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import type app from "../docs/reactive-worker.ts";
 import { FlowerClient, FlowerError } from "./client.ts";
 import { testDatabase, type TestDatabase } from "./testing.ts";
-import { reconcile } from "./worker.ts";
+import { reconcile, type ReconcileEvent, type ReconcileOptions } from "./worker.ts";
 
 // Node ignores tsconfig paths, so resolve the download's @flower-js/sdk imports to
 // current source; the worker then shares FlowerError and friends with this test.
@@ -203,4 +203,130 @@ test("a pool keeps publishing other keys when one computed value fails the resul
     await until(() => events.includes("failed:bad"));
   } finally { stop.abort(); await pool; }
   assert.deepEqual(db.query("document.get", "bad")?.digest, { status: "pending" });
+});
+
+type Input = { recipe: string; text: string };
+/** Start a lease-mode pool over the digest external value, recording its events. */
+function leased(client: FlowerClient<typeof app>, options: Partial<ReconcileOptions<string, Input, string>> & Pick<ReconcileOptions<string, Input, string>, "compute">) {
+  const stop = new AbortController();
+  const events: ReconcileEvent[] = [];
+  const done = reconcile<string, Input, string>(client, { external: "digest", lease: true, signal: stop.signal, onEvent: (event) => events.push(event), ...options });
+  const claims = () => events.filter((event) => event.type === "claimed");
+  return { events, claims, done, stop: () => { stop.abort(); return done; } };
+}
+/** A computation that runs until its signal aborts, recording why. */
+const endless = (reasons: string[] = []) => (_input: Input, _work: unknown, signal: AbortSignal) => new Promise<string>((_, reject) =>
+  signal.addEventListener("abort", () => { reasons.push((signal.reason as Error).message); reject(signal.reason); }, { once: true }));
+
+test("leased pools compute each key once between them, concurrently", async () => {
+  const db = await application();
+  const ids = Array.from({ length: 12 }, (_, index) => `doc-${index}`);
+  for (const id of ids) db.mutate("document.put", { id, text: id });
+  const seen: string[][] = [[], []];
+  let running = 0, peak = 0;
+  const pools = [0, 1].map((index) => leased(db.client, {
+    owner: `pool-${index}`, concurrency: 3,
+    async compute(input, work) {
+      seen[index].push(work.args);
+      peak = Math.max(peak, ++running);
+      await sleep(5);
+      running--;
+      return sha(input.text);
+    },
+  }));
+  try { for (const id of ids) await digestOf(db, id, id); } finally { await Promise.all(pools.map((pool) => pool.stop())); }
+  assert.deepEqual([...seen[0], ...seen[1]].sort(), [...ids].sort(), "every key was computed exactly once");
+  assert.ok(seen[0].length > 0 && seen[1].length > 0, `both pools took work: ${seen[0].length} and ${seen[1].length}`);
+  assert.ok(peak > 3, `peak concurrency ${peak}`);
+  assert.deepEqual(db.query("digest.stats", null), { ready: false, oldestReadyAt: null, nextAvailableAt: null });
+});
+
+test("when a pool goes silent, another takes its keys once their leases end", async () => {
+  const db = await application();
+  for (const id of ["a", "b"]) db.mutate("document.put", { id, text: id });
+  let dead = false;
+  const silent = new FlowerClient<typeof app>("http://flower.test", {
+    fetch: (url, init) => dead ? Promise.reject(new TypeError("fetch failed")) : db.fetch(url, init),
+  });
+  const first = leased(silent, { owner: "silent", concurrency: 2, leaseMs: 60_000, compute: endless() });
+  await until(() => first.claims().length === 2);
+  dead = true;
+  const second = leased(db.client, { owner: "rescuer", concurrency: 2, compute: async (input) => sha(input.text) });
+  await sleep(20);
+  assert.deepEqual(second.events, [], "leased keys are left alone");
+  db.advance(60_000);
+  try { await digestOf(db, "a", "a"); await digestOf(db, "b", "b"); } finally { await Promise.all([first.stop(), second.stop()]); }
+  assert.deepEqual(second.claims().map((event) => event.type === "claimed" && event.attempt), [2, 2]);
+});
+
+test("a stopping pool hands its keys to another at once", async () => {
+  const db = await application();
+  for (const id of ["a", "b"]) db.mutate("document.put", { id, text: id });
+  const first = leased(db.client, { owner: "leaving", concurrency: 2, compute: endless() });
+  await until(() => first.claims().length === 2);
+  const second = leased(db.client, { owner: "staying", concurrency: 2, compute: async (input) => sha(input.text) });
+  await sleep(10);
+  assert.deepEqual(second.events, []);
+  const now = db.now;
+  await first.stop();
+  try { await digestOf(db, "a", "a"); await digestOf(db, "b", "b"); } finally { await second.stop(); }
+  assert.equal(db.now, now, "no lease had to run out");
+  assert.deepEqual(first.events.map((event) => event.type), ["claimed", "claimed"], "shutdown is not a failure");
+});
+
+test("an edit voids the lease on the old input and aborts its computation", async () => {
+  const db = await application();
+  db.mutate("document.put", { id: "a", text: "old" });
+  const reasons: string[] = [];
+  const stale = endless(reasons);
+  const pool = leased(db.client, {
+    owner: "solo", concurrency: 2, leaseMs: 300,
+    compute: (input, work, signal) => input.text === "old" ? stale(input, work, signal) : Promise.resolve(sha(input.text)),
+  });
+  await until(() => pool.claims().length === 1);
+  db.mutate("document.put", { id: "a", text: "new" });
+  try {
+    await digestOf(db, "a", "new");
+    await until(() => pool.events.some((event) => event.type === "lost"));
+  } finally { await pool.stop(); }
+  assert.deepEqual(reasons, ["The lease was lost"]);
+  assert.deepEqual(pool.events.map((event) => event.type), ["claimed", "claimed", "published", "lost"]);
+});
+
+test("a failed key waits out its backoff for every pool, then succeeds", async () => {
+  const db = await testDatabase<typeof app>(entry, { now: Date.now() });
+  const clock = setInterval(() => db.advance(Math.max(0, Date.now() - db.now)), 5);
+  db.mutate("document.put", { id: "a", text: "a" });
+  const times: number[] = [];
+  let computations = 0;
+  const compute = async (input: Input) => {
+    times.push(Date.now());
+    if (++computations === 1) throw new Error("hiccup");
+    return sha(input.text);
+  };
+  const pools = ["p1", "p2"].map((owner) => leased(db.client, { owner, compute }));
+  try { await digestOf(db, "a", "a"); } finally { await Promise.all(pools.map((pool) => pool.stop())); clearInterval(clock); }
+  const events = pools.flatMap((pool) => pool.events);
+  assert.deepEqual(events.filter((event) => event.type === "claimed").map((event) => event.type === "claimed" && event.attempt).sort(), [1, 2]);
+  assert.equal(events.filter((event) => event.type === "failed").length, 1);
+  assert.equal(computations, 2);
+  assert.ok(times[1] - times[0] >= 100, `retried after ${times[1] - times[0]} ms`);
+});
+
+test("lease mode checks its options and stops on a permanent claim failure", async () => {
+  const db = await application();
+  const base = { external: "digest", signal: new AbortController().signal, compute: async () => "" };
+  await assert.rejects(reconcile(db.client, { ...base, lease: true, args: "a" }), /omit args and shard/);
+  await assert.rejects(reconcile(db.client, { ...base, lease: true, shard: [0, 2] }), /omit args and shard/);
+  await assert.rejects(reconcile(db.client, { ...base, owner: "x" }), /need lease: true/);
+  await assert.rejects(reconcile(db.client, { ...base, lease: true, leaseMs: 100, marginMs: 100 }), /leaseMs must exceed marginMs/);
+  await assert.rejects(reconcile(db.client, { ...base, lease: true, concurrency: 1_025 }), /at most 1024/);
+  const denied = new FlowerClient<typeof app>("http://flower.test", {
+    async fetch(url, init) {
+      if (JSON.parse(init.body).name !== "digest.claim") return db.fetch(url, init);
+      const error = { code: "FORBIDDEN", message: "Authorization denied", failure: { code: "FORBIDDEN", message: "Access denied" } };
+      return new Response(JSON.stringify({ error }), { status: 403, headers: { "content-type": "application/json" } });
+    },
+  });
+  await assert.rejects(reconcile(denied, { ...base, lease: true }), (error) => error instanceof FlowerError && error.failure?.code === "FORBIDDEN");
 });

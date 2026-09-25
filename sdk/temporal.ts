@@ -20,8 +20,10 @@ function integer(value: unknown, label: string, minimum = 0): asserts value is n
   }
 }
 
+// Every read below reports when its result next changes through ctx.changesAt,
+// so watches of these helpers wake exactly then instead of polling.
 function clock(ctx: Context): number {
-  const now = ctx.now();
+  const now = ctx.clock();
   integer(now, "Server time");
   return now;
 }
@@ -69,7 +71,7 @@ export interface ExpiringCollection<T> extends Component {
   delete(ctx: MutationContext, key: string): void;
 }
 
-/** Reads hide records at ctx.now() >= expiresAt; a maintenance task reclaims their storage. */
+/** Reads hide records at ctx.clock() >= expiresAt; a maintenance task reclaims their storage. */
 export function expiringCollection<T = Json>(name: string, options: { readonly expiration?: Expiration; readonly value?: SchemaLike<T> } = {}): ExpiringCollection<T> {
   reserved(name, "Collection name");
   const settings = plainObject(options, "Expiration configuration", ["expiration", "value"]);
@@ -81,10 +83,16 @@ export function expiringCollection<T = Json>(name: string, options: { readonly e
   const records = collection<ExpiringEntry<T>>(name).index("expiry", ["expiresAt"]);
   const live = (entry: ExpiringEntry<T> | null, now: number): entry is ExpiringEntry<T> =>
     entry !== null && (entry.expiresAt === null || now < entry.expiresAt);
+  // A live entry disappears from reads at its expiry.
+  function visible(ctx: Context, entry: ExpiringEntry<T> | null, now: number): entry is ExpiringEntry<T> {
+    if (!live(entry, now)) return false;
+    ctx.changesAt(entry.expiresAt);
+    return true;
+  }
   function entry(ctx: Context, key: string): ExpiringEntry<T> | null {
     requireName(key, "Key");
     const stored = ctx.get(records, key);
-    return live(stored, clock(ctx)) ? stored : null;
+    return visible(ctx, stored, clock(ctx)) ? stored : null;
   }
   const sweep = task(`expiring:${name}`, {
     due: (ctx) => ctx.range(records.by("expiry").range({ gte: 0, limit: 1 })).rows[0]?.value.expiresAt ?? null,
@@ -102,7 +110,7 @@ export function expiringCollection<T = Json>(name: string, options: { readonly e
     get(ctx: Context, key: string): T | null { return entry(ctx, key)?.value ?? null; },
     scan(ctx: Context): Row<T>[] {
       const now = clock(ctx);
-      return ctx.scan(records).filter((row) => live(row.value, now)).map((row) => ({ key: row.key, value: row.value.value }));
+      return ctx.scan(records).filter((row) => visible(ctx, row.value, now)).map((row) => ({ key: row.key, value: row.value.value }));
     },
     set(ctx: MutationContext, key: string, value: T, expiration: Expiration = fallback): ExpiringEntry<T> {
       requireName(key, "Key");
@@ -281,6 +289,20 @@ export function queue<P = Json, R = Json>(name: string, options: QueueOptions<P,
           canonicalJson(job.lease!.history ?? null) !== canonicalJson(history)) leaseError();
       return job;
     }
+    // A running lease changes the job at its expiry, whether or not anyone claims it again.
+    function current(ctx: Context, job: Job<P, R>, now: number): Job<P, R> {
+      if (job.state === "leased" && now < job.lease!.expiresAt) ctx.changesAt(job.lease!.expiresAt);
+      return effective(job, now);
+    }
+    // When a delayed job or a running lease next makes work available.
+    function upcoming(ctx: Context, now: number): number | null {
+      const delayed = ctx.range(records.by("ready").range({ prefix: [scope, "pending"], gt: now, limit: 1 })).rows[0]?.value.availableAt ?? null;
+      const running = ctx.range(records.by("leases").range({ prefix: [scope, "leased"], gt: now, limit: 1 })).rows[0]?.value.leaseExpiresAt ?? null;
+      const times = [delayed, running].filter((time): time is number => time !== null);
+      const next = times.length ? Math.min(...times) : null;
+      ctx.changesAt(next);
+      return next;
+    }
     function claimOf(job: Job<P, R>): Claim<P> {
       return { scope, id: job.id, payload: job.payload, ...job.lease!, attempt: job.attempts };
     }
@@ -391,24 +413,24 @@ export function queue<P = Json, R = Json>(name: string, options: QueueOptions<P,
       },
       get(ctx: Context, id: string): Job<P, R> | null {
         const job = ctx.get(records, key(id));
-        return job && effective(job, clock(ctx));
+        return job && current(ctx, job, clock(ctx));
       },
       scan(ctx: Context): Job<P, R>[] {
         const now = clock(ctx);
-        return Array.from(pages(ctx, records.by("ready"), { prefix: [scope] }), (row) => effective(row.value, now))
+        return Array.from(pages(ctx, records.by("ready"), { prefix: [scope] }), (row) => current(ctx, row.value, now))
           .sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
       },
       ready(ctx: Context): boolean {
         const now = clock(ctx);
-        return ctx.range(records.by("ready").range({ prefix: [scope, "pending"], lte: now, limit: 1 })).rows.length > 0 || expiredPending(ctx, now) !== null;
+        // Time only adds ready jobs, so a true answer holds until the next write.
+        if (ctx.range(records.by("ready").range({ prefix: [scope, "pending"], lte: now, limit: 1 })).rows.length > 0 || expiredPending(ctx, now) !== null) return true;
+        upcoming(ctx, now);
+        return false;
       },
       stats(ctx: Context): QueueStats {
         const now = clock(ctx);
         const found = oldest(ctx, now);
-        const delayed = ctx.range(records.by("ready").range({ prefix: [scope, "pending"], gt: now, limit: 1 })).rows[0]?.value.availableAt ?? null;
-        const running = ctx.range(records.by("leases").range({ prefix: [scope, "leased"], gt: now, limit: 1 })).rows[0]?.value.leaseExpiresAt ?? null;
-        const upcoming = [delayed, running].filter((time): time is number => time !== null);
-        return { ready: found !== null, oldestReadyAt: found?.availableAt ?? null, nextAvailableAt: upcoming.length ? Math.min(...upcoming) : null };
+        return { ready: found !== null, oldestReadyAt: found?.availableAt ?? null, nextAvailableAt: upcoming(ctx, now) };
       },
     });
   }

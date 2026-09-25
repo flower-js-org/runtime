@@ -7,7 +7,7 @@
 //! checks on ticks spaced at 1.5 * heartbeat. Election values alone therefore
 //! understate the expected failover delay.
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{ensure, Context, Result};
 use openraft::Config;
 use std::time::{Duration, Instant};
 
@@ -119,18 +119,14 @@ mod tests {
                 "{error}"
             );
         }
-        assert!(
-            configure_with(Config::default(), |name| Ok((name
-                == "FLOWER_RAFT_HEARTBEAT_MS")
-                .then(|| "150".into())))
-            .is_err()
-        );
-        assert!(
-            configure_with(Config::default(), |name| Ok((name
-                == "FLOWER_RAFT_ELECTION_MIN_MS")
-                .then(|| "300".into())))
-            .is_err()
-        );
+        assert!(configure_with(Config::default(), |name| Ok((name
+            == "FLOWER_RAFT_HEARTBEAT_MS")
+            .then(|| "150".into())))
+        .is_err());
+        assert!(configure_with(Config::default(), |name| Ok((name
+            == "FLOWER_RAFT_ELECTION_MIN_MS")
+            .then(|| "300".into())))
+        .is_err());
     }
 
     #[test]

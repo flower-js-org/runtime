@@ -65,7 +65,7 @@ export const pages = [
     path: "guide/workers.html", group: "guide", label: "External workers",
     title: "Do slow work outside the database.",
     lead: "Workers are ordinary processes. They watch for work, do it, and report back through a mutation.",
-    description: "Design reactive external workers: keep a result current, or complete every queued action exactly once.",
+    description: "Design reactive external workers: keep a result current, complete every queued action exactly once, and spread the work with leases or shards.",
   },
   {
     path: "guide/worker-pools.html", group: "guide", label: "Worker pools",

@@ -2,7 +2,7 @@
 //! path used for evaluated patches. No clock or secret is consulted here.
 use super::*;
 use crate::consensus::retention::{self as policy, Action, Command, Session, State};
-use anyhow::{Context, ensure};
+use anyhow::{ensure, Context};
 
 fn value<'a>(state: &'a Snapshot, delta: &'a ApplicationDelta, key: &str) -> Option<&'a Value> {
     delta
