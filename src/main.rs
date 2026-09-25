@@ -10,6 +10,11 @@ use flower::{consensus::Consensus, service};
 
 mod server;
 
+// Evaluations, HTTP handling and commits allocate many small, short-lived
+// values across worker threads; mimalloc serves them from per-thread pages.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Parser)]
 #[command(
     version,
