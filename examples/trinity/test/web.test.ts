@@ -131,6 +131,35 @@ test("tool results fold into their calls and prompts show only while awaiting", 
   assert.match(card, /Permission for bash: denied/);
 });
 
+test("auto-approved calls get a marker, and prompts say why the reviewer left them to the user", () => {
+  const events = [
+    event(1, { type: "assistant", blocks: [
+      { type: "tool_call", id: "c1", name: "bash", input: { command: "npm test" } },
+      { type: "tool_call", id: "c2", name: "bash", input: { command: "git push" } },
+      { type: "tool_call", id: "c3", name: "write_file", input: { path: "a", content: "b" } },
+    ], model: "m", stopReason: "tool_use", usage: null, costNanos: 0, interrupted: false }),
+    event(2, { type: "tool_reviewed", call: "c1", approved: true, reviewer: "jev-2026-09-20", scores: { requested: 0.97, safe: 0.951 }, note: null }),
+    event(3, { type: "tool_reviewed", call: "c2", approved: false, reviewer: "jev-2026-09-20", scores: { requested: 0.97, safe: 0.12 }, note: null }),
+    event(4, { type: "tool_awaiting", call: "c2", kind: "permission", prompt: "Run: git push" }),
+  ];
+  const session = { turn: { calls: {
+    c1: { id: "c1", state: "running" },
+    c2: { id: "c2", name: "bash", input: {}, state: "awaiting", approval: "permission" },
+    c3: { id: "c3", state: "reviewing" },
+  } } };
+  const items = render.viewItems(events, session);
+  assert.deepEqual(items.map((item: { kind: string }) => item.kind), ["assistant", "reviewed", "awaiting"]);
+  const [assistant, marker, prompt] = items.map((item: unknown) => render.itemHtml(item, { blobUrl: () => "", me: "x" }));
+  assert.match(assistant, /class="tool reviewing"[\s\S]*Reviewing/);
+  assert.match(marker, /Auto-approved bash npm test/);
+  assert.match(marker, /title="Reviewed by jev-2026-09-20: requested 0\.97 · safe 0\.95"/);
+  assert.match(prompt, /Not auto-approved: jev-2026-09-20 was not confident enough \(requested 0\.97 · safe 0\.12\)/);
+
+  const failed = [...events.slice(0, 1), event(5, { type: "tool_reviewed", call: "c3", approved: false, reviewer: null, scores: {}, note: "The review took too long." }), event(6, { type: "tool_awaiting", call: "c3", kind: "permission", prompt: "Write 1 characters to a" })];
+  const card = render.itemHtml(render.viewItems(failed, { turn: { calls: { c3: { id: "c3", state: "awaiting" } } } }).at(-1), { blobUrl: () => "", me: "x" });
+  assert.match(card, /Not auto-approved: The review took too long\./);
+});
+
 test("an awaiting call outside the loaded window still gets a prompt", () => {
   const session = { turn: { calls: { q: { id: "q", name: "ask_user", input: { question: "Which?" }, state: "awaiting", approval: "elicitation" } } } };
   const [item] = render.viewItems([], session);

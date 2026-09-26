@@ -4,6 +4,7 @@ import { append, setStatus } from "./log.ts";
 import { memorySnapshot } from "./memories.ts";
 import type { Block, Call, CompletionJob, CompletionKind, CompletionMessage, Queued, Resolution, Session } from "./model.ts";
 import { clearPartial, partialText } from "./partials.ts";
+import { endReview, startReview } from "./reviews.ts";
 import { requestSeal } from "./sealing.ts";
 import { blobRefs, completions, titleSources, toolJobs } from "./store.ts";
 import { askOnSurface, replyOnSurface, resolvedOnSurface } from "./surfaces.ts";
@@ -45,7 +46,7 @@ export function advance(tx: Tx, session: Session): void {
 
     const calls = Object.values(turn.calls);
     if (calls.some((call) => call.state === "awaiting")) return setStatus(ctx, session, "waiting_on_user");
-    if (calls.some((call) => call.state === "running")) return setStatus(ctx, session, "working");
+    if (calls.some((call) => call.state === "running" || call.state === "reviewing")) return setStatus(ctx, session, "working");
 
     // Steers and background results join the turn at this boundary; follow-ups wait for the next turn.
     const steers = session.queued.filter((message) => message.steer);
@@ -167,6 +168,8 @@ export function recordCompletion(tx: Tx, session: Session, job: CompletionJob, m
   }
   if (toolCalls.length > 0) turn.owed = true;
 
+  const reviewing = Object.values(turn.calls).filter((call) => call.state === "reviewing");
+  if (reviewing.length > 0) startReview(tx, session, reviewing);
   const waiting = Object.values(turn.calls).filter((call) => call.state === "awaiting");
   if (waiting.length > 0 && session.source !== null) askOnSurface(tx, session, waiting);
   advance(tx, session);
@@ -195,10 +198,17 @@ function dispatch(tx: Tx, session: Session, call: Call): void {
   }
   const allowed = tool.approval === "permission" && session.allow.includes(call.name);
   if (tool.approval === undefined || allowed) return run(tx, session, call, input);
-  call.state = "awaiting";
   call.approval = tool.approval;
   call.prompt = tool.prompt?.(input) ?? call.name;
-  append(tx.ctx, session, { type: "tool_awaiting", call: call.id, kind: call.approval, prompt: call.prompt });
+  // The response's permission requests go to the reviewer together, once all its calls are dispatched.
+  if (call.approval === "permission" && session.autoApprove) call.state = "reviewing";
+  else awaitUser(tx, session, call);
+}
+
+/** Put a call to the user: a permission request, or a question. */
+export function awaitUser(tx: Tx, session: Session, call: Call): void {
+  call.state = "awaiting";
+  append(tx.ctx, session, { type: "tool_awaiting", call: call.id, kind: call.approval!, prompt: call.prompt ?? call.name });
 }
 
 /** Run an admitted call: inline tools now, the others as jobs on the session's computer or the service. */
@@ -258,7 +268,7 @@ export function settleError(tx: Tx, session: Session, code: string, message: str
 }
 
 /**
- * Stop the turn. Streamed text is kept and prompts are cancelled at once; running tools get
+ * Stop the turn. Streamed text is kept, and prompts and reviews are cancelled at once; running tools get
  * the session's grace window to finish. Every call still gets a result.
  */
 export function halt(tx: Tx, session: Session, options: { background?: boolean } = {}): boolean {
@@ -274,8 +284,9 @@ export function halt(tx: Tx, session: Session, options: { background?: boolean }
   if (turn.halting !== null) return true;
 
   if (turn.completion !== null) keepPartial(tx, session);
+  endReview(tx, session);
   for (const call of Object.values(turn.calls)) {
-    if (call.state !== "awaiting") continue;
+    if (call.state !== "awaiting" && call.state !== "reviewing") continue;
     markResolved(tx, session, call, "cancelled");
     resolveCall(tx, session, call, "Cancelled by user halt.", true);
   }
@@ -299,6 +310,7 @@ export function finalizeHalt(tx: Tx, session: Session): void {
 function abandonTurn(tx: Tx, session: Session, reason: string): void {
   const turn = session.turn!;
   if (turn.completion !== null) keepPartial(tx, session);
+  endReview(tx, session);
   for (const call of Object.values(turn.calls)) {
     if (call.state === "done") continue;
     if (call.job !== null) toolJobs.scope(call.job.scope).cancel(tx.ctx, call.job.id);

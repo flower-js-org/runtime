@@ -98,6 +98,7 @@ ${this.admin ? "" : html`<p class="muted">Only admins change these settings.</p>
 <label>Monthly budget (USD)<input name="budget" inputmode="decimal" value="${nanosToDollars(s.budgetNanos)}" placeholder="No limit"><span class="hint">New turns stop once this month's spending reaches it.</span></label>
 <label>Context limit (tokens)<input name="contextTokens" type="number" min="10000" max="900000" step="1000" value="${s.contextTokens}" required><span class="hint">Conversations are summarized before a request would exceed this.</span></label>
 <label>Halt grace window (seconds)<input name="grace" type="number" min="0" max="600" step="1" value="${s.graceMs / 1000}" required><span class="hint">How long running tools may finish after a halt.</span></label>
+<label class="check"><input type="checkbox" name="autoApprove" ${s.autoApprove ? raw("checked") : ""}> Auto-approve tool calls that Jev judges safe, in new sessions</label>
 <label class="check"><input type="checkbox" name="webTools" ${s.webTools ? raw("checked") : ""}> Web search and fetch in new sessions</label>
 <div class="actions"><button type="submit" class="primary">Save settings</button></div>
 </fieldset></form></section>
@@ -158,6 +159,7 @@ ${this.admin ? html`<form data-form="member" class="inline-form"><label>User nam
         budgetNanos: dollarsToNanos(values.budget.value),
         contextTokens: Number(values.contextTokens.value),
         graceMs: Math.round(Number(values.grace.value) * 1000),
+        autoApprove: values.autoApprove.checked,
         webTools: values.webTools.checked,
       };
       const { value } = await this.mutate("org.update", { name: values.name.value.trim(), settings });

@@ -15,6 +15,7 @@ Run `npm run check` before committing, and `npm run e2e` after changing `app/`, 
 - Every tool call in the log gets exactly one result, including on halt, error, refusal, truncation and timeout, so every rendered request stays valid. A refusal's output is discarded, not logged.
 - Worker methods check the lease they are given. Lease expiry writes nothing, so attempt budgets are enforced when a job is claimed again.
 - A tool whose `idempotent` is false never runs twice on its own: a reclaimed call reports an unknown outcome instead.
+- The reviewer (`reviews.ts`) only approves. Anything short of a confident verdict, including a failed, lost or slow review, asks the user as if there had been no review.
 - Sealed events leave the database only after `sealing.complete` has checked the stored copy's count and checksum against the log. One seal job per session runs at a time.
 - Keep watched queries bounded: `session.tail` pages by cursor and lists sealed history as segments.
 

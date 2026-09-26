@@ -21,6 +21,7 @@ const settings = {
   computer: v.optional(v.nullable(id)),
   private: v.optional(v.boolean()),
   allow: v.optional(v.array(v.string({ min: 1, max: 128 }), { max: 100 })),
+  autoApprove: v.optional(v.boolean()),
   webTools: v.optional(v.boolean()),
   graceMs: v.optional(v.int({ min: 0, max: 600_000 })),
   contextTokens: v.optional(v.int({ min: 10_000, max: 900_000 })),

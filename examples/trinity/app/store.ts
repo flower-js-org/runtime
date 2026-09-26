@@ -2,7 +2,7 @@ import { aggregate, collection, external, v, type Json } from "@flower-js/sdk";
 import { queue } from "@flower-js/sdk/temporal";
 import {
   id, type Approval, type CompletionJob, type CompletionOutcome, type Event, type Member, type Org, type PartialFlush, type PartialHead,
-  type Resolution, type Segment, type Session, type ToolJob, type ToolOutcome,
+  type Resolution, type ReviewJob, type ReviewOutcome, type Segment, type Session, type ToolJob, type ToolOutcome,
 } from "./model.ts";
 
 // Sessions and their logs
@@ -193,6 +193,7 @@ export const mcpCatalog = external("mcp.catalog", {
 // session; the queues' own limits only bound runaway reclaims.
 export const MAX_COMPLETION_ATTEMPTS = 5;
 export const MAX_TOOL_ATTEMPTS = 3;
+export const MAX_REVIEW_ATTEMPTS = 2;
 
 export const completions = queue<CompletionJob, CompletionOutcome>("completions", {
   lease: { defaultMs: 30_000, maxMs: 120_000 },
@@ -203,6 +204,12 @@ export const completions = queue<CompletionJob, CompletionOutcome>("completions"
 export const toolJobs = queue<ToolJob, ToolOutcome>("toolJobs", {
   lease: { defaultMs: 30_000, maxMs: 300_000 },
   retry: { maxAttempts: 1_000, initialDelayMs: 1_000, maxDelayMs: 30_000 },
+});
+
+/** Permission requests for the reviewer, one job per response. A timer bounds how long they wait. */
+export const reviews = queue<ReviewJob, ReviewOutcome>("reviews", {
+  lease: { defaultMs: 15_000, maxMs: 60_000 },
+  retry: { maxAttempts: 1_000, initialDelayMs: 500, maxDelayMs: 5_000 },
 });
 
 /** What a surface thread should show next. */

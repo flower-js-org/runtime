@@ -2,7 +2,7 @@ import type { FlowerClient } from "@flower-js/sdk";
 import { reconcile } from "@flower-js/sdk/worker";
 import type { Claim, LeaseIdentity } from "@flower-js/sdk/temporal";
 import type app from "../app/index.ts";
-import type { Block, CompletionJob, CompletionOutcome, Delta, Prompt, ToolJob, ToolOutcome } from "../app/model.ts";
+import type { Block, CompletionJob, CompletionOutcome, Delta, Prompt, ReviewJob, ReviewOutcome, ToolJob, ToolOutcome } from "../app/model.ts";
 import { runPool, type PoolEvent } from "./pool.ts";
 
 // A stand-in for the model and for computers, for load tests and for working on Trinity
@@ -31,6 +31,7 @@ const REAL = {
   answerTokens: [350, 0.6],
   summaryTokens: [600, 0.3],
   titleMs: [400, 0.3],
+  reviewMs: [350, 0.3],
   tools: { list_files: [30, 0.5], read_file: [40, 0.5], bash: [700, 1] },
 } as const;
 
@@ -193,6 +194,17 @@ export async function simulateTitle(profile: SimProfile, text: string, signal: A
   return words === "" ? "Untitled session" : words.slice(0, 200);
 }
 
+/** The reviewer's verdicts after a classifier's wait: most calls run without asking, some ask. */
+export async function simulateReview(profile: SimProfile, job: ReviewJob, signal: AbortSignal): Promise<ReviewOutcome> {
+  await sleep(around(seeded(`${job.session}/${job.step}/review`), REAL.reviewMs) / profile.speedup, signal);
+  return {
+    verdicts: Object.fromEntries(job.calls.map((call) => {
+      const safe = Math.round((0.75 + 0.25 * seeded(`${job.session}/${call}/review`)()) * 1_000) / 1_000;
+      return [call, { approved: safe >= 0.8, reviewer: "sim", scores: { safe }, note: null }];
+    })),
+  };
+}
+
 // The workers
 
 export interface SimOptions {
@@ -210,6 +222,8 @@ export interface SimOptions {
   readonly flushMs?: number;
   /** Also generate session titles, in place of the service's title model. Default true. */
   readonly titles?: boolean;
+  /** Also review permission requests, in place of the service's reviewer. Default true. */
+  readonly reviews?: boolean;
   readonly onStats?: (stats: SimStats) => void;
   readonly statsMs?: number;
 }
@@ -291,6 +305,10 @@ export async function runSim(client: Client, options: SimOptions): Promise<void>
       ...(options.titles === false ? [] : [reconcile<string, { text: string }, string>(client, {
         external: "titles", signal: options.signal, lease: true, concurrency: 64,
         compute: (input, _work, signal) => simulateTitle(profile, input.text, signal),
+      })]),
+      ...(options.reviews === false ? [] : [runPool<ReviewJob, ReviewOutcome>(client, {
+        queue: "reviews", signal: options.signal, concurrency: 256, claimers: 4,
+        work: (job, signal) => simulateReview(profile, job.payload, signal),
       })]),
     ]);
   } finally {

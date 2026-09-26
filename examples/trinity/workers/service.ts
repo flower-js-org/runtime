@@ -2,11 +2,12 @@ import Anthropic from "@anthropic-ai/sdk";
 import type { FlowerClient, Json } from "@flower-js/sdk";
 import { reconcile, runQueueWorker } from "@flower-js/sdk/worker";
 import type app from "../app/index.ts";
-import type { Event, ToolJob, ToolOutcome } from "../app/model.ts";
+import type { Event, ReviewJob, ReviewOutcome, ToolJob, ToolOutcome } from "../app/model.ts";
 import type { BillingJob, OutboundJob, SealJob } from "../app/store.ts";
 import type { BlobStore } from "./blobs.ts";
 import { DeliveryError } from "./delivery.ts";
 import { postGithubComment } from "./github.ts";
+import { reviewCalls, type JevOptions } from "./jev.ts";
 import { callMcpTool, listMcpTools, type SecretResolver } from "./mcp.ts";
 import { offload, readOutput, truncate } from "./outputs.ts";
 import { writeSegment } from "./segments.ts";
@@ -16,13 +17,15 @@ type Client = FlowerClient<typeof app>;
 
 export const TITLE_MODEL = "claude-haiku-4-5";
 
-export type Loop = "tools" | "sealing" | "titles" | "catalog" | "github" | "billing";
+export type Loop = "tools" | "reviews" | "sealing" | "titles" | "catalog" | "github" | "billing";
 
 export interface ServiceOptions {
   readonly signal: AbortSignal;
   readonly secrets: SecretResolver;
   readonly blobs?: BlobStore;
   readonly anthropic?: Anthropic;
+  /** The reviewer of permission requests. Without it, every request asks the user. */
+  readonly jev?: JevOptions;
   /** Which loops to run. Default: every loop whose dependencies are configured. */
   readonly loops?: readonly Loop[];
   /** The web client's address, for links to sessions in GitHub comments. */
@@ -92,6 +95,13 @@ async function deliver(job: OutboundJob, options: ServiceOptions, signal: AbortS
   return { id: posted.id, url: posted.url };
 }
 
+/** Review one response's permission requests; throw once the review is no longer wanted. */
+async function review(client: Client, job: ReviewJob, jev: JevOptions | undefined, signal: AbortSignal): Promise<ReviewOutcome> {
+  const { value: request } = await client.query("session.review", { session: job.session, step: job.step }, { signal, retry: true });
+  if (request === null) throw new Error("The review is no longer wanted");
+  return reviewCalls(request, jev, signal);
+}
+
 async function sealSegment(client: Client, blobs: BlobStore, job: SealJob) {
   const events: Event[] = [];
   for (let from = job.from; from <= job.to;) {
@@ -113,6 +123,10 @@ export async function runService(client: Client, options: ServiceOptions): Promi
     tools: () => runQueueWorker<ToolJob, ToolOutcome>(client, {
       queue: "tools", scope: "service", signal, lanes: 8, leaseMs: 60_000, onEvent: report("tools"),
       work: (job, jobSignal) => runServiceTool(job.payload, options, jobSignal),
+    }),
+    reviews: () => runQueueWorker<ReviewJob, ReviewOutcome>(client, {
+      queue: "reviews", signal, lanes: 8, leaseMs: 15_000, onEvent: report("reviews"),
+      work: (job, jobSignal) => review(client, job.payload, options.jev, jobSignal),
     }),
     sealing: blobs === undefined ? null : () => runQueueWorker<SealJob>(client, {
       queue: "sealing", signal, lanes: 2, leaseMs: 60_000, onEvent: report("sealing"),

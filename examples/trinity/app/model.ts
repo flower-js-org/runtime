@@ -26,6 +26,8 @@ export type Body =
   | { type: "tool_result"; call: string; content: string; isError: boolean; blob: string | null }
   | { type: "tool_awaiting"; call: string; kind: Approval; prompt: string }
   | { type: "tool_resolved"; call: string; resolution: Resolution; by?: string }
+  /** A reviewer's verdict on a call that would ask for permission: approved calls run without asking. */
+  | { type: "tool_reviewed"; call: string; approved: boolean; reviewer: string | null; scores: Record<string, number>; note: string | null }
   | { type: "background_result"; call: string; content: string; isError: boolean; blob: string | null }
   | { type: "subagent"; call: string; session: string }
   | { type: "compact"; summary: string }
@@ -43,9 +45,10 @@ export interface Call {
   id: string;
   name: string;
   input: Json;
-  state: "awaiting" | "running" | "done";
+  /** A reviewing call waits for the reviewer to approve it, or else to ask the user. */
+  state: "reviewing" | "awaiting" | "running" | "done";
   approval: Approval | null;
-  /** What the user is asked, while awaiting. */
+  /** What the user is asked, while reviewing or awaiting. */
   prompt: string | null;
   /** The tool job running it, or the subagent session answering it. */
   job: { id: string; scope: string } | null;
@@ -97,6 +100,8 @@ export interface Session {
   queued: Queued[];
   /** Tools that run without asking. */
   allow: string[];
+  /** Calls that would ask for permission go to the reviewer first, and run without asking when it approves them. */
+  autoApprove: boolean;
   webTools: boolean;
   graceMs: number;
   /** Compact the log before a completion whose request would exceed this estimate. */
@@ -134,6 +139,8 @@ export interface OrgSettings {
   model: string;
   /** The computer new sessions use unless they pick one: automations, surfaces, and users who don't choose. */
   computer: string | null;
+  /** Whether new sessions let the reviewer approve permission requests. */
+  autoApprove: boolean;
   webTools: boolean;
   graceMs: number;
   contextTokens: number;
@@ -168,6 +175,44 @@ export type ToolDefinition =
   | { type: string; name: string; [option: string]: Json };
 
 export interface Segment { session: string; from: number; to: number; key: string; count: number }
+
+/** The calls of one response that wait on the reviewer. */
+export interface ReviewJob { session: string; step: number; calls: string[] }
+export interface Verdict {
+  approved: boolean;
+  /** The model that answered, or null when no review happened. */
+  reviewer: string | null;
+  /** The reviewer's answers, from 0 to 1, by question. */
+  scores: Record<string, number>;
+  /** Why the call was not reviewed. */
+  note: string | null;
+}
+export interface ReviewOutcome { verdicts: Record<string, Verdict> }
+
+export interface ReviewCall {
+  id: string;
+  name: string;
+  description: string;
+  input: Json;
+  /** What the user would be asked. */
+  prompt: string;
+  runsOn: "inline" | "computer" | "service";
+  /** The MCP server a service call goes to. */
+  server: string | null;
+}
+
+/** What the reviewer sees, with long texts clipped. */
+export interface ReviewRequest {
+  calls: ReviewCall[];
+  /** The kind of computer that runs computer tools, if any. */
+  computer: "local" | "docker" | null;
+  /** The surface the session answers on, like "slack"; null for the web. */
+  surface: string | null;
+  /** The latest user message (or summary), then at most the most recent events up to the response that made the calls, oldest first. */
+  events: Event[];
+  /** Events left out between the two. */
+  omitted: number;
+}
 
 export interface Prompt {
   kind: CompletionKind;
@@ -220,6 +265,16 @@ export const attachmentSchema = v.object({
   name: v.string({ min: 1, max: 512 }),
   mediaType: v.string({ min: 1, max: 128 }),
   size: count,
+});
+
+const score = v.number({ min: 0, max: 1 });
+export const reviewOutcomeSchema = v.object({
+  verdicts: v.record(v.object({
+    approved: v.boolean(),
+    reviewer: v.nullable(v.string({ min: 1, max: 128 })),
+    scores: v.record(score),
+    note: v.nullable(v.string({ max: 2_000 })),
+  })),
 });
 
 export const toolOutcomeSchema = v.object({ content: v.string({ max: 4_000_000 }), isError: v.boolean(), blob: v.optional(blobKey) });

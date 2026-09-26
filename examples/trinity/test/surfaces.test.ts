@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { OutboundJob } from "../app/store.ts";
-import { bob, call, failure, gateway, setup, text, worker } from "./support/harness.ts";
+import type { OrgSettings } from "../app/model.ts";
+import { approve, bob, call, decline, failure, gateway, setup, text, worker } from "./support/harness.ts";
 
 const asWorker = { credentials: worker };
 const asGateway = { credentials: gateway };
 
-async function slack() {
-  const t = await setup({ settings: { computer: "laptop" } });
+async function slack(settings: Partial<OrgSettings> = {}) {
+  const t = await setup({ settings: { computer: "laptop", ...settings } });
   t.db.mutate("slack.install", {
     org: "acme", team: "T1", name: "Acme", url: "https://acme.slack.com/", botUser: "UBOT", botId: "B1", token: "sealed", installedBy: "alice",
   }, asGateway);
@@ -115,6 +116,16 @@ test("Slack prompts become cards that follow their calls, wherever they are answ
   assert.deepEqual(t.posts().map((job) => job.message), [{ kind: "resolved", call: "b2", card: "400.3", prompt: "Run: rm -rf dist", resolution: "denied", by: "bob" }]);
   assert.equal(t.session(session).turn!.calls.b2!.state, "done");
   assert.ok(t.db.query("session.get", { session: session! }, { credentials: bob }));
+});
+
+test("Slack threads are asked only about the calls the reviewer leaves to them", async () => {
+  const t = await slack({ autoApprove: true });
+  t.link("U1", "alice");
+  t.say("700.1", "rebuild");
+  t.reply(t.claim(), [call("b1", "bash", { command: "make" }), call("b2", "bash", { command: "rm -rf ~" })], "tool_use");
+  assert.deepEqual(t.posts(), [], "nothing is asked while the reviewer decides");
+  t.verdicts(t.review(), { b1: approve(), b2: decline() });
+  assert.deepEqual(t.posts().map((job) => job.message), [{ kind: "ask", calls: [{ id: "b2", approval: "permission", prompt: "Run: rm -rf ~" }] }]);
 });
 
 test("a stop sign on any message of a Slack thread halts its session", async () => {

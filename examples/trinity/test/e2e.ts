@@ -1,7 +1,7 @@
 // The whole stack on a real Flower server: the bundle under QuickJS verifying JWTs, the
 // gateway, a computer running local tools on its own token, the service worker sealing
-// to blob storage, the Slack worker against a stand-in for Slack, and a scripted model in
-// place of the provider.
+// to blob storage and reviewing permission requests, the Slack worker against a stand-in
+// for Slack, and scripted stand-ins for the model and for Jev.
 // Run with `npm run e2e`; FLOWER_BIN selects the server (default the repository's target/release/flower).
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -112,10 +112,19 @@ function fakeSlack() {
   };
 }
 
+/** Confident only about what "Show my notes" asked for, so the other permission requests still ask. */
+const jev = (async (_url: string | URL | Request, init?: RequestInit) => {
+  const { state, questions } = JSON.parse(String(init!.body));
+  const asked = state.conversation.some((entry: { role: string; text?: string }) => entry.role === "user" && entry.text === "Show my notes");
+  const answers = Object.fromEntries(Object.keys(questions).map((key) => [key, { type: "noul", noul: asked ? 0.98 : 0.3 }]));
+  return Response.json({ answers, model: "jev-e2e", usage: { input_tokens: 1, output_tokens: 1 } });
+}) as typeof fetch;
+
 /** Answers like a model would, from what the request holds. */
 function script(kind: CompletionJob["kind"], events: readonly Event[]): { blocks: Block[]; stopReason: string; input: number } {
   const last = events.at(-1)!.body;
   if (kind === "compact") return { blocks: [{ type: "text", text: "Alice asked about her workspace: notes.txt says to remember the milk." }], stopReason: "end_turn", input: 500 };
+  if (last.type === "user" && last.text === "Show my notes") return { blocks: [{ type: "tool_call", id: "call-cat", name: "bash", input: { command: "cat notes.txt" } }], stopReason: "tool_use", input: 1_000 };
   if (last.type === "user" && last.text === "What is in my workspace?") return { blocks: [{ type: "text", text: "Let me look." }, { type: "tool_call", id: "call-list", name: "list_files", input: {} }], stopReason: "tool_use", input: 1_000 };
   if (last.type === "tool_result" && last.call === "call-list") return { blocks: [{ type: "tool_call", id: "call-cat", name: "bash", input: { command: "cat notes.txt" } }], stopReason: "tool_use", input: 1_200 };
   if (last.type === "tool_result" && last.call === "call-cat") return { blocks: [{ type: "text", text: `Your notes say: ${last.content.split("\n").at(-1)}` }], stopReason: "end_turn", input: 20_000 };
@@ -140,7 +149,7 @@ try {
   const prompts: Array<{ kind: string; first: string }> = [];
   const workers = Promise.all([
     runLocalWorker(new FlowerClient<typeof app>(gatewayUrl, { credentials: { token: computer.token } }), { computer: "laptop", workspace, blobs, signal: stop.signal }),
-    runService(worker, { signal: stop.signal, secrets: () => undefined, blobs, loops: ["tools", "sealing"] }),
+    runService(worker, { signal: stop.signal, secrets: () => undefined, blobs, loops: ["tools", "reviews", "sealing"], jev: { apiKey: "e2e", fetch: jev } }),
     runQueueWorker<CompletionJob, CompletionOutcome>(worker, {
       queue: "completions", signal: stop.signal, leaseMs: 10_000,
       async work(job) {
@@ -158,6 +167,8 @@ try {
   await alice.mutate("session.send", { session: "e2e", message: "m1", text: "What is in my workspace?" });
   const asked = await alice.waitUntil("session.get", { session: "e2e" }, (session) => session?.status === "waiting_on_user", { signal: AbortSignal.timeout(20_000) });
   assert.equal(asked.value!.turn!.calls["call-cat"]!.state, "awaiting");
+  const { value: reviewed } = await alice.query("session.tail", { session: "e2e" });
+  assert.ok(reviewed!.events.some(({ body }) => body.type === "tool_reviewed" && !body.approved && body.reviewer === "jev-e2e"), "Jev reviewed the call first");
   await alice.mutate("session.resolve", { session: "e2e", call: "call-cat", approve: true });
   await alice.waitUntil("session.get", { session: "e2e" }, (session) => session?.status === "idle", { signal: AbortSignal.timeout(20_000) });
 
@@ -206,9 +217,18 @@ try {
   assert.match(answer.blocks.at(-1).elements[0].text, /Open in Trinity/);
   await slack.next("reactions.add", (args) => args.name === "white_check_mark" && args.timestamp === "100.2");
   assert.ok(slack.calls.some((call) => call.method === "reactions.remove" && call.args.name === "eyes" && call.args.timestamp === "100.2"));
+
+  // Jev approves a call the user plainly asked for: it runs without asking.
+  await alice.mutate("session.create", { id: "e2e-auto", computer: "laptop" });
+  await alice.mutate("session.send", { session: "e2e-auto", message: "m1", text: "Show my notes" });
+  const auto = await alice.waitUntil("session.get", { session: "e2e-auto" }, (session) => session?.status === "idle" || session?.status === "waiting_on_user", { signal: AbortSignal.timeout(20_000) });
+  assert.equal(auto.value!.status, "idle");
+  assert.equal(auto.value!.lastText, "Your notes say: remember the milk");
+  const { value: autoLog } = await alice.query("session.tail", { session: "e2e-auto" });
+  assert.deepEqual(autoLog!.events.flatMap(({ body }) => body.type === "tool_reviewed" ? [[body.call, body.approved]] : body.type === "tool_awaiting" ? [["asked", body.call]] : []), [["call-cat", true]]);
   stop.abort();
   await Promise.all([workers, slackWorker]);
-  console.log("e2e: permission prompts, local tools, compaction, sealing and a Slack thread ran across the real stack");
+  console.log("e2e: permission prompts, autoapproval, local tools, compaction, sealing and a Slack thread ran across the real stack");
 } finally {
   stop.abort();
   gateway.close();

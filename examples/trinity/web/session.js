@@ -512,6 +512,7 @@ ${s.parent === null && !s.archived ? html`<button type="button" data-action="arc
 <label>Computer<select name="computer"><option value="">None</option>${computers.map((each) => html`<option value="${each.id}" ${each.id === s.computer ? raw("selected") : ""}>${each.name} (${each.online ? "online" : "offline"})</option>`)}
 ${s.computer && !computers.some((each) => each.id === s.computer) ? html`<option value="${s.computer}" selected>${s.computer}</option>` : ""}</select></label>
 <label>Tools that run without asking<input name="allow" value="${s.allow.join(", ")}" placeholder="bash, write_file"></label>
+<label class="check"><input type="checkbox" name="autoApprove" ${s.autoApprove ? raw("checked") : ""}> Auto-approve tool calls that Jev judges safe</label>
 <label class="check"><input type="checkbox" name="webTools" ${s.webTools ? raw("checked") : ""}> Web search and fetch</label>
 <label class="check"><input type="checkbox" name="private" ${s.private ? raw("checked") : ""} ${creator ? "" : raw("disabled")}> Private${creator ? "" : " (only the creator can change this)"}</label>`,
       submit: async (form) => {
@@ -522,6 +523,7 @@ ${s.computer && !computers.some((each) => each.id === s.computer) ? html`<option
           model: form.elements.model.value.trim(),
           computer: form.elements.computer.value || null,
           allow: form.elements.allow.value.split(/[\s,]+/).filter(Boolean),
+          autoApprove: form.elements.autoApprove.checked,
           webTools: form.elements.webTools.checked,
           ...(creator ? { private: form.elements.private.checked } : {}),
         };

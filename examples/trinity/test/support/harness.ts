@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { FlowerError, type Json } from "@flower-js/sdk";
 import type { Claim } from "@flower-js/sdk/temporal";
 import { testDatabase } from "@flower-js/sdk/testing";
-import type { Block, Body, CompletionJob, Delta, OrgSettings, ToolJob, Usage } from "../../app/model.ts";
+import type { Block, Body, CompletionJob, Delta, OrgSettings, ReviewJob, ToolJob, Usage, Verdict } from "../../app/model.ts";
 import type app from "./app.ts";
 
 export const alice = { subject: "alice", claims: { role: "user", org: "acme" } };
@@ -28,6 +28,7 @@ export function summarize(body: Body): string {
     case "background_result": return `background ${body.call}${body.isError ? " error" : ""}: ${body.content}`;
     case "tool_awaiting": return `awaiting ${body.call} ${body.kind}`;
     case "tool_resolved": return `resolved ${body.call} ${body.resolution}`;
+    case "tool_reviewed": return `reviewed ${body.call} ${body.approved ? "approved" : "not approved"}${body.note === null ? "" : `: ${body.note}`}`;
     case "subagent": return `subagent ${body.call} ${body.session}`;
     case "compact": return `compact ${body.summary}`;
     case "error": return `error ${body.code}${body.retryInMs === null ? "" : ` retry in ${body.retryInMs}`}`;
@@ -48,16 +49,20 @@ export interface SetupOptions {
   session?: Record<string, Json>;
 }
 
+export const approve = (scores: Record<string, number> = { safe: 0.97 }): Verdict => ({ approved: true, reviewer: "jev-test", scores, note: null });
+export const decline = (scores: Record<string, number> = { safe: 0.2 }): Verdict => ({ approved: false, reviewer: "jev-test", scores, note: null });
+
 /**
  * An organization "acme" with alice (admin) and bob, alice's computer "laptop", and session "s".
- * The test plays the LLM worker and the computer.
+ * The test plays the LLM worker and the computer. Autoapproval is off unless a test turns it
+ * on, so that only those tests play the reviewer too.
  */
 export async function setup(options: SetupOptions = {}) {
   // A module path is bundled and run in its own context, as the server would.
   const db = await testDatabase<typeof app>(new URL("./app.ts", import.meta.url).pathname, { credentials: alice });
   db.mutate("org.create", { id: "acme", name: "Acme" });
   db.mutate("org.setMember", { subject: "bob", role: "member" });
-  if (options.settings) db.mutate("org.update", { settings: options.settings });
+  db.mutate("org.update", { settings: { autoApprove: false, ...options.settings } });
   db.mutate("computer.register", { id: "laptop", name: "Laptop" });
   db.mutate("session.create", { id: "s", computer: "laptop", ...options.session });
   let messages = 0;
@@ -84,6 +89,15 @@ export async function setup(options: SetupOptions = {}) {
       return claim;
     },
     noTool: (scope = "computer:laptop") => db.mutate("tools.claim", { scope, owner: "box" }, asWorker) === null,
+    review(): Claim<ReviewJob> {
+      const claim = db.mutate("reviews.claim", { owner: "jev" }, asWorker);
+      assert.ok(claim, "a review should be claimable");
+      return claim;
+    },
+    noReview: () => db.mutate("reviews.claim", { owner: "jev" }, asWorker) === null,
+    reviewRequest: (claim: Claim<ReviewJob>) => db.query("session.review", { session: claim.payload.session, step: claim.payload.step }, asWorker),
+    verdicts: (claim: Claim<ReviewJob>, verdicts: Record<string, Verdict>) =>
+      db.mutate("reviews.complete", { ...lease(claim), result: { verdicts } }, asWorker),
     finishTool: (claim: Claim<ToolJob>, content: string, isError = false, scope = "computer:laptop") =>
       db.mutate("tools.complete", { scope, ...lease(claim), result: { content, isError } }, asWorker),
     prompt: (claim: Claim<CompletionJob>) => db.query("session.prompt", { session: claim.payload.session, step: claim.payload.step }, asWorker),

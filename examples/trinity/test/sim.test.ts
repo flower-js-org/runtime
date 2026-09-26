@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_PROFILE, respond, SIMULATED, simulateTool } from "../workers/sim.ts";
+import { DEFAULT_PROFILE, respond, SIMULATED, simulateReview, simulateTool } from "../workers/sim.ts";
 import { setup } from "./support/harness.ts";
 
 // Fast enough that the simulated waits vanish from the test.
@@ -52,4 +52,12 @@ test("simulated latencies follow the speedup", async () => {
   assert.ok(real.firstTokenMs > 200 && real.firstTokenMs < 5_000, `a real first token takes about a second, got ${real.firstTokenMs}`);
   assert.ok(Math.abs(fast.firstTokenMs * 20 - real.firstTokenMs) < 1e-6);
   assert.ok(Math.abs(fast.streamMs * 20 - real.streamMs) < 1e-6);
+});
+
+test("simulated reviews approve most calls, the same way every time", async () => {
+  const job = { session: "s", step: 1, calls: Array.from({ length: 200 }, (_, index) => `c${index}`) };
+  const { verdicts } = await simulateReview(profile, job, signal);
+  assert.deepEqual((await simulateReview(profile, job, signal)).verdicts, verdicts);
+  const approved = Object.values(verdicts).filter((verdict) => verdict.approved).length;
+  assert.ok(approved > 120 && approved < 200, `most but not all calls pass, got ${approved} of 200`);
 });

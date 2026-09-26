@@ -7,6 +7,7 @@ import { mcpCatalog, mcpServers, members, orgs, spend } from "./store.ts";
 export const DEFAULT_SETTINGS: OrgSettings = {
   model: "claude-opus-5",
   computer: null,
+  autoApprove: true,
   webTools: true,
   graceMs: 0,
   contextTokens: 200_000,
@@ -18,6 +19,7 @@ export const DEFAULT_SETTINGS: OrgSettings = {
 const settingsPatch = v.object({
   model: v.optional(v.string({ min: 1, max: 128 })),
   computer: v.optional(v.nullable(id)),
+  autoApprove: v.optional(v.boolean()),
   webTools: v.optional(v.boolean()),
   graceMs: v.optional(v.int({ min: 0, max: 600_000 })),
   contextTokens: v.optional(v.int({ min: 10_000, max: 900_000 })),
@@ -28,6 +30,9 @@ const settingsPatch = v.object({
 
 const callersOrg = (ctx: QueryContext) => caller(ctx).org!;
 const bySubject = (a: Member, b: Member) => (a.subject < b.subject ? -1 : 1);
+
+/** An organization's settings, with defaults for the ones added since it was created. */
+export const settingsOf = (org: Org): OrgSettings => ({ ...DEFAULT_SETTINGS, ...org.settings });
 
 // Organizations
 
@@ -49,7 +54,8 @@ export const myOrgs = query("org.mine", { access: signedIn }, (ctx) =>
 
 export const getOrg = query("org.get", { access: userAccess }, (ctx) => {
   const who = caller(ctx);
-  return { org: ctx.get(orgs, who.org!)!, role: ctx.get(members, [who.org!, who.subject])!.role };
+  const org = ctx.get(orgs, who.org!)!;
+  return { org: { ...org, settings: settingsOf(org) }, role: ctx.get(members, [who.org!, who.subject])!.role };
 });
 
 export const updateOrg = mutation("org.update", {
@@ -57,7 +63,7 @@ export const updateOrg = mutation("org.update", {
   access: adminAccess,
 }, (ctx, args) => {
   const org = ctx.get(orgs, callersOrg(ctx))!;
-  const updated: Org = { ...org, name: args.name ?? org.name, settings: { ...org.settings, ...args.settings } };
+  const updated: Org = { ...org, name: args.name ?? org.name, settings: { ...settingsOf(org), ...args.settings } };
   ctx.set(orgs, org.id, updated);
   return updated;
 });

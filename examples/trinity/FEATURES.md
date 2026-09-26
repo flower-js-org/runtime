@@ -9,6 +9,7 @@ Trinity's features as of September 2026.
   - computer;
   - private or not;
   - tools allowed without asking;
+  - autoapproval by Jev, on unless turned off;
   - web tools on or off;
   - halt grace window;
   - context budget.
@@ -17,6 +18,7 @@ Trinity's features as of September 2026.
 - Streamed text, thinking and tool input are stored every 250 ms, so any viewer can follow live.
 - Tool calls run in parallel once the whole response has arrived.
   - Tools can ask for permission first (approve, deny or always allow) or ask the user a question.
+  - Jev reviews permission requests first, with the conversation that led to them. Calls it is confident the user asked for and that are safe run without asking; the rest ask, saying why. A failed or slow review asks too.
   - Tools have timeouts, and `bash` can run in the background, its result arriving later as a message.
 - Model calls and tool jobs retry within attempt budgets. A tool that isn't safe to repeat never re-runs after a crash; it reports an unknown outcome instead.
 - Refusals, output-limit cutoffs, paused turns, Anthropic's automatic fallback model and adaptive thinking are all handled.
@@ -32,7 +34,7 @@ Trinity's features as of September 2026.
 - Memory: `memory_list`, `memory_read`, `memory_write`.
 - Automations: `create_automation`, `list_automations`, `delete_automation`.
 - Web: `web_search`, `web_fetch`.
-- MCP: every tool of the organization's MCP servers. Trusted servers run without asking; others ask first.
+- MCP: every tool of the organization's MCP servers. Trusted servers run without asking; others ask first, unless Jev approves the call.
 
 ## Models
 
@@ -84,7 +86,7 @@ Issue and PR comments that mention the bot start a session bound to that thread,
 
 ## Clients
 
-- **Web**: a live session list and session view with approvals, attachments, halt and steer, session settings and archive. Pages for computers, automations, memory, usage and settings (members, MCP servers, Slack), a page to connect a Slack account, and links between sessions and their Slack threads.
+- **Web**: a live session list and session view with approvals (and why Jev left them to you), attachments, halt and steer, session settings and archive. Pages for computers, automations, memory, usage and settings (members, MCP servers, Slack), a page to connect a Slack account, and links between sessions and their Slack threads.
 - **CLI**:
   - `login`, `org`, `new`, `list`, `send`, `watch`;
   - `approve`, `deny`, `answer`, `halt`;
@@ -98,4 +100,4 @@ Issue and PR comments that mention the bot start a session bound to that thread,
 - Organizations can live in separate Flower partitions.
 - `dev` starts the whole local stack, and `dev --sim` runs without credentials.
 - `npm run bench` drives thousands of simulated users.
-- 125 tests plus an end-to-end run on a real server that includes a Slack thread.
+- 136 tests plus an end-to-end run on a real server that includes a Slack thread.

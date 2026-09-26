@@ -1,5 +1,6 @@
 import { fail, type MutationContext } from "@flower-js/sdk";
 import { clone, type Session } from "./model.ts";
+import { settingsOf } from "./orgs.ts";
 import { orgs, sessions } from "./store.ts";
 
 /** Request overhead beyond the log (system prompt, tools), for estimating a request's size. */
@@ -45,12 +46,13 @@ export class Tx {
   }
 }
 
-type Configurable = "model" | "system" | "computer" | "private" | "parent" | "source" | "allow" | "webTools" | "graceMs" | "contextTokens";
+type Configurable = "model" | "system" | "computer" | "private" | "parent" | "source" | "allow" | "autoApprove" | "webTools" | "graceMs" | "contextTokens";
 export type SessionInit = Pick<Session, "id" | "org" | "createdBy"> & Partial<Pick<Session, Configurable>>;
 
 /** A new idle session, with the organization's defaults for whatever `init` leaves out. */
 export function newSession(tx: Tx, init: SessionInit): Session {
-  const settings = tx.ctx.get(orgs, init.org)?.settings ?? fail("ORG_NOT_FOUND", `No organization ${init.org}`);
+  const org = tx.ctx.get(orgs, init.org) ?? fail("ORG_NOT_FOUND", `No organization ${init.org}`);
+  const settings = settingsOf(org);
   const now = tx.ctx.now();
   const session: Session = {
     id: init.id,
@@ -71,6 +73,7 @@ export function newSession(tx: Tx, init: SessionInit): Session {
     turn: null,
     queued: [],
     allow: init.allow ?? [],
+    autoApprove: init.autoApprove ?? settings.autoApprove,
     webTools: init.webTools ?? settings.webTools,
     graceMs: init.graceMs ?? settings.graceMs,
     contextTokens: init.contextTokens ?? settings.contextTokens,

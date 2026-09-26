@@ -171,6 +171,7 @@ function print(event: Event, streamed: string): void {
       return console.log(styleText("magenta", `? ${body.prompt}\n  ${how}`));
     }
     case "tool_resolved": return console.log(styleText("dim", `[${body.call} ${body.resolution}]`));
+    case "tool_reviewed": return console.log(styleText("dim", `[${body.call} ${body.approved ? `approved by ${body.reviewer}` : `not approved: ${body.note ?? `${body.reviewer} was not sure`}`}]`));
     case "subagent": return console.log(styleText("dim", `[subagent ${body.session} for ${body.call}; trinity watch ${body.session}]`));
     case "compact": return console.log(styleText("dim", `[context summarized: ${body.summary.length} characters]`));
     case "error": return console.log(styleText("red", `! ${body.code}: ${body.message}${body.retryInMs === null ? "" : ` (retrying in ${body.retryInMs} ms)`}`));
@@ -427,11 +428,14 @@ const commands: Record<string, (args: string[]) => Promise<void>> = {
 
   async service() {
     const store = blobs();
+    const secrets = envSecrets();
+    const typesafe = secrets("typesafe_key");
     await runService(await workerClient(), {
       signal: untilSignal(),
-      secrets: envSecrets(),
-      // The simulation names sessions itself.
-      ...(env.TRINITY_SIM ? {} : { anthropic: new Anthropic() }),
+      secrets,
+      // The simulation names sessions and reviews calls itself.
+      ...(env.TRINITY_SIM ? { loops: ["tools", "sealing", "catalog", "github", "billing"] } : { anthropic: new Anthropic() }),
+      ...(typesafe ? { jev: { apiKey: typesafe } } : {}),
       log,
       ...(store ? { blobs: store } : {}),
       ...(env.TRINITY_PUBLIC_URL ? { publicUrl: env.TRINITY_PUBLIC_URL } : {}),

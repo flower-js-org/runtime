@@ -154,6 +154,7 @@ const delegation = [
         private: session.private,
         parent: { session: session.id, call: call.id },
         allow: session.allow,
+        autoApprove: session.autoApprove,
         webTools: session.webTools,
         system: "You are a subagent. Complete the task you are given and reply with your findings; the user does not see this conversation.",
       });

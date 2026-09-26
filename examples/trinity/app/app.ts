@@ -9,6 +9,7 @@ import {
 } from "./jobs.ts";
 import { deleteMemory, listMemory, readMemory, writeMemory } from "./memories.ts";
 import { createOrg, getOrg, listMcp, listMembers, myOrgs, orgUsage, removeMcp, removeMember, setMcp, setMember, updateOrg } from "./orgs.ts";
+import { claimReview, completeReview, failReview, reviewRequest } from "./reviews.ts";
 import { completeSeal, readEvents } from "./sealing.ts";
 import {
   haltSlack, installSlack, linkSlack, receiveSlack, resolveSlack, slackInstallations, slackPosted, slackStatus, slackWhois, uninstallSlack, unlinkSlack,
@@ -16,7 +17,7 @@ import {
 import { archive, blobAccess, configure, create, get, halt, list, prompt, resolve, send, tail } from "./sessions.ts";
 import {
   automations, billing, blobRefs, completions, computers, events, mcpCatalog, mcpServers, members, memories, outbound, partials, provision,
-  sealing, segments, sessions, slackInstalls, slackLinks, slackMessages, spend, titles, toolJobs, usage,
+  reviews, sealing, segments, sessions, slackInstalls, slackLinks, slackMessages, spend, titles, toolJobs, usage,
 } from "./store.ts";
 import { receiveSurface } from "./surfaces.ts";
 import { timers } from "./timers.ts";
@@ -33,7 +34,7 @@ const forWorkers = { access: workerAccess };
 
 export function makeApp(options: AppOptions) {
   return define({
-    uses: [completions, toolJobs, outbound, provision, billing, sealing, timers, titles, mcpCatalog],
+    uses: [completions, toolJobs, reviews, outbound, provision, billing, sealing, timers, titles, mcpCatalog],
     collections: [
       sessions, events, partials, segments, members, usage, mcpServers, computers, automations, memories, blobRefs,
       slackInstalls, slackLinks, slackMessages,
@@ -97,6 +98,7 @@ export function makeApp(options: AppOptions) {
 
       // Workers
       "session.prompt": prompt,
+      "session.review": reviewRequest,
       "session.events": readEvents,
       "slack.installations": slackInstallations,
       "slack.posted": slackPosted,
@@ -110,6 +112,10 @@ export function makeApp(options: AppOptions) {
       "tools.complete": completeTool,
       "tools.fail": failTool,
       ...toolJobs.http("tools", { scope: "argument", methods: ["renew", "ready", "stats", "get"], access: scopeAccess }),
+      "reviews.claim": claimReview,
+      "reviews.complete": completeReview,
+      "reviews.fail": failReview,
+      ...reviews.http("reviews", { methods: ["renew", "ready", "stats", "get"], ...forWorkers }),
       "provision.claim": claimProvision,
       "provision.complete": completeProvision,
       "provision.fail": failProvision,

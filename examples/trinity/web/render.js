@@ -368,12 +368,14 @@ export function viewItems(events, session) {
   const calls = new Map();
   const results = new Map();
   const resolutions = new Map();
+  const reviews = new Map();
   for (const event of events) {
     const body = event.body;
     if (body.type === "assistant") {
       for (const block of body.blocks) if (block.type === "tool_call") calls.set(block.id, block);
     } else if (body.type === "tool_result") results.set(body.call, { ...body, seq: event.seq });
     else if (body.type === "tool_resolved") resolutions.set(body.call, body.resolution);
+    else if (body.type === "tool_reviewed") reviews.set(body.call, body);
   }
   const live = session?.turn?.calls ?? {};
   const prompted = new Set();
@@ -406,9 +408,13 @@ export function viewItems(events, session) {
         prompted.add(body.call);
         const awaiting = live[body.call]?.state === "awaiting";
         const resolution = resolutions.get(body.call) ?? null;
-        push(event, "awaiting", `${awaiting}:${resolution}`, { awaiting, resolution, call: calls.get(body.call) ?? null });
+        push(event, "awaiting", `${awaiting}:${resolution}`, { awaiting, resolution, call: calls.get(body.call) ?? null, review: reviews.get(body.call) ?? null });
         break;
       }
+      case "tool_reviewed":
+        // A call the reviewer left to the user shows why on its prompt.
+        if (body.approved) push(event, "reviewed", "", { call: calls.get(body.call) ?? null });
+        break;
       case "background_result":
       case "subagent":
         push(event, body.type === "subagent" ? "subagent" : "background", "", { call: calls.get(body.call) ?? null });
@@ -429,7 +435,7 @@ export function viewItems(events, session) {
   for (const call of Object.values(live)) {
     if (call.state !== "awaiting" || prompted.has(call.id)) continue;
     items.push({
-      key: `await:${call.id}`, sig: "awaiting:live", kind: "awaiting", awaiting: true, resolution: null, call,
+      key: `await:${call.id}`, sig: "awaiting:live", kind: "awaiting", awaiting: true, resolution: null, call, review: reviews.get(call.id) ?? null,
       event: { seq: 0, at: 0, body: { type: "tool_awaiting", call: call.id, kind: call.approval ?? "permission", prompt: call.name } },
     });
   }
@@ -447,7 +453,7 @@ function outputLink(blob, opts) {
 
 function toolCall(call, result, state, opts) {
   const status = result ? (result.isError ? "error" : "done") : state ?? "pending";
-  const label = { done: "Done", error: "Failed", awaiting: "Waiting for you", running: "Running" }[status] ?? "";
+  const label = { done: "Done", error: "Failed", awaiting: "Waiting for you", reviewing: "Reviewing", running: "Running" }[status] ?? "";
   return html`<details class="tool ${status}" data-k="call:${call.id}">
 <summary><span class="tool-dot" aria-hidden="true"></span><span class="tool-name">${call.name}</span><span class="tool-summary">${toolSummary(call.input)}</span>${label ? html`<span class="tool-state">${label}</span>` : ""}</summary>
 <div class="tool-body">${call.input === null ? "" : html`<div class="tool-label">Input</div><pre class="code">${inputText(call.input)}</pre>`}${result ? html`<div class="tool-label">${result.isError ? "Error" : "Result"}</div><pre class="code result">${result.content}</pre>${outputLink(result.blob, opts)}` : ""}</div>
@@ -477,6 +483,15 @@ function attachments(list, opts) {
 
 const marker = (text, extra = "") => html`<div class="marker ${extra}"><span>${text}</span></div>`;
 
+/** A reviewer's answers, like "requested 0.97 · safe 0.42". */
+const scoreText = (scores) => Object.entries(scores).map(([question, score]) => `${question} ${score.toFixed(2)}`).join(" · ");
+
+function reviewNote(review) {
+  if (review === null || review.approved) return "";
+  const why = review.note ?? `${review.reviewer} was not confident enough (${scoreText(review.scores)})`;
+  return html`<div class="hint">Not auto-approved: ${why}</div>`;
+}
+
 const RESOLUTIONS = { approved: "approved", denied: "denied", answered: "answered", preempted: "skipped for a new message", cancelled: "cancelled", timed_out: "timed out" };
 
 function awaitingCard(item) {
@@ -496,6 +511,7 @@ function awaitingCard(item) {
   return html`<div class="card prompt" role="group" aria-label="Permission request">
 <div class="card-title">Allow <code>${name || prompt}</code>?</div>
 ${prompt && prompt !== name ? html`<div class="prompt-text">${prompt}</div>` : ""}
+${reviewNote(item.review ?? null)}
 ${item.call ? html`<details class="prompt-input" data-k="await:${callId}"><summary>Input</summary><pre class="code">${inputText(item.call.input)}</pre></details>` : ""}
 <div class="actions"><button type="button" class="primary" data-action="approve" data-call="${callId}">Approve</button><button type="button" data-action="always" data-call="${callId}">Always allow</button><button type="button" class="danger" data-action="deny" data-call="${callId}">Deny</button></div></div>`;
 }
@@ -528,6 +544,11 @@ export function itemHtml(item, opts) {
       return html`<div class="msg assistant">${toolCall({ id: body.call, name: "Tool result", input: null }, body, null, opts)}</div>`.html;
     case "awaiting":
       return awaitingCard(item).html;
+    case "reviewed": {
+      const scores = scoreText(body.scores);
+      const what = item.call ? `${item.call.name} ${oneLine(toolSummary(item.call.input), 60)}`.trim() : "a tool call";
+      return html`<div class="marker resolved" title="${`Reviewed by ${body.reviewer}${scores ? `: ${scores}` : ""}`}"><span>Auto-approved ${what}</span></div>`.html;
+    }
     case "background": {
       const name = item.call ? `${item.call.name} ${toolSummary(item.call.input)}` : body.call;
       return html`<div class="msg assistant"><details class="tool ${body.isError ? "error" : "done"} background" data-k="bg:${event.seq}">
